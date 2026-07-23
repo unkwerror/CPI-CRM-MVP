@@ -29,7 +29,7 @@ import type {
   SourceRow,
 } from './types.js';
 
-const LYNCH_SLOTS = Object.freeze([
+export const LYNCH_SLOTS = Object.freeze([
   { name: 3, phone: 4, student: 5, faculty: 6, education: 7, course: 8, email: 2 },
   { name: 9, phone: 10, student: 11, faculty: 12, education: 13, course: 14 },
   { name: 15, phone: 16, student: 17, faculty: 18, education: 19, course: 20 },
@@ -90,7 +90,7 @@ function dedupeContacts(
   return deepFreeze([...contacts.values()]) as readonly ContactObservation[];
 }
 
-function contactTypeForHeader(header: string): ContactType | null {
+export function contactTypeForHeader(header: string): ContactType | null {
   const normalized = canonicalHeader(header);
   if (/telegram|телеграм|telegam|(?:^| )тг(?: |$)/iu.test(normalized)) return 'TELEGRAM';
   if (/(?:e ?mail|email|электронн\w* почт|почта|почты|почту)/iu.test(normalized)) return 'EMAIL';

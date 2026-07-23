@@ -6,7 +6,7 @@ import { dirname, resolve } from 'node:path';
 
 import { assertControlsPassed, auditImportPlan } from './audit.js';
 import { DEFAULT_TIMEZONE, DEFAULT_WORKBOOK_FILENAME } from './constants.js';
-import { commitImportPlan } from './postgres.js';
+import { backfillPersonAttributes, commitImportPlan } from './postgres.js';
 import { renderJsonReport, renderMarkdownReport } from './report.js';
 import type { CommitOptions } from './types.js';
 import { readWorkbookImportPlan } from './workbook.js';
@@ -17,7 +17,7 @@ if (existsSync(envFile)) process.loadEnvFile(envFile);
 
 interface CliArguments {
   readonly help: boolean;
-  readonly mode: 'DRY_RUN' | 'COMMIT';
+  readonly mode: 'DRY_RUN' | 'COMMIT' | 'BACKFILL_ATTRIBUTES';
   readonly workbookPath?: string;
   readonly databaseUrl?: string;
   readonly organizationId?: string;
@@ -36,6 +36,8 @@ const HELP = `Использование:
 Режимы:
   --dry-run                       Проверить книгу, PostgreSQL не открывается
   --commit                        Выполнить одну транзакцию PostgreSQL
+  --backfill-attributes           Достроить атрибуты участников из уже
+                                  импортированных source_records (без книги)
 
 Параметры:
   --file <path>                   XLSX (по умолчанию исходная книга в корне репозитория)
@@ -69,6 +71,7 @@ function parseValue(
 function parseArguments(argv: readonly string[]): CliArguments {
   let dryRun = false;
   let commit = false;
+  let backfillAttributes = false;
   let help = false;
   let workbookPath: string | undefined;
   let databaseUrl: string | undefined;
@@ -86,6 +89,7 @@ function parseArguments(argv: readonly string[]): CliArguments {
     if (argument === '--') continue;
     if (argument === '--dry-run') dryRun = true;
     else if (argument === '--commit') commit = true;
+    else if (argument === '--backfill-attributes') backfillAttributes = true;
     else if (argument === '--help' || argument === '-h') help = true;
     else {
       const names = [
@@ -116,12 +120,14 @@ function parseArguments(argv: readonly string[]): CliArguments {
       else if (name === '--report-dir') reportDirectory = parsed.value;
     }
   }
-  if (dryRun && commit) throw new Error('Choose only one of --dry-run and --commit');
+  if ([dryRun, commit, backfillAttributes].filter(Boolean).length > 1) {
+    throw new Error('Choose only one of --dry-run, --commit and --backfill-attributes');
+  }
 
   return {
     help,
     // The safe default is a read-only audit.
-    mode: commit ? 'COMMIT' : 'DRY_RUN',
+    mode: commit ? 'COMMIT' : backfillAttributes ? 'BACKFILL_ATTRIBUTES' : 'DRY_RUN',
     ...(workbookPath === undefined ? {} : { workbookPath }),
     ...(databaseUrl === undefined ? {} : { databaseUrl }),
     ...(organizationId === undefined ? {} : { organizationId }),
@@ -163,6 +169,16 @@ async function main(): Promise<void> {
   const args = parseArguments(process.argv.slice(2));
   if (args.help) {
     process.stdout.write(HELP);
+    return;
+  }
+
+  if (args.mode === 'BACKFILL_ATTRIBUTES') {
+    const databaseUrl = args.databaseUrl ?? process.env.DATABASE_URL;
+    if (databaseUrl === undefined) {
+      throw new Error('--backfill-attributes requires a database URL (flag or environment)');
+    }
+    const backfill = await backfillPersonAttributes(databaseUrl);
+    process.stdout.write(`${JSON.stringify({ mode: args.mode, ...backfill })}\n`);
     return;
   }
 

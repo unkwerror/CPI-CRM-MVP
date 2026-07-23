@@ -25,9 +25,63 @@ import { EditPersonDialog } from '@/components/edit-person-dialog';
 import { EmptyState } from '@/components/empty-state';
 import { StatusBadge } from '@/components/status-badge';
 import { ApiError, api, formatDate, initials } from '@/lib/api';
-import type { CurrentUser, PersonDetail } from '@/lib/types';
+import type { CurrentUser, PersonAttribute, PersonDetail } from '@/lib/types';
 
 type Tab = 'overview' | 'events' | 'artifacts' | 'history' | 'sources';
+
+/** Display order for structured source attributes; unknown fields go last. */
+const ATTRIBUTE_FIELD_ORDER = [
+  'age',
+  'university',
+  'workplace',
+  'universityRelation',
+  'faculty',
+  'specialty',
+  'educationLevel',
+  'educationForm',
+  'educationBasis',
+  'courseYear',
+  'studentStatus',
+  'studyStart',
+  'studyEnd',
+  'company',
+  'jobTitle',
+  'workStart',
+  'workEnd',
+  'city',
+  'region',
+  'role',
+  'participationFormat',
+  'applicationStatus',
+  'applicationDate',
+  'attendanceDate',
+  'attendedEvent',
+  'eventsAttended',
+  'projectName',
+  'projectDescription',
+  'projectTeam',
+  'teamSize',
+  'projectDirection',
+  'projectStage',
+  'supervisorName',
+  'supervisorPosition',
+  'competencies',
+  'communicationStatus',
+  'testScore',
+  'materials',
+  'blackMark',
+  'note',
+];
+
+function sortAttributes(attributes: PersonAttribute[]): PersonAttribute[] {
+  const rank = (attribute: PersonAttribute) => {
+    const index = ATTRIBUTE_FIELD_ORDER.indexOf(attribute.field);
+    return index === -1 ? ATTRIBUTE_FIELD_ORDER.length : index;
+  };
+  return [...attributes].sort(
+    (a, b) => rank(a) - rank(b) || a.label.localeCompare(b.label, 'ru'),
+  );
+}
 
 const ARTIFACT_TYPES = [
   {
@@ -365,6 +419,33 @@ export function PersonPageClient({ id }: { id: string }) {
               {person.affiliations.length === 0 && <p className="muted">Организация не связана.</p>}
             </div>
           </article>
+          {person.attributes.length > 0 && (
+            <article className="panel panel--wide">
+              <header className="panel__header">
+                <div>
+                  <p className="eyebrow">Из импортированных источников</p>
+                  <h2>Данные об участнике</h2>
+                </div>
+              </header>
+              <div className="detail-list">
+                {sortAttributes(person.attributes).map((attribute, index) => (
+                  <div className="detail-row" key={`${attribute.field}-${index}`}>
+                    <span>
+                      <small>{attribute.label}</small>
+                      <strong>{attribute.value}</strong>
+                      {attribute.sources.length > 0 && (
+                        <em>
+                          {attribute.sources
+                            .map((source) => `${source.sheetName}:${source.rowNumber}`)
+                            .join(', ')}
+                        </em>
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </article>
+          )}
           <article className="panel panel--wide">
             <header className="panel__header">
               <div>

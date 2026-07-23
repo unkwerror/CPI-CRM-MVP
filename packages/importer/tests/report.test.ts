@@ -115,6 +115,7 @@ describe('reports', () => {
           artifactContributors: 118,
           provenanceLinks: 60_090,
           fieldObservations: 36_140,
+          personAttributes: 48_000,
           duplicateCandidates: 1_602,
         },
       },

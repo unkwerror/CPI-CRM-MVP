@@ -49,6 +49,15 @@ export interface PersonDetail extends PersonSummary {
   events: PersonEventSummary[];
   tasks: TaskSummary[];
   sources: SourceSummary[];
+  attributes: PersonAttribute[];
+}
+
+/** Structured participant data recovered from imported source rows. */
+export interface PersonAttribute {
+  field: string;
+  label: string;
+  value: string;
+  sources: { sheetName: string; rowNumber: number }[];
 }
 
 export interface ArtifactSummary {

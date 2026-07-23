@@ -1,3 +1,4 @@
+export * from './attributes.js';
 export * from './audit.js';
 export * from './artifacts.js';
 export * from './cell.js';

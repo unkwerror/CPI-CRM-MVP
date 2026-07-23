@@ -4,6 +4,7 @@ import { autoResolveDuplicateCandidatesInTransaction } from '@cpi-crm/db';
 import { collapseWhitespace, normalizeFullName } from '@cpi-crm/domain';
 import { Pool, type PoolClient } from 'pg';
 
+import { extractPersonAttributes, type AttributeSourceRow } from './attributes.js';
 import { DEFAULT_TIMEZONE, IMPORTER_VERSION, PARSER_VERSION, RULES_VERSION } from './constants.js';
 import { fingerprint } from './hash.js';
 import {
@@ -985,6 +986,139 @@ async function persistProvenance(
   return { links, fields };
 }
 
+const INSERT_PERSON_ATTRIBUTES_SQL = `insert into field_observations
+   (id, entity_type, entity_id, field_name, raw_value, normalized_value,
+    source_record_id, is_canonical)
+ select x.id, 'PERSON', x.entity_id, x.field_name, x.raw_value,
+   x.normalized_value, x.source_record_id, false
+ from jsonb_to_recordset($1::jsonb) as x(
+   id uuid, entity_id uuid, field_name text, raw_value jsonb,
+   normalized_value jsonb, source_record_id uuid)
+ where not exists (
+   select 1 from field_observations f
+    where f.entity_type = 'PERSON'
+      and f.entity_id = x.entity_id
+      and f.field_name = x.field_name
+      and f.source_record_id is not distinct from x.source_record_id
+      and f.raw_value = x.raw_value)`;
+
+function personAttributeRows(
+  personId: string,
+  sourceRecordId: string,
+  row: AttributeSourceRow,
+  slotKey: string,
+  dedupe: Set<string>,
+): Record<string, unknown>[] {
+  const rows: Record<string, unknown>[] = [];
+  for (const attribute of extractPersonAttributes(row, slotKey)) {
+    const key = [personId, sourceRecordId, attribute.field, attribute.label, attribute.value].join(
+      '\u0000',
+    );
+    if (dedupe.has(key)) continue;
+    dedupe.add(key);
+    rows.push({
+      id: randomUUID(),
+      entity_id: personId,
+      field_name: attribute.field,
+      raw_value: { label: attribute.label, value: attribute.value },
+      normalized_value: attribute.value.toLocaleLowerCase('ru'),
+      source_record_id: sourceRecordId,
+    });
+  }
+  return rows;
+}
+
+/**
+ * Persists non-contact participant attributes (university, project, statuses…)
+ * as PERSON field observations so imported knowledge is queryable instead of
+ * living only inside source_records.raw_json.
+ */
+async function persistPersonAttributes(
+  client: PoolClient,
+  plan: WorkbookImportPlan,
+  assignments: readonly Assignment[],
+): Promise<number> {
+  const rowsByKey = new Map(
+    plan.sourceRows.map((row) => [sourceKey(row.sheetName, row.rowNumber), row]),
+  );
+  const dedupe = new Set<string>();
+  const rows: Record<string, unknown>[] = [];
+  for (const assignment of assignments) {
+    const sourceRow = rowsByKey.get(
+      sourceKey(assignment.observation.sheetName, assignment.observation.rowNumber),
+    );
+    if (sourceRow === undefined) continue;
+    rows.push(
+      ...personAttributeRows(
+        assignment.personId,
+        assignment.sourceRecordId,
+        sourceRow,
+        assignment.observation.slotKey,
+        dedupe,
+      ),
+    );
+  }
+  return insertJsonRows(client, INSERT_PERSON_ATTRIBUTES_SQL, rows);
+}
+
+export interface BackfillAttributesResult {
+  readonly observationsScanned: number;
+  readonly attributesCreated: number;
+}
+
+/**
+ * Recovers attributes for observations that were imported before attribute
+ * extraction existed, reading the immutable raw row JSON already stored in
+ * source_records. Safe to re-run: existing rows are skipped.
+ */
+export async function backfillPersonAttributes(databaseUrl: string): Promise<BackfillAttributesResult> {
+  const pool = new Pool({ connectionString: databaseUrl, max: 1 });
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    const observations = await client.query<{
+      person_id: string;
+      slot_key: string;
+      source_record_id: string;
+      raw_json: { sheetName: string; cells: AttributeSourceRow['cells'] };
+    }>(
+      `select po.resolved_person_id as person_id, po.slot_key,
+              sr.id as source_record_id, sr.raw_json
+         from person_observations po
+         join source_records sr on sr.id = po.source_record_id
+         join persons p on p.id = po.resolved_person_id
+        where po.resolution_status = 'RESOLVED'
+          and po.resolved_person_id is not null
+          and p.archived_at is null`,
+    );
+    const dedupe = new Set<string>();
+    const rows: Record<string, unknown>[] = [];
+    for (const observation of observations.rows) {
+      rows.push(
+        ...personAttributeRows(
+          observation.person_id,
+          observation.source_record_id,
+          {
+            sheetName: observation.raw_json.sheetName,
+            cells: observation.raw_json.cells ?? [],
+          },
+          observation.slot_key,
+          dedupe,
+        ),
+      );
+    }
+    const attributesCreated = await insertJsonRows(client, INSERT_PERSON_ATTRIBUTES_SQL, rows);
+    await client.query('commit');
+    return { observationsScanned: observations.rowCount ?? 0, attributesCreated };
+  } catch (error) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+    await pool.end();
+  }
+}
+
 async function queueDuplicateCandidates(
   client: PoolClient,
   organizationId: string,
@@ -1221,6 +1355,7 @@ export async function commitImportPlan(
       contacts.observationContacts,
       contacts.createdContactIds,
     );
+    const personAttributes = await persistPersonAttributes(client, plan, people.assignments);
     const duplicateCandidates = await queueDuplicateCandidates(
       client,
       options.organizationId,
@@ -1254,6 +1389,7 @@ export async function commitImportPlan(
         artifactContributors: legacyArtifacts.artifactContributors,
         provenanceLinks: provenance.links + eventFacts.links + legacyArtifacts.provenanceLinks,
         fieldObservations: provenance.fields,
+        personAttributes,
         duplicateCandidates,
       },
     };

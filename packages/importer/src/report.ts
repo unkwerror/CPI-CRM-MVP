@@ -68,6 +68,7 @@ export function renderMarkdownReport(report: AuditReport): string {
       `- Создано ArtifactVersion: ${report.commit.created.artifactVersions}`,
       `- Создано ArtifactContributor: ${report.commit.created.artifactContributors}`,
       `- Создано provenance-связей: ${report.commit.created.provenanceLinks}`,
+      `- Создано атрибутов участников: ${report.commit.created.personAttributes}`,
       `- Поставлено кандидатов дублей: ${report.commit.created.duplicateCandidates}`,
       `- Политика дублей: \`${report.commit.deduplication.policyVersion}\``,
       `- Объединено карточек: ${report.commit.deduplication.mergedProfiles}`,

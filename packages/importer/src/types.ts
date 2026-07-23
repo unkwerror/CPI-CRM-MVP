@@ -161,6 +161,7 @@ export interface CommitResult {
     readonly artifactContributors: number;
     readonly provenanceLinks: number;
     readonly fieldObservations: number;
+    readonly personAttributes: number;
     readonly duplicateCandidates: number;
   };
 }
