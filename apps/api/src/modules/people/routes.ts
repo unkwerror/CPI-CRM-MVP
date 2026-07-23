@@ -397,10 +397,11 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
           lifecycle_data_state: 'LEGACY_INCOMPLETE' | 'COMPLETE';
           activated_at: Date | null;
           next_status_transition_at: Date | null;
+          notes: string | null;
         }
       >(
         `SELECT p.id, p.canonical_full_name, p.normalized_full_name, p.activation_state,
-                ${LIVE_ACTIVITY_SQL} AS live_activity_status, p.last_artifact_at,
+                ${LIVE_ACTIVITY_SQL} AS live_activity_status, p.last_artifact_at, p.notes,
                 p.lifecycle_data_state, p.activated_at, p.next_status_transition_at, p.version,
                 affiliation.organization_name, affiliation.faculty,
                 contact.primary_contact, owner.display_name AS owner_name,
@@ -425,17 +426,8 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
       const canReadContacts = hasPermission(request.authUser!.roles, Permissions.CONTACTS_READ);
       const canReadRaw = hasPermission(request.authUser!.roles, Permissions.IMPORTS_READ_RAW);
       const clusterSql = `(SELECT id FROM persons WHERE id = $1 OR merged_into_person_id = $1)`;
-      const [
-        contacts,
-        aliases,
-        affiliations,
-        artifacts,
-        tasks,
-        sources,
-        tags,
-        participations,
-        attributeRows,
-      ] = await Promise.all([
+      const [contacts, aliases, affiliations, artifacts, tasks, sources, tags, participations] =
+        await Promise.all([
           app.pool.query(
             `SELECT id, type, raw_value, is_primary FROM contact_points WHERE person_id IN ${clusterSql} AND archived_at IS NULL ORDER BY is_primary DESC, created_at`,
             [canonical],
@@ -521,53 +513,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
                      e.name, ep.id`,
             [canonical],
           ),
-          app.pool.query<{
-            field_name: string;
-            raw_value: { label?: string; value?: string } | null;
-            sheet_name: string | null;
-            row_number: number | null;
-          }>(
-            `SELECT fo.field_name, fo.raw_value, sr.sheet_name, sr.row_number
-               FROM field_observations fo
-               LEFT JOIN source_records sr ON sr.id = fo.source_record_id
-              WHERE fo.entity_type = 'PERSON'
-                AND fo.entity_id IN ${clusterSql}
-                AND fo.field_name <> 'canonicalFullName'
-                AND fo.valid_to IS NULL
-              ORDER BY fo.field_name, sr.sheet_name, sr.row_number, fo.created_at`,
-            [canonical],
-          ),
         ]);
-      const attributeMap = new Map<
-        string,
-        {
-          field: string;
-          label: string;
-          value: string;
-          sources: Array<{ sheetName: string; rowNumber: number }>;
-        }
-      >();
-      for (const item of attributeRows.rows) {
-        const label = item.raw_value?.label?.trim() ?? item.field_name;
-        const value = item.raw_value?.value?.trim() ?? '';
-        if (value.length === 0) continue;
-        const key = `${item.field_name}\u0000${label}\u0000${value}`;
-        let attribute = attributeMap.get(key);
-        if (!attribute) {
-          attribute = { field: item.field_name, label, value, sources: [] };
-          attributeMap.set(key, attribute);
-        }
-        if (
-          item.sheet_name !== null &&
-          item.row_number !== null &&
-          !attribute.sources.some(
-            (source) =>
-              source.sheetName === item.sheet_name && source.rowNumber === item.row_number,
-          )
-        ) {
-          attribute.sources.push({ sheetName: item.sheet_name, rowNumber: item.row_number });
-        }
-      }
       const mappedArtifacts = artifacts.rows.map((item) => ({
         id: item.id,
         title: item.title,
@@ -653,7 +599,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
           fields: sourceFields(item.raw_json),
         })),
         tags: tags.rows.map((item) => item.name),
-        attributes: [...attributeMap.values()],
+        notes: row.notes ?? null,
       };
     },
   );
@@ -678,6 +624,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
         organization?: string | null;
         faculty?: string | null;
         roleTitle?: string | null;
+        notes?: string | null;
         contacts?: Array<{
           id?: string;
           type: 'EMAIL' | 'PHONE' | 'TELEGRAM' | 'MAX' | 'OTHER';
@@ -737,11 +684,12 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
               SET canonical_full_name = $2,
                   normalized_full_name = $3,
                   owner_user_id = $4,
+                  notes = CASE WHEN $5 THEN $6 ELSE notes END,
                   version = version + 1,
                   updated_at = now()
             WHERE id = $1
             RETURNING id, version`,
-          [id, name, normalized, nextOwnerUserId],
+          [id, name, normalized, nextOwnerUserId, body.notes !== undefined, body.notes ?? null],
         );
 
         if (body.canonicalFullName !== undefined) {

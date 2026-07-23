@@ -1029,6 +1029,40 @@ function personAttributeRows(
 }
 
 /**
+ * Collates imported attributes into the editable person notes. Only fills
+ * empty notes so a later manual edit is never overwritten.
+ */
+async function fillEmptyNotesFromAttributes(
+  client: PoolClient,
+  personIds: readonly string[],
+): Promise<number> {
+  if (personIds.length === 0) return 0;
+  const result = await client.query(
+    `update persons p
+        set notes = agg.txt, updated_at = now()
+       from (
+         select fo.entity_id,
+                string_agg(
+                  distinct (fo.raw_value ->> 'label') || ': ' || (fo.raw_value ->> 'value'),
+                  E'\n'
+                  order by (fo.raw_value ->> 'label') || ': ' || (fo.raw_value ->> 'value')
+                ) as txt
+           from field_observations fo
+          where fo.entity_type = 'PERSON'
+            and fo.field_name <> 'canonicalFullName'
+            and fo.valid_to is null
+            and fo.raw_value ? 'label'
+            and fo.entity_id = any($1::uuid[])
+          group by fo.entity_id
+       ) agg
+      where p.id = agg.entity_id
+        and (p.notes is null or p.notes = '')`,
+    [personIds],
+  );
+  return result.rowCount ?? 0;
+}
+
+/**
  * Persists non-contact participant attributes (university, project, statuses…)
  * as PERSON field observations so imported knowledge is queryable instead of
  * living only inside source_records.raw_json.
@@ -1058,12 +1092,17 @@ async function persistPersonAttributes(
       ),
     );
   }
-  return insertJsonRows(client, INSERT_PERSON_ATTRIBUTES_SQL, rows);
+  const created = await insertJsonRows(client, INSERT_PERSON_ATTRIBUTES_SQL, rows);
+  await fillEmptyNotesFromAttributes(client, [
+    ...new Set(assignments.map((assignment) => assignment.personId)),
+  ]);
+  return created;
 }
 
 export interface BackfillAttributesResult {
   readonly observationsScanned: number;
   readonly attributesCreated: number;
+  readonly notesFilled: number;
 }
 
 /**
@@ -1108,8 +1147,11 @@ export async function backfillPersonAttributes(databaseUrl: string): Promise<Bac
       );
     }
     const attributesCreated = await insertJsonRows(client, INSERT_PERSON_ATTRIBUTES_SQL, rows);
+    const notesFilled = await fillEmptyNotesFromAttributes(client, [
+      ...new Set(observations.rows.map((observation) => observation.person_id)),
+    ]);
     await client.query('commit');
-    return { observationsScanned: observations.rowCount ?? 0, attributesCreated };
+    return { observationsScanned: observations.rowCount ?? 0, attributesCreated, notesFilled };
   } catch (error) {
     await client.query('rollback');
     throw error;

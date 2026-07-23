@@ -68,6 +68,7 @@ export const PatchPersonBody = Type.Object({
   organization: Type.Optional(Type.Union([Type.String({ maxLength: 500 }), Type.Null()])),
   faculty: Type.Optional(Type.Union([Type.String({ maxLength: 500 }), Type.Null()])),
   roleTitle: Type.Optional(Type.Union([Type.String({ maxLength: 500 }), Type.Null()])),
+  notes: Type.Optional(Type.Union([Type.String({ maxLength: 50_000 }), Type.Null()])),
   contacts: Type.Optional(Type.Array(PatchPersonContactInput, { maxItems: 20 })),
 });
 

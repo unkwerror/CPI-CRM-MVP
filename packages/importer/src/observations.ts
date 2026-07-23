@@ -268,7 +268,10 @@ function extractGeneric(row: SourceRow): PersonObservation {
     slotKey: 'person-1',
     fullName: catalyst ? textAt(row, 2) : genericFullName(row),
     contacts,
-    eventName: catalyst ? textAt(row, 22) : row.sheetName,
+    // Every sheet is exactly one CRM event. Catalyst sub-event names from
+    // column 22 stay available in source rows but no longer fan out into
+    // dozens of separate events.
+    eventName: row.sheetName,
     sourceNamespace: catalyst ? CATALYST_2025_NAMESPACE : null,
     externalId: catalyst ? textAt(row, 1) : null,
   });

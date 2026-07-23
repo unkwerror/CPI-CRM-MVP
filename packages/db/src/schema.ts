@@ -396,6 +396,7 @@ export const persons = pgTable(
       .references(() => organizations.id, { onDelete: 'restrict' }),
     canonicalFullName: text('canonical_full_name').notNull(),
     normalizedFullName: text('normalized_full_name').notNull(),
+    notes: text('notes'),
     ownerUserId: uuid('owner_user_id').references(() => appUsers.id, { onDelete: 'set null' }),
     lifecycleDataState: lifecycleDataStateEnum('lifecycle_data_state')
       .notNull()

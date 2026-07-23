@@ -157,9 +157,36 @@ const EXCLUDED_HEADER_PATTERNS: readonly RegExp[] = [
   /^(?:отметка времени|время создания)$/u,
 ];
 
+const JS_DATE_TEXT =
+  /\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (\d{2}) (\d{4}) (\d{2}):(\d{2}):\d{2} GMT[+-]\d{4} \([^)]*\)/gu;
+
+const MONTH_NUMBERS: Readonly<Record<string, string>> = {
+  Jan: '01',
+  Feb: '02',
+  Mar: '03',
+  Apr: '04',
+  May: '05',
+  Jun: '06',
+  Jul: '07',
+  Aug: '08',
+  Sep: '09',
+  Oct: '10',
+  Nov: '11',
+  Dec: '12',
+};
+
+/** Date cells surface as verbose JS date strings; render them as DD.MM.YYYY HH:MM. */
+function humanizeJsDates(text: string): string {
+  return text.replace(
+    JS_DATE_TEXT,
+    (_match, month: string, day: string, year: string, hours: string, minutes: string) =>
+      `${day}.${MONTH_NUMBERS[month]}.${year} ${hours}:${minutes}`,
+  );
+}
+
 function attributeValue(cell: SerializedCell): string {
   if (cell.kind === 'formula' || cell.kind === 'error') return '';
-  const text = collapseWhitespace(serializedCellText(cell));
+  const text = humanizeJsDates(collapseWhitespace(serializedCellText(cell)));
   if (text.length === 0) return '';
   return text.length > MAX_ATTRIBUTE_VALUE_LENGTH
     ? `${text.slice(0, MAX_ATTRIBUTE_VALUE_LENGTH)}…`

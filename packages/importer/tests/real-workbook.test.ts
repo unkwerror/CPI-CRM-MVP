@@ -111,13 +111,13 @@ describe('real CPI workbook controls', () => {
         .map((entry) => normalizeFullName(entry.eventName)),
     );
 
+    // Every sheet maps to exactly one event, so Catalyst 2025 no longer fans
+    // out into 36 sub-events; its column-22 names stay only in source rows.
     expect([...events]).not.toContain('');
-    expect(events.size).toBe(69);
-    expect(catalystEvents.size).toBe(EXPECTED_CONTROL_TOTALS.catalyst2025Events);
-    expect(participationFacts.size).toBe(12_033);
-    expect(plan.observations.length - participationFacts.size).toBe(
-      EXPECTED_CONTROL_TOTALS.catalyst2025DuplicatePersonEvents,
-    );
+    expect(events.size).toBe(34);
+    expect(catalystEvents.size).toBe(1);
+    expect(participationFacts.size).toBe(2_910);
+    expect(plan.observations.length - participationFacts.size).toBe(9_212);
   });
 
   it('extracts legacy event materials and every author from their source rows', () => {

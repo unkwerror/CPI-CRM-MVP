@@ -99,6 +99,25 @@ describe('extractPersonAttributes', () => {
     expect(second.some((attr) => attr.value === 'ФФ')).toBe(false);
   });
 
+  it('renders verbose JS date strings as compact dates', () => {
+    const attributes = extractPersonAttributes(
+      {
+        sheetName: 'Каталист 2025',
+        cells: [
+          cell(
+            1,
+            'Дата подачи заявки',
+            'Mon Dec 01 2025 07:41:04 GMT+0000 (Coordinated Universal Time)',
+          ),
+        ],
+      },
+      'person-1',
+    );
+    expect(attributes).toEqual([
+      { field: 'other', label: 'Дата подачи заявки', value: '01.12.2025 07:41' },
+    ]);
+  });
+
   it('ignores formulas, empty values and cells without headers', () => {
     const attributes = extractPersonAttributes(
       {

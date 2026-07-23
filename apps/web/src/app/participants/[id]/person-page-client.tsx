@@ -15,7 +15,6 @@ import {
   RotateCcw,
   Search,
   Tag,
-  UserRound,
 } from 'lucide-react';
 import Link from 'next/link';
 import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react';
@@ -25,63 +24,9 @@ import { EditPersonDialog } from '@/components/edit-person-dialog';
 import { EmptyState } from '@/components/empty-state';
 import { StatusBadge } from '@/components/status-badge';
 import { ApiError, api, formatDate, initials } from '@/lib/api';
-import type { CurrentUser, PersonAttribute, PersonDetail } from '@/lib/types';
+import type { CurrentUser, PersonDetail } from '@/lib/types';
 
-type Tab = 'overview' | 'events' | 'artifacts' | 'history' | 'sources';
-
-/** Display order for structured source attributes; unknown fields go last. */
-const ATTRIBUTE_FIELD_ORDER = [
-  'age',
-  'university',
-  'workplace',
-  'universityRelation',
-  'faculty',
-  'specialty',
-  'educationLevel',
-  'educationForm',
-  'educationBasis',
-  'courseYear',
-  'studentStatus',
-  'studyStart',
-  'studyEnd',
-  'company',
-  'jobTitle',
-  'workStart',
-  'workEnd',
-  'city',
-  'region',
-  'role',
-  'participationFormat',
-  'applicationStatus',
-  'applicationDate',
-  'attendanceDate',
-  'attendedEvent',
-  'eventsAttended',
-  'projectName',
-  'projectDescription',
-  'projectTeam',
-  'teamSize',
-  'projectDirection',
-  'projectStage',
-  'supervisorName',
-  'supervisorPosition',
-  'competencies',
-  'communicationStatus',
-  'testScore',
-  'materials',
-  'blackMark',
-  'note',
-];
-
-function sortAttributes(attributes: PersonAttribute[]): PersonAttribute[] {
-  const rank = (attribute: PersonAttribute) => {
-    const index = ATTRIBUTE_FIELD_ORDER.indexOf(attribute.field);
-    return index === -1 ? ATTRIBUTE_FIELD_ORDER.length : index;
-  };
-  return [...attributes].sort(
-    (a, b) => rank(a) - rank(b) || a.label.localeCompare(b.label, 'ru'),
-  );
-}
+type Tab = 'overview' | 'events' | 'artifacts' | 'history';
 
 const ARTIFACT_TYPES = [
   {
@@ -141,6 +86,8 @@ export function PersonPageClient({ id }: { id: string }) {
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
   const [permissions, setPermissions] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [notesDraft, setNotesDraft] = useState<string | null>(null);
+  const [savingNotes, setSavingNotes] = useState(false);
   const canEditPerson = permissions.includes('people.write');
   const canEditContacts = permissions.includes('contacts.write');
 
@@ -202,6 +149,23 @@ export function PersonPageClient({ id }: { id: string }) {
       await reload();
     } catch (caught) {
       window.alert(apiErrorMessage(caught, 'Не удалось создать задачу'));
+    }
+  }
+
+  async function saveNotes() {
+    if (!person || notesDraft === null) return;
+    setSavingNotes(true);
+    try {
+      await api(`/people/${person.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ version: person.version, notes: notesDraft.trim() || null }),
+      });
+      setNotesDraft(null);
+      await reload();
+    } catch (caught) {
+      window.alert(apiErrorMessage(caught, 'Не удалось сохранить заметки'));
+    } finally {
+      setSavingNotes(false);
     }
   }
 
@@ -342,7 +306,6 @@ export function PersonPageClient({ id }: { id: string }) {
             ['events', `Мероприятия · ${person.events.length}`],
             ['artifacts', `Артефакты · ${person.artifacts.length}`],
             ['history', 'История'],
-            ['sources', `Источники · ${person.sources.length}`],
           ] as const
         ).map(([value, label]) => (
           <button
@@ -419,33 +382,60 @@ export function PersonPageClient({ id }: { id: string }) {
               {person.affiliations.length === 0 && <p className="muted">Организация не связана.</p>}
             </div>
           </article>
-          {person.attributes.length > 0 && (
-            <article className="panel panel--wide">
-              <header className="panel__header">
-                <div>
-                  <p className="eyebrow">Из импортированных источников</p>
-                  <h2>Данные об участнике</h2>
-                </div>
-              </header>
-              <div className="detail-list">
-                {sortAttributes(person.attributes).map((attribute, index) => (
-                  <div className="detail-row" key={`${attribute.field}-${index}`}>
-                    <span>
-                      <small>{attribute.label}</small>
-                      <strong>{attribute.value}</strong>
-                      {attribute.sources.length > 0 && (
-                        <em>
-                          {attribute.sources
-                            .map((source) => `${source.sheetName}:${source.rowNumber}`)
-                            .join(', ')}
-                        </em>
-                      )}
-                    </span>
-                  </div>
-                ))}
+          <article className="panel panel--wide">
+            <header className="panel__header">
+              <div>
+                <p className="eyebrow">Данные из источников и ручные записи</p>
+                <h2>Заметки</h2>
               </div>
-            </article>
-          )}
+              {canEditPerson && notesDraft === null && (
+                <button className="text-link" onClick={() => setNotesDraft(person.notes ?? '')}>
+                  <Pencil size={14} /> Редактировать
+                </button>
+              )}
+            </header>
+            {notesDraft !== null ? (
+              <div>
+                <textarea
+                  className="notes-textarea"
+                  value={notesDraft}
+                  onChange={(event) => setNotesDraft(event.target.value)}
+                  rows={14}
+                  style={{ width: '100%', resize: 'vertical' }}
+                  disabled={savingNotes}
+                />
+                <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                  <button
+                    className="button button--primary button--compact"
+                    onClick={() => void saveNotes()}
+                    disabled={savingNotes}
+                  >
+                    {savingNotes ? 'Сохраняем…' : 'Сохранить'}
+                  </button>
+                  <button
+                    className="button button--secondary button--compact"
+                    onClick={() => setNotesDraft(null)}
+                    disabled={savingNotes}
+                  >
+                    Отмена
+                  </button>
+                </div>
+              </div>
+            ) : person.notes ? (
+              <pre
+                style={{
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                  font: 'inherit',
+                  margin: 0,
+                }}
+              >
+                {person.notes}
+              </pre>
+            ) : (
+              <p className="muted">Заметок пока нет.</p>
+            )}
+          </article>
           <article className="panel panel--wide">
             <header className="panel__header">
               <div>
@@ -512,7 +502,6 @@ export function PersonPageClient({ id }: { id: string }) {
         />
       )}
       {tab === 'history' && <TimelineTab person={person} />}
-      {tab === 'sources' && <SourcesTab person={person} />}
       {showArtifact && (
         <ArtifactDialog
           personId={person.id}
@@ -997,51 +986,6 @@ function TimelineTab({ person }: { person: PersonDetail }) {
           </div>
         ))}
       </div>
-    </section>
-  );
-}
-
-function SourcesTab({ person }: { person: PersonDetail }) {
-  return (
-    <section className="panel">
-      <header className="panel__header">
-        <div>
-          <p className="eyebrow">Provenance</p>
-          <h2>Исходные записи</h2>
-        </div>
-      </header>
-      {person.sources.length ? (
-        <div className="source-list">
-          {person.sources.map((source) => (
-            <div className="source-row" key={source.id}>
-              <span className="source-row__icon">
-                <UserRound size={17} />
-              </span>
-              <span>
-                <strong>{source.sheetName}</strong>
-                <small>
-                  {source.fileName} · строка {source.rowNumber} · {source.relation}
-                </small>
-              </span>
-              {source.fields && source.fields.length > 0 && (
-                <div className="source-fields">
-                  {source.fields.map((field, index) => (
-                    <span className="source-field" key={`${field.address}-${index}`}>
-                      <small>{field.header}</small>
-                      <strong>{field.value}</strong>
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      ) : (
-        <EmptyState
-          title="Нет импортных источников"
-          text="Карточка создана вручную и прослеживается через журнал действий."
-        />
-      )}
     </section>
   );
 }
