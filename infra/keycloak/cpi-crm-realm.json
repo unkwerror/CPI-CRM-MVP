@@ -1,0 +1,80 @@
+{
+  "realm": "cpi-crm",
+  "enabled": true,
+  "displayName": "ЦПИ CRM (local)",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": true,
+  "internationalizationEnabled": true,
+  "supportedLocales": ["ru"],
+  "defaultLocale": "ru",
+  "roles": {
+    "realm": [
+      { "name": "admin", "description": "Администратор" },
+      { "name": "leader", "description": "Руководитель СС" },
+      { "name": "community_manager", "description": "Комьюнити-менеджер" },
+      { "name": "event_manager", "description": "Ивент-менеджер" },
+      { "name": "partner_manager", "description": "Менеджер по партнёрке и продажам" },
+      { "name": "methodologist", "description": "Методолог" },
+      { "name": "back_office", "description": "Менеджер по операционке" },
+      { "name": "smm_manager", "description": "SMM-менеджер" },
+      { "name": "product_manager", "description": "Менеджер по продукту" },
+      { "name": "data_steward", "description": "Дата-стюард" },
+      { "name": "auditor", "description": "Аудитор" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "cpi-crm",
+      "name": "ЦПИ CRM",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "local-only-change-me",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": ["http://localhost:3000/api/auth/callback"],
+      "webOrigins": ["http://localhost:3000"],
+      "attributes": {
+        "post.logout.redirect.uris": "http://localhost:3000/*"
+      },
+      "protocol": "openid-connect",
+      "protocolMappers": [
+        {
+          "name": "realm roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "multivalued": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "realm_roles",
+            "jsonType.label": "String"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "admin",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Локальный",
+      "lastName": "Администратор",
+      "email": "admin@cpi.local",
+      "credentials": [{ "type": "password", "value": "admin", "temporary": false }],
+      "realmRoles": ["admin"]
+    },
+    {
+      "username": "manager",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Комьюнити",
+      "lastName": "Менеджер",
+      "email": "manager@cpi.local",
+      "credentials": [{ "type": "password", "value": "manager", "temporary": false }],
+      "realmRoles": ["community_manager"]
+    }
+  ]
+}

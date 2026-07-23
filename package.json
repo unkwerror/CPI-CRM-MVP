@@ -1,0 +1,33 @@
+{
+  "name": "cpi-crm-mvp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Локальный MVP реестра участников ЦПИ",
+  "packageManager": "pnpm@11.15.1",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "corepack pnpm -r --if-present build",
+    "dev": "concurrently -n api,web,worker -c blue,green,magenta \"corepack pnpm --filter @cpi-crm/api dev\" \"corepack pnpm --filter @cpi-crm/web dev\" \"corepack pnpm --filter @cpi-crm/worker dev\"",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "corepack pnpm -r --if-present lint",
+    "typecheck": "corepack pnpm -r --if-present typecheck",
+    "test": "corepack pnpm -r --if-present test",
+    "test:run": "corepack pnpm -r --if-present test:run",
+    "infra:up": "docker compose -f infra/docker-compose.yml up -d",
+    "infra:down": "docker compose -f infra/docker-compose.yml down",
+    "infra:logs": "docker compose -f infra/docker-compose.yml logs -f",
+    "local:setup": "bash scripts/local-setup.sh",
+    "local:start": "bash scripts/local-setup.sh && corepack pnpm dev",
+    "db:migrate": "corepack pnpm --filter @cpi-crm/db migrate",
+    "db:seed": "corepack pnpm --filter @cpi-crm/api seed",
+    "import:workbook": "corepack pnpm --filter @cpi-crm/importer run import"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,111 @@
+name: cpi-crm-local
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: cpi_crm
+      POSTGRES_USER: cpi_crm
+      POSTGRES_PASSWORD: cpi_crm_local
+    ports:
+      - '5433:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U cpi_crm -d cpi_crm']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '6380:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: cpi-minio
+      MINIO_ROOT_PASSWORD: cpi-minio-local-secret
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:9000/minio/health/live']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        mc alias set local http://minio:9000 cpi-minio cpi-minio-local-secret
+        mc mb --ignore-existing local/cpi-quarantine
+        mc mb --ignore-existing local/cpi-private
+        mc anonymous set none local/cpi-quarantine
+        mc anonymous set none local/cpi-private
+    restart: 'no'
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.3
+    command: ['start-dev', '--import-realm', '--health-enabled=true']
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: local-admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: local-admin-change-me
+    ports:
+      - '8080:8080'
+    volumes:
+      - ./keycloak/cpi-crm-realm.json:/opt/keycloak/data/import/cpi-crm-realm.json:ro
+      - keycloak_data:/opt/keycloak/data
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          "exec 3<>/dev/tcp/127.0.0.1/9000; echo -e 'GET /health/ready HTTP/1.1\\r\\nhost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; grep '200 OK' <&3",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+      start_period: 30s
+    restart: unless-stopped
+
+  clamav:
+    image: clamav/clamav:1.4
+    ports:
+      - '3310:3310'
+    volumes:
+      - clamav_data:/var/lib/clamav
+    healthcheck:
+      test: ['CMD-SHELL', "printf 'PING\\n' | nc 127.0.0.1 3310 | grep PONG"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 60s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  keycloak_data:
+  clamav_data:

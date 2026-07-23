@@ -1,0 +1,13 @@
+[Unit]
+Description=Backup CPI CRM PostgreSQL and MinIO data
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/CPI-CRM-MVP/infra/server
+ExecStart=/opt/CPI-CRM-MVP/infra/server/backup.sh
+User=root
+Group=root
+Nice=10
+

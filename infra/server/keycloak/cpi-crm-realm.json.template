@@ -1,0 +1,83 @@
+{
+  "realm": "cpi-crm",
+  "enabled": true,
+  "displayName": "ЦПИ CRM",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": true,
+  "internationalizationEnabled": true,
+  "supportedLocales": ["ru"],
+  "defaultLocale": "ru",
+  "passwordPolicy": "length(14) and digits(1) and lowerCase(1) and upperCase(1) and specialChars(1) and notUsername and notEmail",
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "failureFactor": 8,
+  "waitIncrementSeconds": 60,
+  "maxFailureWaitSeconds": 900,
+  "roles": {
+    "realm": [
+      { "name": "admin", "description": "Администратор" },
+      { "name": "leader", "description": "Руководитель СС" },
+      { "name": "community_manager", "description": "Комьюнити-менеджер" },
+      { "name": "event_manager", "description": "Ивент-менеджер" },
+      { "name": "partner_manager", "description": "Менеджер по партнёрке и продажам" },
+      { "name": "methodologist", "description": "Методолог" },
+      { "name": "back_office", "description": "Менеджер по операционке" },
+      { "name": "smm_manager", "description": "SMM-менеджер" },
+      { "name": "product_manager", "description": "Менеджер по продукту" },
+      { "name": "data_steward", "description": "Дата-стюард" },
+      { "name": "auditor", "description": "Аудитор" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "__OIDC_CLIENT_ID__",
+      "name": "ЦПИ CRM",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "__OIDC_CLIENT_SECRET__",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": ["https://__CRM_DOMAIN__/api/auth/callback"],
+      "webOrigins": ["https://__CRM_DOMAIN__"],
+      "protocol": "openid-connect",
+      "attributes": {
+        "post.logout.redirect.uris": "https://__CRM_DOMAIN__/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "realm roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "multivalued": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "realm_roles",
+            "jsonType.label": "String"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "__CRM_ADMIN_USERNAME__",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Администратор",
+      "lastName": "ЦПИ CRM",
+      "email": "__CRM_ADMIN_EMAIL__",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "__CRM_ADMIN_PASSWORD__",
+          "temporary": true
+        }
+      ],
+      "requiredActions": ["UPDATE_PASSWORD", "CONFIGURE_TOTP"],
+      "realmRoles": ["admin"]
+    }
+  ]
+}

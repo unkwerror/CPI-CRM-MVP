@@ -1,0 +1,384 @@
+name: cpi-crm-production
+
+x-api-image: &api-image
+  image: cpi-crm-api:${IMAGE_TAG:-latest}
+  build:
+    context: ../..
+    dockerfile: infra/server/Dockerfile
+    target: api
+
+x-api-environment: &api-environment
+  NODE_ENV: production
+  DATABASE_URL: postgresql://${APP_DB_USER}:${APP_DB_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  WEB_ORIGIN: https://${CRM_DOMAIN}
+  API_PORT: '3001'
+  AUTH_REQUIRED: 'true'
+  OIDC_ISSUER: https://${ID_DOMAIN}/realms/cpi-crm
+  OIDC_CLIENT_ID: ${OIDC_CLIENT_ID}
+  OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
+  OIDC_REDIRECT_URI: https://${CRM_DOMAIN}/api/auth/callback
+  SESSION_KEY_BASE64: ${SESSION_KEY_BASE64}
+  ORGANIZATION_TIMEZONE: ${ORGANIZATION_TIMEZONE:-Asia/Novosibirsk}
+  ARTIFACT_BASELINE_AT: ${ARTIFACT_BASELINE_AT:-2026-07-22T00:00:00.000Z}
+  # Presigned URLs are opened by a browser, therefore the API must sign the
+  # public TLS endpoint. Docker DNS resolves this name back to Caddy internally.
+  S3_ENDPOINT: https://${S3_DOMAIN}
+  S3_REGION: ${S3_REGION:-us-east-1}
+  S3_ACCESS_KEY: ${S3_APP_USER}
+  S3_SECRET_KEY: ${S3_APP_PASSWORD}
+  S3_QUARANTINE_BUCKET: ${S3_QUARANTINE_BUCKET:-cpi-quarantine}
+  S3_PRIVATE_BUCKET: ${S3_PRIVATE_BUCKET:-cpi-private}
+  IMPORT_WORKBOOK: /imports/participants.xlsx
+  CPI_IMPORT_ORGANIZATION_ID: 00000000-0000-4000-8000-000000000010
+  CPI_IMPORT_USER_ID: 00000000-0000-4000-8000-000000000001
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: '3'
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+      KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME}
+      KEYCLOAK_DB_USER: ${KEYCLOAK_DB_USER}
+      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+      APP_DB_USER: ${APP_DB_USER}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+    command:
+      - postgres
+      - -c
+      - max_connections=50
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - effective_cache_size=384MB
+      - -c
+      - work_mem=4MB
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init-databases.sh:/docker-entrypoint-initdb.d/10-databases.sh:ro
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 0.75
+    pids_limit: 128
+    logging: *default-logging
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_API_CORS_ALLOW_ORIGIN: https://${CRM_DOMAIN}
+    volumes:
+      - minio_data:/data
+    networks: [backend]
+    healthcheck:
+      test: [CMD, curl, -f, http://127.0.0.1:9000/minio/health/live]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.40
+    pids_limit: 128
+    logging: *default-logging
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      S3_QUARANTINE_BUCKET: ${S3_QUARANTINE_BUCKET:-cpi-quarantine}
+      S3_PRIVATE_BUCKET: ${S3_PRIVATE_BUCKET:-cpi-private}
+      S3_APP_USER: ${S3_APP_USER}
+      S3_APP_PASSWORD: ${S3_APP_PASSWORD}
+    entrypoint: [/bin/sh, /opt/cpi/init.sh]
+    volumes:
+      - ./minio/init.sh:/opt/cpi/init.sh:ro
+    networks: [backend]
+    restart: 'no'
+    mem_limit: 256m
+    cpus: 0.20
+    pids_limit: 64
+    logging: *default-logging
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.3
+    entrypoint: [/bin/bash, /opt/cpi/render-and-start.sh]
+    command: [start, --import-realm]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/${KEYCLOAK_DB_NAME}
+      KC_DB_USERNAME: ${KEYCLOAK_DB_USER}
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+      KC_HOSTNAME: https://${ID_DOMAIN}
+      KC_HTTP_ENABLED: 'true'
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: 'true'
+      KC_METRICS_ENABLED: 'false'
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      JAVA_OPTS_KC_HEAP: -Xms128m -Xmx384m
+      CRM_DOMAIN: ${CRM_DOMAIN}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
+      CRM_ADMIN_USERNAME: ${CRM_ADMIN_USERNAME}
+      CRM_ADMIN_PASSWORD: ${CRM_ADMIN_PASSWORD}
+      CRM_ADMIN_EMAIL: ${CRM_ADMIN_EMAIL}
+    volumes:
+      - ./keycloak/cpi-crm-realm.json.template:/opt/cpi/cpi-crm-realm.json.template:ro
+      - ./keycloak/render-and-start.sh:/opt/cpi/render-and-start.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      frontend: {}
+      backend: {}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000;
+          printf 'GET /health/ready HTTP/1.1\r\nhost: localhost\r\nConnection: close\r\n\r\n' >&3;
+          grep -q '200 OK' <&3
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 45s
+    restart: unless-stopped
+    mem_limit: 640m
+    cpus: 0.60
+    pids_limit: 256
+    logging: *default-logging
+
+  clamav:
+    image: clamav/clamav:1.4
+    volumes:
+      - clamav_data:/var/lib/clamav
+    # Freshclam needs outbound HTTPS to download signature databases. No port
+    # is published; joining frontend only supplies egress.
+    networks:
+      frontend: {}
+      backend: {}
+    healthcheck:
+      test: [CMD-SHELL, "printf 'PING\\n' | nc 127.0.0.1 3310 | grep -q PONG"]
+      interval: 20s
+      timeout: 5s
+      retries: 60
+      start_period: 90s
+    restart: unless-stopped
+    # Clamd normally needs about 1.2 GiB and can briefly approach twice that
+    # while atomically reloading signatures.
+    mem_limit: 2560m
+    cpus: 0.60
+    pids_limit: 128
+    logging: *default-logging
+
+  migrate:
+    image: cpi-crm-tools:${IMAGE_TAG:-latest}
+    build:
+      context: ../..
+      dockerfile: infra/server/Dockerfile
+      target: tools
+    environment:
+      # DDL stays with the database owner; runtime services use APP_DB_USER.
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend]
+    restart: 'no'
+    mem_limit: 256m
+    cpus: 0.50
+    pids_limit: 128
+    logging: *default-logging
+
+  seed:
+    <<: *api-image
+    command: [node, dist/seed.js]
+    environment: *api-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      frontend: {}
+      backend: {}
+    volumes:
+      - ${IMPORT_WORKBOOK_HOST:-../../Участники_всех_мероприятий_Стартап_студии_ЯДРО1.xlsx}:/imports/participants.xlsx:ro
+    restart: 'no'
+    mem_limit: 256m
+    cpus: 0.50
+    pids_limit: 128
+    logging: *default-logging
+
+  api:
+    <<: *api-image
+    environment: *api-environment
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    volumes:
+      - ${IMPORT_WORKBOOK_HOST:-../../Участники_всех_мероприятий_Стартап_студии_ЯДРО1.xlsx}:/imports/participants.xlsx:ro
+    networks:
+      frontend: {}
+      backend: {}
+    restart: unless-stopped
+    mem_limit: 384m
+    cpus: 0.75
+    pids_limit: 128
+    logging: *default-logging
+
+  worker:
+    image: cpi-crm-worker:${IMAGE_TAG:-latest}
+    build:
+      context: ../..
+      dockerfile: infra/server/Dockerfile
+      target: worker
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${APP_DB_USER}:${APP_DB_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ACCESS_KEY: ${S3_APP_USER}
+      S3_SECRET_KEY: ${S3_APP_PASSWORD}
+      S3_QUARANTINE_BUCKET: ${S3_QUARANTINE_BUCKET:-cpi-quarantine}
+      S3_PRIVATE_BUCKET: ${S3_PRIVATE_BUCKET:-cpi-private}
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: '3310'
+      WORKER_OUTBOX_BATCH_SIZE: ${WORKER_OUTBOX_BATCH_SIZE:-5}
+      WORKER_RECONCILIATION_BATCH_SIZE: ${WORKER_RECONCILIATION_BATCH_SIZE:-100}
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+      clamav:
+        condition: service_healthy
+    networks: [backend]
+    restart: unless-stopped
+    stop_grace_period: 45s
+    mem_limit: 256m
+    cpus: 0.40
+    pids_limit: 128
+    logging: *default-logging
+
+  web:
+    image: cpi-crm-web:${IMAGE_TAG:-latest}
+    build:
+      context: ../..
+      dockerfile: infra/server/Dockerfile
+      target: web
+      args:
+        API_PROXY_TARGET: http://api:3001
+    environment:
+      NODE_ENV: production
+      HOSTNAME: 0.0.0.0
+      PORT: '3000'
+      API_PROXY_TARGET: http://api:3001
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      frontend: {}
+      backend: {}
+    restart: unless-stopped
+    mem_limit: 384m
+    cpus: 0.60
+    pids_limit: 128
+    logging: *default-logging
+
+  caddy:
+    image: caddy:2.10-alpine
+    environment:
+      CRM_DOMAIN: ${CRM_DOMAIN}
+      ID_DOMAIN: ${ID_DOMAIN}
+      S3_DOMAIN: ${S3_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    ports:
+      - 80:80
+      - 443:443
+      - 443:443/udp
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      web:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks:
+      frontend:
+        aliases:
+          - ${ID_DOMAIN}
+          - ${S3_DOMAIN}
+      backend: {}
+    healthcheck:
+      test: [CMD, caddy, version]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 128
+    logging: *default-logging
+
+  import-workbook:
+    <<: *api-image
+    profiles: [ops]
+    command:
+      - node
+      - node_modules/@cpi-crm/importer/dist/cli.js
+      - import
+      - --commit
+      - --file
+      - /imports/participants.xlsx
+      - --report-dir
+      - /tmp/import-report
+    environment: *api-environment
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    volumes:
+      - ${IMPORT_WORKBOOK_HOST:-../../Участники_всех_мероприятий_Стартап_студии_ЯДРО1.xlsx}:/imports/participants.xlsx:ro
+    networks: [backend]
+    restart: 'no'
+    mem_limit: 512m
+    cpus: 1.00
+    pids_limit: 128
+    logging: *default-logging
+
+networks:
+  frontend:
+  backend:
+    internal: true
+
+volumes:
+  postgres_data:
+  minio_data:
+  clamav_data:
+  caddy_data:
+  caddy_config:
