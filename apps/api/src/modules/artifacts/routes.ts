@@ -5,13 +5,17 @@ import {
   SubmitArtifactVersionBody,
 } from '@cpi-crm/contracts';
 import {
+  ARTIFACT_QUALITY_CRITERIA,
   Permissions,
   Roles,
   SystemClock,
   assertSubmittedAtIsNotFuture,
+  computeArtifactScore,
   createContentFingerprint,
   hasPermission,
+  isQualityArtifact,
   normalizeExternalUrl,
+  parseArtifactCriteria,
   parseQualityScore,
 } from '@cpi-crm/domain';
 import { Type } from '@sinclair/typebox';
@@ -558,7 +562,7 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
       preHandler: app.requirePermission(Permissions.ARTIFACTS_REVIEW),
       schema: {
         tags: ['Артефакты'],
-        summary: 'Добавить итоговую оценку 1–10',
+        summary: 'Оценка по рубрикатору ЦПИ (5 критериев 0–2) или итоговый балл',
         params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
         body: ReviewArtifactVersionBody,
       },
@@ -566,11 +570,36 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
     async (request, reply) => {
       const versionId = (request.params as { id: string }).id;
       const body = request.body as {
-        score: number;
+        score?: number;
+        criteria?: Record<string, number>;
         decision: 'NEEDS_REVISION' | 'ACCEPTED' | 'REJECTED';
         comment?: string;
       };
-      const score = parseQualityScore(body.score);
+      // Рубрикатор ЦПИ: при наличии критериев Q_artifact = их сумма (0–10);
+      // ручной итоговый балл остаётся для совместимости.
+      const criteria = body.criteria === undefined ? null : parseArtifactCriteria(body.criteria);
+      let score: number;
+      if (criteria !== null) {
+        score = computeArtifactScore(criteria);
+      } else if (body.score !== undefined) {
+        score = parseQualityScore(body.score);
+      } else {
+        throw new HttpProblem(400, 'Укажите критерии рубрикатора или итоговый балл');
+      }
+      // Приёмка заблокирована при нуле по релевантности или проверяемости.
+      if (body.decision === 'ACCEPTED' && !isQualityArtifact(score, criteria) && criteria !== null) {
+        const blocked = ARTIFACT_QUALITY_CRITERIA.filter(
+          (criterion) => criterion.blocking && criteria[criterion.code] === 0,
+        );
+        if (blocked.length > 0) {
+          throw new HttpProblem(
+            400,
+            `Нельзя принять артефакт с нулём по критериям: ${blocked
+              .map((criterion) => criterion.label.toLocaleLowerCase('ru'))
+              .join(', ')}`,
+          );
+        }
+      }
       const created = await transaction(app.pool, async (client) => {
         const version = await client.query(
           'SELECT id FROM artifact_versions WHERE id = $1 AND status = $2 FOR SHARE',
@@ -586,12 +615,13 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
           [versionId],
         );
         const review = await client.query<{ id: string }>(
-          `INSERT INTO artifact_reviews (artifact_version_id, reviewer_user_id, rubric_version_id, score, comment, status, decision, supersedes_review_id, reviewed_at) VALUES ($1, $2, $3, $4, $5, 'FINAL', $6, $7, now()) RETURNING id`,
+          `INSERT INTO artifact_reviews (artifact_version_id, reviewer_user_id, rubric_version_id, score, criteria, comment, status, decision, supersedes_review_id, reviewed_at) VALUES ($1, $2, $3, $4, $5, $6, 'FINAL', $7, $8, now()) RETURNING id`,
           [
             versionId,
             request.authUser!.userId,
             rubric.rows[0].id,
             score,
+            criteria === null ? null : JSON.stringify(criteria),
             body.comment?.trim() || null,
             body.decision,
             current.rows[0]?.current_final_review_id ?? null,
@@ -607,10 +637,16 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
           action: current.rows[0] ? 'artifact_review.superseded' : 'artifact_review.created',
           entityType: 'artifact_review',
           entityId: review.rows[0]!.id,
-          after: { versionId, score, decision: body.decision },
+          after: { versionId, score, criteria, decision: body.decision },
           ...(body.comment ? { reason: body.comment } : {}),
         });
-        return { id: review.rows[0]!.id, score, decision: body.decision };
+        return {
+          id: review.rows[0]!.id,
+          score,
+          criteria,
+          isQuality: isQualityArtifact(score, criteria),
+          decision: body.decision,
+        };
       });
       return reply.code(201).send(created);
     },

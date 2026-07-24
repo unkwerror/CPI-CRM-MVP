@@ -320,6 +320,36 @@ export function PersonPageClient({ id }: { id: string }) {
 
       {tab === 'overview' && (
         <section className="profile-grid">
+          {person.headQuality && (
+            <article className="panel panel--wide">
+              <header className="panel__header">
+                <div>
+                  <p className="eyebrow">Индекс качества головы (0–100)</p>
+                  <h2>
+                    Q_head: {person.headQuality.score} — {person.headQuality.bandLabel}
+                  </h2>
+                </div>
+              </header>
+              <div className="artifact-activity">
+                <div>
+                  <strong>{person.headQuality.components.artifactQuality}</strong>
+                  <span>качество артефактов за 90 дней (вес 35 %)</span>
+                </div>
+                <div>
+                  <strong>{person.headQuality.components.regularity}</strong>
+                  <span>регулярность качественных артефактов (вес 25 %)</span>
+                </div>
+                <div>
+                  <strong>{person.headQuality.components.projectInvolvement}</strong>
+                  <span>проектная включённость (вес 20 %)</span>
+                </div>
+                <div>
+                  <strong>{person.headQuality.components.commercialApplicability}</strong>
+                  <span>коммерческая применимость (вес 20 %)</span>
+                </div>
+              </div>
+            </article>
+          )}
           <article className="panel">
             <header className="panel__header">
               <h2>Контакты</h2>

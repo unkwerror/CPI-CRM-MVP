@@ -11,6 +11,7 @@ import { HttpProblem } from './lib/problem.js';
 import { registerArtifactRoutes } from './modules/artifacts/routes.js';
 import { registerCatalogRoutes } from './modules/catalogs/routes.js';
 import { registerDealRoutes } from './modules/deals/routes.js';
+import { registerExpenseRoutes } from './modules/expenses/routes.js';
 import { registerEventRoutes } from './modules/events/routes.js';
 import { registerExportRoutes } from './modules/exports/routes.js';
 import { registerFileRoutes } from './modules/files/routes.js';
@@ -152,6 +153,7 @@ export async function buildServer(config: ApiConfig = loadConfig()) {
   await registerPartnerRoutes(app);
   await registerProductRoutes(app);
   await registerDealRoutes(app);
+  await registerExpenseRoutes(app);
   await registerMetricRoutes(app);
 
   app.setNotFoundHandler(async (request) => {

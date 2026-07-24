@@ -21,6 +21,8 @@ export const Permissions = {
   DEALS_READ: 'deals.read',
   DEALS_WRITE: 'deals.write',
   METRICS_READ: 'metrics.read',
+  EXPENSES_READ: 'expenses.read',
+  EXPENSES_WRITE: 'expenses.write',
 } as const;
 
 export type Permission = (typeof Permissions)[keyof typeof Permissions];
@@ -62,6 +64,8 @@ export const ROLE_PERMISSIONS: Readonly<Record<Role, readonly Permission[]>> = O
     Permissions.PRODUCTS_READ,
     Permissions.DEALS_READ,
     Permissions.METRICS_READ,
+    Permissions.EXPENSES_READ,
+    Permissions.EXPENSES_WRITE,
     Permissions.AUDIT_READ,
     Permissions.EXPORTS_BULK,
     Permissions.SETTINGS_MANAGE,
@@ -85,6 +89,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<Role, readonly Permission[]>> = O
     Permissions.ARTIFACTS_WRITE,
     Permissions.TASKS_MANAGE,
     Permissions.METRICS_READ,
+    Permissions.EXPENSES_READ,
   ),
   [Roles.PARTNER_MANAGER]: permissions(
     Permissions.PEOPLE_READ,
@@ -95,6 +100,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<Role, readonly Permission[]>> = O
     Permissions.PRODUCTS_READ,
     Permissions.TASKS_MANAGE,
     Permissions.METRICS_READ,
+    Permissions.EXPENSES_READ,
   ),
   [Roles.METHODOLOGIST]: permissions(
     Permissions.PEOPLE_READ,
@@ -108,10 +114,16 @@ export const ROLE_PERMISSIONS: Readonly<Record<Role, readonly Permission[]>> = O
     Permissions.PARTNERS_READ,
     Permissions.DEALS_READ,
     Permissions.TASKS_MANAGE,
+    Permissions.EXPENSES_READ,
+    Permissions.EXPENSES_WRITE,
     Permissions.AUDIT_READ,
     Permissions.EXPORTS_BULK,
   ),
-  [Roles.SMM_MANAGER]: permissions(Permissions.PEOPLE_READ, Permissions.METRICS_READ),
+  [Roles.SMM_MANAGER]: permissions(
+    Permissions.PEOPLE_READ,
+    Permissions.METRICS_READ,
+    Permissions.EXPENSES_READ,
+  ),
   [Roles.PRODUCT_MANAGER]: permissions(
     Permissions.PEOPLE_READ,
     Permissions.ARTIFACTS_READ,
@@ -119,6 +131,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<Role, readonly Permission[]>> = O
     Permissions.PRODUCTS_WRITE,
     Permissions.DEALS_READ,
     Permissions.METRICS_READ,
+    Permissions.EXPENSES_READ,
   ),
   [Roles.DATA_STEWARD]: permissions(
     Permissions.PEOPLE_READ,

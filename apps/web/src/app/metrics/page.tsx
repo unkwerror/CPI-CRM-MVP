@@ -2,37 +2,66 @@
 
 import {
   Banknote,
-  CalendarDays,
+  ChevronLeft,
+  ChevronRight,
   Handshake,
   Package,
   TrendingDown,
   TrendingUp,
   Users,
+  Wallet,
 } from 'lucide-react';
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import { EmptyState } from '@/components/empty-state';
 import { api, formatMoney } from '@/lib/api';
-import type { FpfMetrics } from '@/lib/types';
+import type { CpiMetrics } from '@/lib/types';
+
+function monthKey(date: Date): string {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+function monthBounds(key: string): { from: string; to: string } {
+  const [year, month] = key.split('-').map(Number);
+  const from = new Date(Date.UTC(year!, month! - 1, 1));
+  const to = new Date(Date.UTC(year!, month!, 1));
+  return { from: from.toISOString(), to: to.toISOString() };
+}
+
+function shiftMonth(key: string, delta: number): string {
+  const [year, month] = key.split('-').map(Number);
+  return monthKey(new Date(Date.UTC(year!, month! - 1 + delta, 1)));
+}
+
+const money = (value: number | null | undefined) =>
+  value === null || value === undefined ? 'н/д' : formatMoney(value);
+const pct = (value: number | null | undefined) =>
+  value === null || value === undefined ? 'н/д' : `${value.toFixed(1)} %`;
 
 export default function MetricsPage() {
-  const [metrics, setMetrics] = useState<FpfMetrics | null>(null);
+  const [month, setMonth] = useState(() => monthKey(new Date()));
+  const [metrics, setMetrics] = useState<CpiMetrics | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const bounds = useMemo(() => monthBounds(month), [month]);
+
   useEffect(() => {
-    void api<FpfMetrics>('/dashboard/fpf')
+    setMetrics(null);
+    setError(null);
+    const params = new URLSearchParams({ from: bounds.from, to: bounds.to });
+    void api<CpiMetrics>(`/dashboard/cpi?${params}`)
       .then(setMetrics)
       .catch((caught) =>
         setError(caught instanceof Error ? caught.message : 'Метрики недоступны'),
       );
-  }, []);
+  }, [bounds]);
 
   if (error) {
     return (
       <div className="page-stack">
         <section className="page-heading">
-          <p className="eyebrow">FPF-метрики</p>
+          <p className="eyebrow">Метрики ЦПИ</p>
           <h1>Метрики недоступны</h1>
         </section>
         <section className="panel">
@@ -42,156 +71,237 @@ export default function MetricsPage() {
     );
   }
 
-  const percent = (value: number) => `${(value * 100).toFixed(1)} %`;
+  const m = metrics;
 
   return (
     <div className="page-stack">
-      <section className="page-heading">
-        <p className="eyebrow">Function → Process → Form</p>
-        <h1>Метрики FPF</h1>
-        <p>
-          Минимальный набор взаимосвязанных показателей: Поток (выручка и средний чек держатся
-          парой), Инвестиции (размер и качество базы) и процессные метрики.
-        </p>
+      <section className="page-heading page-heading--split">
+        <div>
+          <p className="eyebrow">ЦПИ: метрики и рабочие определения</p>
+          <h1>Панель метрик</h1>
+          <p>
+            Выручка, поток и средний чек — по факту оплаты. Артефакт засчитывается только после
+            оценки по рубрикатору (Q ≥ 7 без нуля по релевантности и проверяемости).
+          </p>
+        </div>
+        <div className="heading-actions" style={{ alignItems: 'center', display: 'flex', gap: '0.4rem' }}>
+          <button
+            aria-label="Предыдущий месяц"
+            className="button button--secondary button--compact"
+            onClick={() => setMonth((current) => shiftMonth(current, -1))}
+            type="button"
+          >
+            <ChevronLeft size={16} />
+          </button>
+          <input
+            aria-label="Период"
+            className="select-control"
+            onChange={(event) => event.target.value && setMonth(event.target.value)}
+            type="month"
+            value={month}
+          />
+          <button
+            aria-label="Следующий месяц"
+            className="button button--secondary button--compact"
+            onClick={() => setMonth((current) => shiftMonth(current, 1))}
+            type="button"
+          >
+            <ChevronRight size={16} />
+          </button>
+        </div>
       </section>
 
       <section className="page-heading">
-        <p className="eyebrow">Поток (Throughput)</p>
+        <p className="eyebrow">Экономика</p>
       </section>
       <section className="metric-grid">
-        <Link className="metric-card metric-card--hero" href="/deals?status=WON">
+        <Link className="metric-card metric-card--hero" href="/deals">
           <span className="metric-card__icon">
             <Banknote size={20} />
           </span>
-          <span className="metric-card__label">Выручка (всего)</span>
-          <strong>{metrics ? formatMoney(metrics.flow.revenueTotal) : '…'}</strong>
-          <small>
-            {metrics ? formatMoney(metrics.flow.revenue90d) : '…'} за последние 90 дней
-          </small>
+          <span className="metric-card__label">Выручка (оплачено)</span>
+          <strong>{m ? money(m.economics.revenue) : '…'}</strong>
+          <small>{m?.economics.paidDeals ?? '…'} оплаченных сделок за период</small>
         </Link>
+        <div className="metric-card">
+          <span className="metric-card__kicker metric-card__kicker--green">Главная метрика</span>
+          <span className="metric-card__label">Поток</span>
+          <strong>{m ? money(m.economics.flow) : '…'}</strong>
+          <small>
+            выручка − переменные затраты ({m ? money(m.economics.variableExpenses) : '…'})
+          </small>
+        </div>
         <div className="metric-card">
           <span className="metric-card__kicker metric-card__kicker--green">Пара к выручке</span>
           <span className="metric-card__label">Средний чек</span>
-          <strong>{metrics ? formatMoney(metrics.flow.averageCheck) : '…'}</strong>
-          <small>{metrics?.flow.wonDeals ?? '…'} выигранных сделок</small>
+          <strong>{m ? money(m.economics.averageCheck) : '…'}</strong>
+          <small>по оплаченным сделкам периода</small>
         </div>
-        <div className="metric-card">
-          <span className="metric-card__kicker metric-card__kicker--green">Ключевой показатель</span>
-          <span className="metric-card__label">Выручка на голову</span>
-          <strong>{metrics ? formatMoney(metrics.flow.revenuePerHead) : '…'}</strong>
-          <small>по всей базе ({metrics?.investments.basePeople ?? '…'} чел.)</small>
-        </div>
-        <Link className="metric-card" href="/deals?status=LEAD">
-          <span className="metric-card__kicker metric-card__kicker--amber">В работе</span>
-          <span className="metric-card__label">Открытый пайплайн</span>
-          <strong>{metrics ? formatMoney(metrics.flow.openPipeline) : '…'}</strong>
-          <small>{metrics?.flow.openDeals ?? '…'} сделок в лидах и переговорах</small>
+        <Link className="metric-card" href="/expenses">
+          <span className="metric-card__icon">
+            <Wallet size={20} />
+          </span>
+          <span className="metric-card__label">OpEx %</span>
+          <strong>{m ? pct(m.economics.opexPercent) : '…'}</strong>
+          <small>
+            операционные + бэк-офис: {m ? money(m.economics.opexExpenses) : '…'} (бэк-офис{' '}
+            {m ? pct(m.economics.backOfficePercent) : '…'})
+          </small>
         </Link>
-      </section>
-
-      <section className="dashboard-columns">
-        <article className="panel panel--wide">
-          <header className="panel__header">
-            <div>
-              <p className="eyebrow">Структура выручки</p>
-              <h2>Гранты и коммерция</h2>
-            </div>
-          </header>
-          <div className="artifact-activity">
-            <div>
-              <strong>{metrics ? formatMoney(metrics.flow.grantRevenue) : '…'}</strong>
-              <span>грантовая выручка</span>
-            </div>
-            <div>
-              <strong>{metrics ? formatMoney(metrics.flow.commercialRevenue) : '…'}</strong>
-              <span>коммерческая выручка</span>
-            </div>
-            <div>
-              <strong>{metrics?.flow.wonDeals90d ?? '…'}</strong>
-              <span>сделок закрыто за 90 дней</span>
-            </div>
-          </div>
-        </article>
-        <article className="panel">
-          <header className="panel__header">
-            <div>
-              <p className="eyebrow">Инвестиции (база)</p>
-              <h2>Размер и качество</h2>
-            </div>
-          </header>
-          <Link className="queue-item" href="/participants">
-            <span className="queue-item__icon queue-item__icon--violet">
-              <Users size={19} />
-            </span>
-            <span>
-              <strong>{metrics?.investments.basePeople.toLocaleString('ru-RU') ?? '…'}</strong>
-              <small>человек в базе (+{metrics?.investments.newPeople30d ?? '…'} за 30 дней)</small>
-            </span>
-          </Link>
-          <Link className="queue-item" href="/participants?activationState=ACTIVATED">
-            <span className="queue-item__icon queue-item__icon--violet">
-              <TrendingUp size={19} />
-            </span>
-            <span>
-              <strong>{metrics ? percent(metrics.investments.activationRate) : '…'}</strong>
-              <small>активированных участников ({metrics?.investments.activated ?? '…'})</small>
-            </span>
-          </Link>
-          <Link className="queue-item" href="/participants?activityStatus=INACTIVE">
-            <span className="queue-item__icon queue-item__icon--red">
-              <TrendingDown size={19} />
-            </span>
-            <span>
-              <strong>{metrics ? percent(metrics.investments.churnRate) : '…'}</strong>
-              <small>
-                отвалившихся: активированы, но без артефактов 3 месяца (
-                {metrics?.investments.churned ?? '…'})
-              </small>
-            </span>
-          </Link>
-        </article>
+        <div className="metric-card">
+          <span className="metric-card__label">Средняя выручка на голову</span>
+          <strong>{m ? money(m.economics.revenuePerActiveHead) : '…'}</strong>
+          <small>
+            активные головы: {m?.economics.activeHeadsStart ?? '…'} →{' '}
+            {m?.economics.activeHeadsEnd ?? '…'} (среднее за период)
+          </small>
+        </div>
       </section>
 
       <section className="page-heading">
-        <p className="eyebrow">Процессные метрики</p>
+        <p className="eyebrow">Воронка и артефакты</p>
       </section>
       <section className="metric-grid">
-        <Link className="metric-card" href="/partners">
-          <span className="metric-card__icon">
-            <Handshake size={20} />
-          </span>
-          <span className="metric-card__label">Партнёры с касанием за 30 дней</span>
-          <strong>
-            {metrics ? `${metrics.processes.partnersTouched30d} / ${metrics.processes.partnersTotal}` : '…'}
-          </strong>
-          <small>{metrics?.processes.activeAgreements ?? '…'} активных соглашений</small>
-        </Link>
-        <Link className="metric-card" href="/products?status=ON_SALE">
-          <span className="metric-card__icon">
-            <Package size={20} />
-          </span>
-          <span className="metric-card__label">Продукты в продаже</span>
-          <strong>
-            {metrics ? `${metrics.processes.productsOnSale} / ${metrics.processes.productsTotal}` : '…'}
-          </strong>
-          <small>{metrics?.processes.productsClosed ?? '…'} закрыто (не продавались)</small>
-        </Link>
-        <Link className="metric-card" href="/events">
-          <span className="metric-card__icon">
-            <CalendarDays size={20} />
-          </span>
-          <span className="metric-card__label">Мероприятия</span>
-          <strong>{metrics?.processes.eventsUpcoming ?? '…'}</strong>
-          <small>текущих и запланированных из {metrics?.processes.eventsTotal ?? '…'}</small>
-        </Link>
         <Link className="metric-card" href="/participants">
           <span className="metric-card__icon">
             <Users size={20} />
           </span>
-          <span className="metric-card__label">Авторы артефактов за 90 дней</span>
-          <strong>{metrics?.investments.artifactAuthors90d ?? '…'}</strong>
-          <small>артефакт — сквозная «валюта» процессов</small>
+          <span className="metric-card__label">Новые строки в базе</span>
+          <strong>{m?.funnel.newPeople ?? '…'}</strong>
+          <small>
+            стоимость строки: {m ? money(m.funnel.costPerNewPerson) : '…'} (привлечение{' '}
+            {m ? money(m.funnel.acquisitionExpenses) : '…'})
+          </small>
         </Link>
+        <div className="metric-card">
+          <span className="metric-card__label">Конверсия в качественный артефакт</span>
+          <strong>{m ? pct(m.funnel.artifactConversion) : '…'}</strong>
+          <small>
+            {m?.funnel.qualityArtifactAuthors ?? '…'} авторов из{' '}
+            {m?.funnel.actualParticipants ?? '…'} фактических участников
+          </small>
+        </div>
+        <div className="metric-card">
+          <span className="metric-card__label">Стоимость человека с артефактом</span>
+          <strong>{m ? money(m.funnel.costPerQualityAuthor) : '…'}</strong>
+          <small>
+            прямые расходы {m ? money(m.funnel.directExpenses) : '…'} / уникальные авторы
+          </small>
+        </div>
+        <div className="metric-card">
+          <span className="metric-card__label">Средний Q_artifact</span>
+          <strong>
+            {m ? (m.funnel.averageQArtifact === null ? 'н/д' : m.funnel.averageQArtifact.toFixed(1)) : '…'}
+          </strong>
+          <small>{m?.funnel.reviewedArtifacts ?? '…'} оценённых артефактов за период</small>
+        </div>
+      </section>
+
+      <section className="page-heading">
+        <p className="eyebrow">Активация и удержание</p>
+      </section>
+      <section className="metric-grid">
+        <div className="metric-card">
+          <span className="metric-card__kicker metric-card__kicker--green">Ключевой переход</span>
+          <span className="metric-card__label">Процент активированных</span>
+          <strong>{m ? pct(m.activation.activationRate) : '…'}</strong>
+          <small>
+            {m?.activation.newActivatedHeads ?? '…'} активированных из{' '}
+            {m?.activation.firstQualityAuthors ?? '…'} с первым качественным артефактом
+          </small>
+        </div>
+        <div className="metric-card">
+          <span className="metric-card__label">Стоимость активации</span>
+          <strong>{m ? money(m.activation.activationCost) : '…'}</strong>
+          <small>
+            расходы на активацию: {m ? money(m.activation.activationExpenses) : '…'}
+          </small>
+        </div>
+        <div className="metric-card">
+          <span className="metric-card__kicker metric-card__kicker--amber">
+            Отрицательная метрика
+          </span>
+          <span className="metric-card__label">Отток 90</span>
+          <strong>{m ? pct(m.activation.churn90) : '…'}</strong>
+          <small>
+            <TrendingDown size={13} /> {m?.activation.churnedFromStart ?? '…'} из{' '}
+            {m?.activation.activeAtStart ?? '…'} активных на начало без артефакта 90 дней
+          </small>
+        </div>
+        <div className="metric-card">
+          <span className="metric-card__label">Удержание активных голов</span>
+          <strong>{m ? pct(m.activation.retention) : '…'}</strong>
+          <small>
+            <TrendingUp size={13} /> 100 % − отток 90
+          </small>
+        </div>
+      </section>
+
+      <section className="page-heading">
+        <p className="eyebrow">Монетизация</p>
+      </section>
+      <section className="metric-grid">
+        <div className="metric-card">
+          <span className="metric-card__label">Конверсия в монетизацию</span>
+          <strong>{m ? pct(m.monetization.monetizationRate) : '…'}</strong>
+          <small>
+            {m?.monetization.monetizedHeads ?? '…'} из {m?.monetization.activatedHeads ?? '…'}{' '}
+            активированных связаны с оплаченной сделкой
+          </small>
+        </div>
+        <Link className="metric-card" href="/partners">
+          <span className="metric-card__icon">
+            <Handshake size={20} />
+          </span>
+          <span className="metric-card__label">Выручка на активного партнёра</span>
+          <strong>{m ? money(m.monetization.revenuePerActivePartner) : '…'}</strong>
+          <small>
+            {m ? money(m.monetization.partnerRevenue) : '…'} партнёрской выручки /{' '}
+            {m?.monetization.activePartners ?? '…'} активных партнёров
+          </small>
+        </Link>
+      </section>
+
+      <section className="panel panel--wide">
+        <header className="panel__header">
+          <div>
+            <p className="eyebrow">Поток продукта</p>
+            <h2>Продуктовая результативность</h2>
+          </div>
+          <Link className="text-link" href="/products">
+            <Package size={14} /> Все продукты
+          </Link>
+        </header>
+        {m && m.monetization.products.length > 0 ? (
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Продукт</th>
+                  <th className="number-cell">Выручка (оплачено)</th>
+                  <th className="number-cell">Переменные затраты</th>
+                  <th className="number-cell">Поток</th>
+                </tr>
+              </thead>
+              <tbody>
+                {m.monetization.products.map((product) => (
+                  <tr key={product.productId}>
+                    <td>{product.name}</td>
+                    <td className="number-cell">{money(product.revenue)}</td>
+                    <td className="number-cell">{money(product.variableExpenses)}</td>
+                    <td className="number-cell">
+                      <strong>{money(product.flow)}</strong>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="muted">
+            {m ? 'За период нет продуктов с выручкой или затратами.' : 'Загружаем…'}
+          </p>
+        )}
       </section>
     </div>
   );

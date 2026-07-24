@@ -12,6 +12,51 @@ interface ArtifactReviewDialogProps {
   onReviewed: () => void | Promise<void>;
 }
 
+/** Рубрикатор качества ЦПИ: пять критериев по 0–2, Q_artifact = сумма. */
+const REVIEW_CRITERIA = [
+  {
+    code: 'relevance',
+    label: 'Релевантность',
+    blocking: true,
+    hint: 'Отвечает задаче мероприятия, проекта, продукта или запроса',
+  },
+  {
+    code: 'completeness',
+    label: 'Полнота',
+    blocking: false,
+    hint: 'Можно понять и использовать без устных пояснений автора',
+  },
+  {
+    code: 'verifiability',
+    label: 'Проверяемость',
+    blocking: true,
+    hint: 'Есть доказательство: ссылка, файл, код, расчёт, демо',
+  },
+  {
+    code: 'applicability',
+    label: 'Потенциал применения',
+    blocking: false,
+    hint: 'Можно использовать дальше: в проекте, продукте, продаже',
+  },
+  {
+    code: 'timeliness',
+    label: 'Срок и формат',
+    blocking: false,
+    hint: 'Сдан в срок и в переиспользуемом формате',
+  },
+] as const;
+
+type CriterionCode = (typeof REVIEW_CRITERIA)[number]['code'];
+type CriteriaState = Record<CriterionCode, 0 | 1 | 2>;
+
+const DEFAULT_CRITERIA: CriteriaState = {
+  relevance: 2,
+  completeness: 2,
+  verifiability: 2,
+  applicability: 2,
+  timeliness: 2,
+};
+
 export function ArtifactReviewDialog({
   versionId,
   onClose,
@@ -19,7 +64,7 @@ export function ArtifactReviewDialog({
 }: ArtifactReviewDialogProps) {
   const [detail, setDetail] = useState<ArtifactVersionDetail | null>(null);
   const [loading, setLoading] = useState(true);
-  const [score, setScore] = useState('');
+  const [criteria, setCriteria] = useState<CriteriaState>(DEFAULT_CRITERIA);
   const [decision, setDecision] = useState<'NEEDS_REVISION' | 'ACCEPTED' | 'REJECTED'>('ACCEPTED');
   const [comment, setComment] = useState('');
   const [saving, setSaving] = useState(false);
@@ -34,7 +79,6 @@ export function ArtifactReviewDialog({
         if (!active) return;
         setDetail(result);
         if (result.currentReview) {
-          setScore(String(result.currentReview.score));
           setDecision(result.currentReview.decision);
         }
       })
@@ -49,11 +93,16 @@ export function ArtifactReviewDialog({
     };
   }, [versionId]);
 
+  const totalScore = REVIEW_CRITERIA.reduce((sum, item) => sum + criteria[item.code], 0);
+  const blockedByZero = REVIEW_CRITERIA.some(
+    (item) => item.blocking && criteria[item.code] === 0,
+  );
+  const isQuality = totalScore >= 7 && !blockedByZero;
+
   async function submitReview(event: FormEvent) {
     event.preventDefault();
-    const parsedScore = Number(score);
-    if (!Number.isInteger(parsedScore) || parsedScore < 1 || parsedScore > 10) {
-      setError('Оценка должна быть целым числом от 1 до 10.');
+    if (decision === 'ACCEPTED' && blockedByZero) {
+      setError('Нельзя принять артефакт с нулём по релевантности или проверяемости.');
       return;
     }
     setSaving(true);
@@ -62,7 +111,7 @@ export function ArtifactReviewDialog({
       await api(`/artifact-versions/${versionId}/reviews`, {
         method: 'POST',
         body: JSON.stringify({
-          score: parsedScore,
+          criteria,
           decision,
           comment: comment.trim() || undefined,
         }),
@@ -198,18 +247,27 @@ export function ArtifactReviewDialog({
             {detail.status === 'SUBMITTED' && detail.canReview && (
               <form onSubmit={submitReview}>
                 <div className="form-grid artifact-review-form">
-                  <label className="form-field">
-                    <span>Оценка 1–10 *</span>
-                    <input
-                      type="number"
-                      min={1}
-                      max={10}
-                      step={1}
-                      required
-                      value={score}
-                      onChange={(event) => setScore(event.target.value)}
-                    />
-                  </label>
+                  {REVIEW_CRITERIA.map((item) => (
+                    <label className="form-field" key={item.code} title={item.hint}>
+                      <span>
+                        {item.label}
+                        {item.blocking ? ' (0 блокирует приёмку)' : ''} *
+                      </span>
+                      <select
+                        value={criteria[item.code]}
+                        onChange={(event) =>
+                          setCriteria((prev) => ({
+                            ...prev,
+                            [item.code]: Number(event.target.value) as 0 | 1 | 2,
+                          }))
+                        }
+                      >
+                        <option value={0}>0 — не выполнено</option>
+                        <option value={1}>1 — частично</option>
+                        <option value={2}>2 — полностью</option>
+                      </select>
+                    </label>
+                  ))}
                   <label className="form-field">
                     <span>Решение *</span>
                     <select
@@ -221,6 +279,23 @@ export function ArtifactReviewDialog({
                       <option value="REJECTED">Отклонён</option>
                     </select>
                   </label>
+                  <div className="form-field">
+                    <span>Q_artifact</span>
+                    <p style={{ margin: 0 }}>
+                      <strong>{totalScore} / 10</strong>{' '}
+                      {isQuality ? (
+                        <span style={{ color: 'var(--color-success, #15803d)' }}>
+                          качественный
+                        </span>
+                      ) : (
+                        <span style={{ color: 'var(--color-danger, #b91c1c)' }}>
+                          {blockedByZero
+                            ? 'приёмка заблокирована нулём'
+                            : 'ниже порога 7/10'}
+                        </span>
+                      )}
+                    </p>
+                  </div>
                   <label className="form-field form-field--full">
                     <span>Комментарий</span>
                     <textarea

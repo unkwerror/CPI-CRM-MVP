@@ -14,6 +14,7 @@ import type {
   DealSummary,
   DealType,
   PartnerSummary,
+  PersonSummary,
   ProductSummary,
 } from '@/lib/types';
 
@@ -33,6 +34,7 @@ function DealsContent() {
   const [error, setError] = useState<string | null>(null);
   const [canWrite, setCanWrite] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
+  const [payDeal, setPayDeal] = useState<DealSummary | null>(null);
 
   const loadDeals = useCallback(async () => {
     setLoading(true);
@@ -84,9 +86,7 @@ function DealsContent() {
   }
 
   const hasFilters = ['status', 'dealType'].some((key) => searchParams.has(key));
-  const wonAmount = items
-    .filter((deal) => deal.status === 'WON')
-    .reduce((sum, deal) => sum + deal.amount, 0);
+  const paidAmount = items.reduce((sum, deal) => sum + (deal.paidAmount ?? 0), 0);
   const openAmount = items
     .filter((deal) => deal.status === 'LEAD' || deal.status === 'NEGOTIATION')
     .reduce((sum, deal) => sum + deal.amount, 0);
@@ -98,7 +98,8 @@ function DealsContent() {
           <p className="eyebrow">Обеспечение выручки: гранты и коммерция</p>
           <h1>Продажи</h1>
           <p>
-            Выиграно {formatMoney(wonAmount)} · в работе {formatMoney(openAmount)}
+            Оплачено {formatMoney(paidAmount)} · в работе {formatMoney(openAmount)} — выручка
+            считается по факту оплаты
           </p>
         </div>
         {canWrite && (
@@ -167,7 +168,7 @@ function DealsContent() {
                   <th>Партнёр</th>
                   <th className="number-cell">Сумма</th>
                   <th>Статус</th>
-                  <th>Закрыта</th>
+                  <th>Оплата</th>
                   {canWrite && (
                     <th>
                       <span className="sr-only">Действия</span>
@@ -196,6 +197,13 @@ function DealsContent() {
                               {deal.productName && (
                                 <small style={{ display: 'block' }}>{deal.productName}</small>
                               )}
+                              {deal.personId && (
+                                <small style={{ display: 'block' }}>
+                                  <Link className="text-link" href={`/participants/${deal.personId}`}>
+                                    {deal.personName}
+                                  </Link>
+                                </small>
+                              )}
                             </span>
                           </span>
                         </td>
@@ -213,23 +221,43 @@ function DealsContent() {
                         <td>
                           <span className="event-status">{DEAL_STATUS_LABELS[deal.status]}</span>
                         </td>
-                        <td>{deal.closedAt ? formatDate(deal.closedAt) : '—'}</td>
+                        <td>
+                          {deal.paidAt ? (
+                            <span>
+                              <strong>{formatMoney(deal.paidAmount ?? 0, deal.currency)}</strong>
+                              <small style={{ display: 'block' }}>{formatDate(deal.paidAt)}</small>
+                            </span>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
                         {canWrite && (
                           <td>
-                            <select
-                              aria-label={`Статус «${deal.title}»`}
-                              className="select-control"
-                              value={deal.status}
-                              onChange={(event) =>
-                                void changeStatus(deal, event.target.value as DealStatus)
-                              }
-                            >
-                              {Object.entries(DEAL_STATUS_LABELS).map(([value, label]) => (
-                                <option key={value} value={value}>
-                                  {label}
-                                </option>
-                              ))}
-                            </select>
+                            <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                              <select
+                                aria-label={`Статус «${deal.title}»`}
+                                className="select-control"
+                                value={deal.status}
+                                onChange={(event) =>
+                                  void changeStatus(deal, event.target.value as DealStatus)
+                                }
+                              >
+                                {Object.entries(DEAL_STATUS_LABELS).map(([value, label]) => (
+                                  <option key={value} value={value}>
+                                    {label}
+                                  </option>
+                                ))}
+                              </select>
+                              {!deal.paidAt && (
+                                <button
+                                  className="button button--secondary button--compact"
+                                  type="button"
+                                  onClick={() => setPayDeal(deal)}
+                                >
+                                  Оплата
+                                </button>
+                              )}
+                            </div>
                           </td>
                         )}
                       </tr>
@@ -249,6 +277,129 @@ function DealsContent() {
           }}
         />
       )}
+      {payDeal && (
+        <MarkPaidDialog
+          deal={payDeal}
+          onClose={() => setPayDeal(null)}
+          onSaved={() => {
+            setPayDeal(null);
+            void loadDeals();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Отметка оплаты: выручка, поток и средний чек считаются по факту оплаты. */
+function MarkPaidDialog({
+  deal,
+  onClose,
+  onSaved,
+}: {
+  deal: DealSummary;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [paidDate, setPaidDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [paidAmount, setPaidAmount] = useState(String(deal.amount));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    setError(null);
+    try {
+      await api(`/deals/${deal.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          version: deal.version,
+          paidAt: new Date(`${paidDate}T12:00:00`).toISOString(),
+          paidAmount: Number(paidAmount || 0),
+        }),
+      });
+      onSaved();
+    } catch (caught) {
+      setError(
+        caught instanceof ApiError
+          ? (caught.detail ?? caught.message)
+          : 'Не удалось отметить оплату',
+      );
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={() => !saving && onClose()}>
+      <section
+        aria-modal="true"
+        className="dialog"
+        onMouseDown={(event) => event.stopPropagation()}
+        role="dialog"
+      >
+        <header className="dialog__header">
+          <div>
+            <p className="eyebrow">Выручка по факту оплаты</p>
+            <h2>Оплата: {deal.title}</h2>
+          </div>
+          <button
+            aria-label="Закрыть"
+            className="icon-button"
+            disabled={saving}
+            onClick={onClose}
+            type="button"
+          >
+            <X size={18} />
+          </button>
+        </header>
+        <form onSubmit={submit}>
+          <div className="form-grid">
+            <label className="form-field">
+              <span>Дата оплаты *</span>
+              <input
+                onChange={(event) => setPaidDate(event.target.value)}
+                required
+                type="date"
+                value={paidDate}
+              />
+            </label>
+            <label className="form-field">
+              <span>Оплаченная сумма, ₽ *</span>
+              <input
+                min={0}
+                onChange={(event) => setPaidAmount(event.target.value)}
+                required
+                step="0.01"
+                type="number"
+                value={paidAmount}
+              />
+            </label>
+          </div>
+          {error && (
+            <p aria-live="polite" className="form-error">
+              {error}
+            </p>
+          )}
+          <footer className="dialog__footer">
+            <button
+              className="button button--secondary"
+              disabled={saving}
+              onClick={onClose}
+              type="button"
+            >
+              Отмена
+            </button>
+            <button
+              className="button button--primary"
+              disabled={saving || paidDate === '' || paidAmount === ''}
+              type="submit"
+            >
+              {saving ? 'Сохраняем…' : 'Отметить оплату'}
+            </button>
+          </footer>
+        </form>
+      </section>
     </div>
   );
 }
@@ -263,8 +414,26 @@ function CreateDealDialog({ onClose, onCreated }: { onClose: () => void; onCreat
   const [comment, setComment] = useState('');
   const [partners, setPartners] = useState<PartnerSummary[]>([]);
   const [products, setProducts] = useState<ProductSummary[]>([]);
+  const [personQuery, setPersonQuery] = useState('');
+  const [personOptions, setPersonOptions] = useState<PersonSummary[]>([]);
+  const [selectedPerson, setSelectedPerson] = useState<PersonSummary | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Поиск участника для продажи компетенций/«голов».
+  useEffect(() => {
+    const query = personQuery.trim();
+    if (query.length < 2) {
+      setPersonOptions([]);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void api<{ items: PersonSummary[] }>(`/people?q=${encodeURIComponent(query)}`)
+        .then((response) => setPersonOptions(response.items.slice(0, 8)))
+        .catch(() => setPersonOptions([]));
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [personQuery]);
 
   useEffect(() => {
     function closeOnEscape(event: KeyboardEvent) {
@@ -296,6 +465,7 @@ function CreateDealDialog({ onClose, onCreated }: { onClose: () => void; onCreat
           amount: Number(amount || 0),
           ...(partnerId ? { partnerId } : {}),
           ...(productId ? { productId } : {}),
+          ...(selectedPerson ? { personId: selectedPerson.id } : {}),
           ...(expectedCloseAt
             ? { expectedCloseAt: new Date(expectedCloseAt).toISOString() }
             : {}),
@@ -398,6 +568,49 @@ function CreateDealDialog({ onClose, onCreated }: { onClose: () => void; onCreat
                 value={expectedCloseAt}
               />
             </label>
+            <div className="form-field form-field--full">
+              <span>Участник (продажа компетенций/«головы»)</span>
+              {selectedPerson ? (
+                <p style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', margin: 0 }}>
+                  <strong>{selectedPerson.canonicalFullName}</strong>
+                  <button
+                    className="button button--secondary button--compact"
+                    onClick={() => {
+                      setSelectedPerson(null);
+                      setPersonQuery('');
+                    }}
+                    type="button"
+                  >
+                    Убрать
+                  </button>
+                </p>
+              ) : (
+                <>
+                  <input
+                    onChange={(event) => setPersonQuery(event.target.value)}
+                    placeholder="Начните вводить ФИО…"
+                    value={personQuery}
+                  />
+                  {personOptions.length > 0 && (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginTop: '0.35rem' }}>
+                      {personOptions.map((person) => (
+                        <button
+                          className="button button--secondary button--compact"
+                          key={person.id}
+                          onClick={() => {
+                            setSelectedPerson(person);
+                            setPersonOptions([]);
+                          }}
+                          type="button"
+                        >
+                          {person.canonicalFullName}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
             <label className="form-field form-field--full">
               <span>Комментарий</span>
               <textarea

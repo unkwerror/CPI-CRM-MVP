@@ -1,3 +1,4 @@
+export * from './artifact-quality.js';
 export * from './content-fingerprint.js';
 export * from './lifecycle.js';
 export * from './normalization.js';

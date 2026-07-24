@@ -14,6 +14,7 @@ import {
   Search,
   Settings,
   Users,
+  Wallet,
   X,
 } from 'lucide-react';
 import Link from 'next/link';
@@ -32,7 +33,8 @@ const navigation = [
   { href: '/partners', label: 'Партнёры', icon: Handshake, permission: 'partners.read' },
   { href: '/products', label: 'Продукты', icon: Package, permission: 'products.read' },
   { href: '/deals', label: 'Продажи', icon: HandCoins, permission: 'deals.read' },
-  { href: '/metrics', label: 'Метрики FPF', icon: Gauge, permission: 'metrics.read' },
+  { href: '/expenses', label: 'Расходы', icon: Wallet, permission: 'expenses.read' },
+  { href: '/metrics', label: 'Метрики', icon: Gauge, permission: 'metrics.read' },
   { href: '/imports', label: 'Импорт', icon: Database, permission: 'imports.run' },
 ];
 

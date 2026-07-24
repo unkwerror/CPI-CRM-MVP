@@ -51,6 +51,8 @@ export interface PersonDetail extends PersonSummary {
   sources: SourceSummary[];
   /** Free-form editable notes; initially collated from imported source data. */
   notes?: string | null;
+  /** Индекс качества головы Q_head. */
+  headQuality?: HeadQuality;
 }
 
 export interface ArtifactSummary {
@@ -337,40 +339,106 @@ export interface DealSummary {
   partnerName?: string | null;
   productName?: string | null;
   ownerName?: string | null;
+  paidAt?: string | null;
+  paidAmount?: number | null;
+  personId?: string | null;
+  personName?: string | null;
 }
 
-export interface FpfMetrics {
-  flow: {
-    revenueTotal: number;
-    revenue90d: number;
-    wonDeals: number;
-    wonDeals90d: number;
-    averageCheck: number;
-    revenuePerHead: number;
-    grantRevenue: number;
-    commercialRevenue: number;
-    openPipeline: number;
-    openDeals: number;
+export type ExpenseCategory =
+  | 'VARIABLE'
+  | 'OPEX'
+  | 'BACK_OFFICE'
+  | 'ACQUISITION'
+  | 'ACTIVATION';
+
+export interface ExpenseSummary {
+  id: string;
+  category: ExpenseCategory;
+  amount: number;
+  currency: string;
+  occurredAt: string | null;
+  description: string;
+  version: number;
+  createdAt?: string | null;
+  eventId?: string | null;
+  eventName?: string | null;
+  productId?: string | null;
+  productName?: string | null;
+  dealId?: string | null;
+  dealTitle?: string | null;
+  projectId?: string | null;
+  projectName?: string | null;
+  ownerName?: string | null;
+}
+
+/** Панель метрик ЦПИ (документ «ЦПИ: метрики и рабочие определения»). */
+export interface CpiMetrics {
+  period: { from: string; to: string };
+  economics: {
+    revenue: number;
+    paidDeals: number;
+    variableExpenses: number;
+    flow: number;
+    averageCheck: number | null;
+    opexExpenses: number;
+    backOfficeExpenses: number;
+    opexPercent: number | null;
+    backOfficePercent: number | null;
+    activeHeadsStart: number;
+    activeHeadsEnd: number;
+    revenuePerActiveHead: number | null;
   };
-  investments: {
-    basePeople: number;
-    activated: number;
-    activationRate: number;
-    churned: number;
-    churnRate: number;
-    newPeople30d: number;
-    artifactAuthors90d: number;
+  funnel: {
+    newPeople: number;
+    acquisitionExpenses: number;
+    costPerNewPerson: number | null;
+    actualParticipants: number;
+    qualityArtifactAuthors: number;
+    artifactConversion: number | null;
+    directExpenses: number;
+    costPerQualityAuthor: number | null;
+    reviewedArtifacts: number;
+    averageQArtifact: number | null;
   };
-  processes: {
-    partnersTotal: number;
-    partnersActive: number;
-    partnersTouched30d: number;
-    activeAgreements: number;
-    productsTotal: number;
-    productsOnSale: number;
-    productsClosed: number;
-    eventsTotal: number;
-    eventsUpcoming: number;
+  activation: {
+    firstQualityAuthors: number;
+    newActivatedHeads: number;
+    activationRate: number | null;
+    activationExpenses: number;
+    activationCost: number | null;
+    activeAtStart: number;
+    churnedFromStart: number;
+    churn90: number | null;
+    retention: number | null;
+  };
+  monetization: {
+    activatedHeads: number;
+    monetizedHeads: number;
+    monetizationRate: number | null;
+    partnerRevenue: number;
+    activePartners: number;
+    revenuePerActivePartner: number | null;
+    products: {
+      productId: string;
+      name: string;
+      revenue: number;
+      variableExpenses: number;
+      flow: number;
+    }[];
+  };
+}
+
+/** Индекс качества головы Q_head (0–100) с компонентами. */
+export interface HeadQuality {
+  score: number;
+  band: 'READY' | 'ACTIVATED' | 'WEAK' | 'REACTIVATE';
+  bandLabel: string;
+  components: {
+    artifactQuality: number;
+    regularity: number;
+    projectInvolvement: number;
+    commercialApplicability: number;
   };
 }
 

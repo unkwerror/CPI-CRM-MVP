@@ -190,6 +190,14 @@ export const outboxStatusEnum = pgEnum('outbox_status', [
   'PUBLISHED',
   'FAILED',
 ]);
+export const expenseCategoryEnum = pgEnum('expense_category', [
+  'VARIABLE',
+  'OPEX',
+  'BACK_OFFICE',
+  'ACQUISITION',
+  'ACTIVATION',
+]);
+
 export const partnerKindEnum = pgEnum('partner_kind', [
   'COMMERCIAL',
   'GRANT_FUND',
@@ -1046,6 +1054,8 @@ export const artifactReviews = pgTable(
       .notNull()
       .references(() => rubricVersions.id, { onDelete: 'restrict' }),
     score: smallint('score'),
+    /** Рубрикатор ЦПИ: 5 критериев по 0–2; score = сумма. NULL для старых ревью. */
+    criteria: jsonb('criteria').$type<Record<string, number>>(),
     comment: text('comment'),
     status: reviewStatusEnum('status').notNull().default('PENDING'),
     decision: reviewDecisionEnum('decision'),
@@ -1067,7 +1077,7 @@ export const artifactReviews = pgTable(
       .where(sql`${table.supersedesReviewId} is not null`),
     check(
       'artifact_reviews_score_check',
-      sql`${table.score} is null or (${table.score} between 1 and 10)`,
+      sql`${table.score} is null or (${table.score} between 0 and 10)`,
     ),
     check(
       'artifact_reviews_final_fields_check',
@@ -1343,6 +1353,8 @@ export const deals = pgTable(
     }),
     productId: uuid('product_id').references(() => products.id, { onDelete: 'restrict' }),
     projectId: uuid('project_id').references(() => projects.id, { onDelete: 'set null' }),
+    /** Продажа компетенций/«голов»: сделка может ссылаться на участника. */
+    personId: uuid('person_id').references(() => persons.id, { onDelete: 'set null' }),
     title: text('title').notNull(),
     dealType: dealTypeEnum('deal_type').notNull(),
     status: dealStatusEnum('status').notNull().default('LEAD'),
@@ -1350,6 +1362,9 @@ export const deals = pgTable(
     currency: text('currency').notNull().default('RUB'),
     expectedCloseAt: timestamptz('expected_close_at'),
     closedAt: timestamptz('closed_at'),
+    /** Факт оплаты: выручка и поток считаются по paid_at, не по статусу. */
+    paidAt: timestamptz('paid_at'),
+    paidAmount: numeric('paid_amount', { precision: 14, scale: 2 }),
     comment: text('comment'),
     ownerUserId: uuid('owner_user_id').references(() => appUsers.id, { onDelete: 'set null' }),
     ...editable(),
@@ -1358,11 +1373,50 @@ export const deals = pgTable(
     index('deals_organization_idx').on(table.organizationId),
     index('deals_partner_idx').on(table.partnerId),
     index('deals_pipeline_idx').on(table.status, table.closedAt),
+    index('deals_paid_idx').on(table.paidAt).where(sql`${table.paidAt} is not null`),
+    index('deals_person_idx').on(table.personId).where(sql`${table.personId} is not null`),
     check('deals_amount_check', sql`${table.amount} >= 0`),
     check(
       'deals_closed_fields_check',
       sql`${table.status} in ('LEAD', 'NEGOTIATION') or ${table.closedAt} is not null`,
     ),
+    check('deals_paid_pair_check', sql`(${table.paidAt} is null) = (${table.paidAmount} is null)`),
+    check(
+      'deals_paid_amount_check',
+      sql`${table.paidAmount} is null or ${table.paidAmount} >= 0`,
+    ),
+  ],
+);
+
+/**
+ * Расходы ЦПИ с привязкой хотя бы к одному уровню: период (occurred_at),
+ * мероприятие, продукт, сделка или проект. Основа для потока, OpEx%,
+ * стоимости строки, активации и человека с артефактом.
+ */
+export const expenses = pgTable(
+  'expenses',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    organizationId: uuid('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'restrict' }),
+    category: expenseCategoryEnum('category').notNull(),
+    amount: numeric('amount', { precision: 14, scale: 2 }).notNull(),
+    currency: text('currency').notNull().default('RUB'),
+    occurredAt: timestamptz('occurred_at').notNull(),
+    description: text('description').notNull(),
+    eventId: uuid('event_id').references(() => events.id, { onDelete: 'set null' }),
+    productId: uuid('product_id').references(() => products.id, { onDelete: 'set null' }),
+    dealId: uuid('deal_id').references(() => deals.id, { onDelete: 'set null' }),
+    projectId: uuid('project_id').references(() => projects.id, { onDelete: 'set null' }),
+    ownerUserId: uuid('owner_user_id').references(() => appUsers.id, { onDelete: 'set null' }),
+    ...editable(),
+  },
+  (table) => [
+    index('expenses_organization_idx').on(table.organizationId),
+    index('expenses_period_idx').on(table.occurredAt),
+    index('expenses_category_idx').on(table.category),
+    check('expenses_amount_check', sql`${table.amount} > 0`),
   ],
 );
 

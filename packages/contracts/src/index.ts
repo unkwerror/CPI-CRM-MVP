@@ -122,8 +122,22 @@ export const SubmitArtifactVersionBody = Type.Object({
   backdateReason: Type.Optional(Type.String({ minLength: 3, maxLength: 2_000 })),
 });
 
+/** Рубрикатор ЦПИ: пять критериев по 0–2, Q_artifact = сумма. */
+export const ArtifactReviewCriteria = Type.Object(
+  {
+    relevance: Type.Integer({ minimum: 0, maximum: 2 }),
+    completeness: Type.Integer({ minimum: 0, maximum: 2 }),
+    verifiability: Type.Integer({ minimum: 0, maximum: 2 }),
+    applicability: Type.Integer({ minimum: 0, maximum: 2 }),
+    timeliness: Type.Integer({ minimum: 0, maximum: 2 }),
+  },
+  { additionalProperties: false },
+);
+
 export const ReviewArtifactVersionBody = Type.Object({
-  score: Type.Integer({ minimum: 1, maximum: 10 }),
+  /** Итоговый балл; при наличии criteria вычисляется сервером как сумма. */
+  score: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })),
+  criteria: Type.Optional(ArtifactReviewCriteria),
   decision: Type.Union([
     Type.Literal('NEEDS_REVISION'),
     Type.Literal('ACCEPTED'),
@@ -303,6 +317,7 @@ export const CreateDealBody = Type.Object(
     agreementId: Type.Optional(Uuid),
     productId: Type.Optional(Uuid),
     projectId: Type.Optional(Uuid),
+    personId: Type.Optional(Uuid),
     expectedCloseAt: Type.Optional(IsoDateTime),
     comment: Type.Optional(Type.String({ maxLength: 10_000 })),
   },
@@ -315,8 +330,50 @@ export const PatchDealBody = Type.Object(
     title: Type.Optional(Type.String({ minLength: 2, maxLength: 500 })),
     status: Type.Optional(DealStatus),
     amount: Type.Optional(Type.Number({ minimum: 0, maximum: 1e12 })),
+    personId: Type.Optional(Type.Union([Uuid, Type.Null()])),
     expectedCloseAt: Type.Optional(Type.Union([IsoDateTime, Type.Null()])),
+    /** Факт оплаты: оба поля вместе; null снимает отметку об оплате. */
+    paidAt: Type.Optional(Type.Union([IsoDateTime, Type.Null()])),
+    paidAmount: Type.Optional(Type.Union([Type.Number({ minimum: 0, maximum: 1e12 }), Type.Null()])),
     comment: Type.Optional(Type.Union([Type.String({ maxLength: 10_000 }), Type.Null()])),
+  },
+  { additionalProperties: false },
+);
+
+export const ExpenseCategory = Type.Union([
+  Type.Literal('VARIABLE'),
+  Type.Literal('OPEX'),
+  Type.Literal('BACK_OFFICE'),
+  Type.Literal('ACQUISITION'),
+  Type.Literal('ACTIVATION'),
+]);
+
+export const CreateExpenseBody = Type.Object(
+  {
+    category: ExpenseCategory,
+    amount: Type.Number({ exclusiveMinimum: 0, maximum: 1e12 }),
+    occurredAt: IsoDateTime,
+    description: Type.String({ minLength: 2, maxLength: 2000 }),
+    eventId: Type.Optional(Uuid),
+    productId: Type.Optional(Uuid),
+    dealId: Type.Optional(Uuid),
+    projectId: Type.Optional(Uuid),
+  },
+  { additionalProperties: false },
+);
+
+export const PatchExpenseBody = Type.Object(
+  {
+    version: Type.Integer({ minimum: 1 }),
+    category: Type.Optional(ExpenseCategory),
+    amount: Type.Optional(Type.Number({ exclusiveMinimum: 0, maximum: 1e12 })),
+    occurredAt: Type.Optional(IsoDateTime),
+    description: Type.Optional(Type.String({ minLength: 2, maxLength: 2000 })),
+    eventId: Type.Optional(Type.Union([Uuid, Type.Null()])),
+    productId: Type.Optional(Type.Union([Uuid, Type.Null()])),
+    dealId: Type.Optional(Type.Union([Uuid, Type.Null()])),
+    projectId: Type.Optional(Type.Union([Uuid, Type.Null()])),
+    archive: Type.Optional(Type.Boolean()),
   },
   { additionalProperties: false },
 );
@@ -338,3 +395,7 @@ export type CreateProductInput = Static<typeof CreateProductBody>;
 export type PatchProductInput = Static<typeof PatchProductBody>;
 export type CreateDealInput = Static<typeof CreateDealBody>;
 export type PatchDealInput = Static<typeof PatchDealBody>;
+export type ExpenseCategoryValue = Static<typeof ExpenseCategory>;
+export type CreateExpenseInput = Static<typeof CreateExpenseBody>;
+export type PatchExpenseInput = Static<typeof PatchExpenseBody>;
+export type ArtifactReviewCriteriaInput = Static<typeof ArtifactReviewCriteria>;

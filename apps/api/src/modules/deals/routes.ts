@@ -41,13 +41,16 @@ export async function registerDealRoutes(app: FastifyInstance): Promise<void> {
       const organization = await getOrganizationContext(app.pool);
       const result = await app.pool.query(
         `SELECT d.id, d.title, d.deal_type, d.status, d.amount, d.currency,
-                d.expected_close_at, d.closed_at, d.comment, d.version, d.created_at,
+                d.expected_close_at, d.closed_at, d.paid_at, d.paid_amount,
+                d.comment, d.version, d.created_at,
                 pt.id AS partner_id, pt.name AS partner_name,
-                pr.name AS product_name, u.display_name AS owner_name
+                pr.name AS product_name, u.display_name AS owner_name,
+                ps.id AS person_id, ps.canonical_full_name AS person_name
            FROM deals d
            LEFT JOIN partners pt ON pt.id = d.partner_id
            LEFT JOIN products pr ON pr.id = d.product_id
            LEFT JOIN app_users u ON u.id = d.owner_user_id
+           LEFT JOIN persons ps ON ps.id = d.person_id
           WHERE d.organization_id = $1
             AND d.archived_at IS NULL
             AND ($2::text IS NULL OR d.status = $2::deal_status)
@@ -66,6 +69,8 @@ export async function registerDealRoutes(app: FastifyInstance): Promise<void> {
           currency: row.currency,
           expectedCloseAt: row.expected_close_at?.toISOString() ?? null,
           closedAt: row.closed_at?.toISOString() ?? null,
+          paidAt: row.paid_at?.toISOString() ?? null,
+          paidAmount: row.paid_amount === null ? null : Number(row.paid_amount),
           comment: row.comment,
           version: row.version,
           createdAt: row.created_at?.toISOString() ?? null,
@@ -73,6 +78,8 @@ export async function registerDealRoutes(app: FastifyInstance): Promise<void> {
           partnerName: row.partner_name,
           productName: row.product_name,
           ownerName: row.owner_name,
+          personId: row.person_id,
+          personName: row.person_name,
         })),
       };
     },
@@ -120,15 +127,23 @@ export async function registerDealRoutes(app: FastifyInstance): Promise<void> {
           );
           if (!project.rows[0]) throw new HttpProblem(400, 'Проект не найден');
         }
+        if (body.personId) {
+          const person = await client.query(
+            'SELECT 1 FROM persons WHERE id = $1 AND archived_at IS NULL AND merged_into_person_id IS NULL',
+            [body.personId],
+          );
+          if (!person.rows[0]) throw new HttpProblem(400, 'Участник не найден');
+        }
         const result = await client.query<{ id: string }>(
-          `INSERT INTO deals (organization_id, partner_id, agreement_id, product_id, project_id, title, deal_type, status, amount, expected_close_at, closed_at, comment, owner_user_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id`,
+          `INSERT INTO deals (organization_id, partner_id, agreement_id, product_id, project_id, person_id, title, deal_type, status, amount, expected_close_at, closed_at, comment, owner_user_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id`,
           [
             organization.id,
             body.partnerId ?? null,
             body.agreementId ?? null,
             body.productId ?? null,
             body.projectId ?? null,
+            body.personId ?? null,
             title,
             body.dealType,
             status,
@@ -171,7 +186,8 @@ export async function registerDealRoutes(app: FastifyInstance): Promise<void> {
       const body = request.body as PatchDealInput;
       return transaction(app.pool, async (client) => {
         const current = await client.query(
-          `SELECT id, title, status, amount, expected_close_at, closed_at, comment, version
+          `SELECT id, title, status, amount, expected_close_at, closed_at,
+                  paid_at, paid_amount, person_id, comment, version
              FROM deals WHERE id = $1 AND archived_at IS NULL FOR UPDATE`,
           [id],
         );
@@ -180,6 +196,30 @@ export async function registerDealRoutes(app: FastifyInstance): Promise<void> {
         if (row.version !== body.version) throw new HttpProblem(409, 'Сделка уже изменена');
         const nextStatus = body.status ?? row.status;
         const nowClosed = CLOSED_STATUSES.has(nextStatus);
+        if (body.personId) {
+          const person = await client.query(
+            'SELECT 1 FROM persons WHERE id = $1 AND archived_at IS NULL AND merged_into_person_id IS NULL',
+            [body.personId],
+          );
+          if (!person.rows[0]) throw new HttpProblem(400, 'Участник не найден');
+        }
+        // Оплата: paid_at и paid_amount меняются вместе (выручка «по факту оплаты»).
+        const paidTouched = body.paidAt !== undefined || body.paidAmount !== undefined;
+        let nextPaidAt: Date | null = row.paid_at;
+        let nextPaidAmount: number | null =
+          row.paid_amount === null ? null : Number(row.paid_amount);
+        if (paidTouched) {
+          if (body.paidAt === null) {
+            nextPaidAt = null;
+            nextPaidAmount = null;
+          } else {
+            nextPaidAt = body.paidAt !== undefined ? new Date(body.paidAt) : (row.paid_at ?? new Date());
+            nextPaidAmount =
+              body.paidAmount !== undefined && body.paidAmount !== null
+                ? body.paidAmount
+                : (nextPaidAmount ?? Number(body.amount ?? row.amount));
+          }
+        }
         const updated = await client.query(
           `UPDATE deals
               SET title = COALESCE($2, title),
@@ -190,9 +230,12 @@ export async function registerDealRoutes(app: FastifyInstance): Promise<void> {
                   closed_at = CASE WHEN $10::boolean AND closed_at IS NULL THEN now()
                                    WHEN NOT $10::boolean THEN NULL
                                    ELSE closed_at END,
+                  paid_at = CASE WHEN $11::boolean THEN $12 ELSE paid_at END,
+                  paid_amount = CASE WHEN $11::boolean THEN $13 ELSE paid_amount END,
+                  person_id = CASE WHEN $14::boolean THEN $15 ELSE person_id END,
                   version = version + 1, updated_at = now()
             WHERE id = $1
-            RETURNING id, title, status, amount, expected_close_at, closed_at, comment, version`,
+            RETURNING id, title, status, amount, expected_close_at, closed_at, paid_at, paid_amount, person_id, comment, version`,
           [
             id,
             body.title === undefined ? null : cleanTitle(body.title),
@@ -204,6 +247,11 @@ export async function registerDealRoutes(app: FastifyInstance): Promise<void> {
             body.comment !== undefined,
             body.comment?.trim() || null,
             nowClosed,
+            paidTouched,
+            nextPaidAt,
+            nextPaidAmount,
+            body.personId !== undefined,
+            body.personId ?? null,
           ],
         );
         await writeAudit(client, {
