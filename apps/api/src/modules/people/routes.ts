@@ -825,6 +825,9 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
           isPrimary: boolean;
         }> = [];
         if (hasContacts) {
+          // Карточка показывает контакты всего кластера объединённых дублей,
+          // поэтому и сохранение должно видеть контакты присоединённых записей.
+          const contactClusterSql = `(SELECT id FROM persons WHERE id = $1 OR merged_into_person_id = $1)`;
           const existing = await client.query<{
             id: string;
             type: string;
@@ -833,7 +836,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
           }>(
             `SELECT id, type, raw_value, is_primary
                FROM contact_points
-              WHERE person_id = $1 AND archived_at IS NULL
+              WHERE person_id IN ${contactClusterSql} AND archived_at IS NULL
               FOR UPDATE`,
             [id],
           );
@@ -848,8 +851,8 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
               await client.query(
                 `UPDATE contact_points
                     SET archived_at = now(), is_primary = false, updated_at = now(), version = version + 1
-                  WHERE id = $1 AND person_id = $2 AND archived_at IS NULL`,
-                [contact.id, id],
+                  WHERE id = $1 AND archived_at IS NULL`,
+                [contact.id],
               );
               continue;
             }
@@ -867,7 +870,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
                 await client.query(
                   `UPDATE contact_points
                       SET is_primary = false, updated_at = now()
-                    WHERE person_id = $1 AND type = $2 AND archived_at IS NULL AND id <> $3`,
+                    WHERE person_id IN ${contactClusterSql} AND type = $2 AND archived_at IS NULL AND id <> $3`,
                   [id, contact.type, contact.id],
                 );
               }
@@ -878,15 +881,15 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
                 is_primary: boolean;
               }>(
                 `UPDATE contact_points
-                    SET type = $3,
-                        raw_value = $4,
-                        normalized_value = $5,
-                        is_primary = $6,
+                    SET type = $2,
+                        raw_value = $3,
+                        normalized_value = $4,
+                        is_primary = $5,
                         updated_at = now(),
                         version = version + 1
-                  WHERE id = $1 AND person_id = $2 AND archived_at IS NULL
+                  WHERE id = $1 AND archived_at IS NULL
                   RETURNING id, type, raw_value, is_primary`,
-                [contact.id, id, contact.type, rawValue, normalizedContact, isPrimary],
+                [contact.id, contact.type, rawValue, normalizedContact, isPrimary],
               );
               if (!row.rows[0]) throw new HttpProblem(400, 'Контакт для обновления не найден');
               keptIds.add(row.rows[0].id);
@@ -902,7 +905,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
                 await client.query(
                   `UPDATE contact_points
                       SET is_primary = false, updated_at = now()
-                    WHERE person_id = $1 AND type = $2 AND archived_at IS NULL`,
+                    WHERE person_id IN ${contactClusterSql} AND type = $2 AND archived_at IS NULL`,
                   [id, contact.type],
                 );
               }
@@ -935,8 +938,8 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
             await client.query(
               `UPDATE contact_points
                   SET archived_at = now(), is_primary = false, updated_at = now(), version = version + 1
-                WHERE id = $1 AND person_id = $2 AND archived_at IS NULL`,
-              [existingContact.id, id],
+                WHERE id = $1 AND archived_at IS NULL`,
+              [existingContact.id],
             );
           }
 

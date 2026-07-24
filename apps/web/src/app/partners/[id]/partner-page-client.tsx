@@ -1,6 +1,15 @@
 'use client';
 
-import { ArrowLeft, FileSignature, Handshake, MessageSquare, Plus, UserRound, X } from 'lucide-react';
+import {
+  ArrowLeft,
+  FileSignature,
+  Handshake,
+  MessageSquare,
+  Pencil,
+  Plus,
+  UserRound,
+  X,
+} from 'lucide-react';
 import Link from 'next/link';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 
@@ -31,6 +40,8 @@ export function PartnerPageClient({ id }: { id: string }) {
   const [canWrite, setCanWrite] = useState(false);
   const [dialog, setDialog] = useState<'contact' | 'agreement' | 'interaction' | null>(null);
   const [statusSaving, setStatusSaving] = useState(false);
+  const [notesDraft, setNotesDraft] = useState<string | null>(null);
+  const [savingNotes, setSavingNotes] = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
@@ -52,6 +63,27 @@ export function PartnerPageClient({ id }: { id: string }) {
       .then((user) => setCanWrite(user.permissions.includes('partners.write')))
       .catch(() => setCanWrite(false));
   }, []);
+
+  async function saveNotes() {
+    if (!partner || notesDraft === null) return;
+    setSavingNotes(true);
+    try {
+      await api(`/partners/${partner.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ version: partner.version, notes: notesDraft.trim() || null }),
+      });
+      setNotesDraft(null);
+      await load();
+    } catch (caught) {
+      window.alert(
+        caught instanceof ApiError
+          ? (caught.detail ?? caught.message)
+          : 'Не удалось сохранить комментарий',
+      );
+    } finally {
+      setSavingNotes(false);
+    }
+  }
 
   async function changeStatus(status: PartnerStatus) {
     if (!partner) return;
@@ -120,12 +152,57 @@ export function PartnerPageClient({ id }: { id: string }) {
         </div>
       </section>
 
-      {partner.notes && (
+      {(partner.notes || canWrite) && (
         <section className="panel">
           <header className="panel__header">
-            <h2>Заметки</h2>
+            <h2>Комментарий</h2>
+            {canWrite && notesDraft === null && (
+              <button className="text-link" onClick={() => setNotesDraft(partner.notes ?? '')}>
+                <Pencil size={14} /> Редактировать
+              </button>
+            )}
           </header>
-          <p>{partner.notes}</p>
+          {notesDraft !== null ? (
+            <div>
+              <textarea
+                className="notes-textarea"
+                value={notesDraft}
+                onChange={(event) => setNotesDraft(event.target.value)}
+                rows={6}
+                style={{ width: '100%', resize: 'vertical' }}
+                disabled={savingNotes}
+              />
+              <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                <button
+                  className="button button--primary button--compact"
+                  onClick={() => void saveNotes()}
+                  disabled={savingNotes}
+                >
+                  {savingNotes ? 'Сохраняем…' : 'Сохранить'}
+                </button>
+                <button
+                  className="button button--secondary button--compact"
+                  onClick={() => setNotesDraft(null)}
+                  disabled={savingNotes}
+                >
+                  Отмена
+                </button>
+              </div>
+            </div>
+          ) : partner.notes ? (
+            <pre
+              style={{
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+                font: 'inherit',
+                margin: 0,
+              }}
+            >
+              {partner.notes}
+            </pre>
+          ) : (
+            <p className="muted">Комментария пока нет.</p>
+          )}
         </section>
       )}
 
