@@ -33,6 +33,14 @@ try {
        ON CONFLICT (user_id, role_id) DO NOTHING`,
       [importerUser.rows[0]!.id],
     );
+    await client.query(
+      `INSERT INTO app_users
+         (id, oidc_subject, email, normalized_email, display_name, status)
+       VALUES ('00000000-0000-4000-8000-000000000002', 'locker-integration',
+               'locker-integration@cpi.local', 'locker-integration@cpi.local',
+               'Интеграция Locker', 'ACTIVE')
+       ON CONFLICT (oidc_subject) DO UPDATE SET updated_at = now()`,
+    );
     const ruleSet = await client.query<{ id: string }>(
       `INSERT INTO lifecycle_rule_sets
          (organization_id, rule_version, active_window_hours, inactive_after_hours,

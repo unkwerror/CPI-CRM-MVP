@@ -50,6 +50,13 @@
       "when": 1784975000000,
       "tag": "0006_cpi_metrics",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1785834000000,
+      "tag": "0007_locker_integration",
+      "breakpoints": true
     }
   ]
 }

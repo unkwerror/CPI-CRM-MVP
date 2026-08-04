@@ -836,6 +836,8 @@ export const fileObjects = pgTable(
     sha256: text('sha256'),
     status: fileObjectStatusEnum('status').notNull().default('PENDING'),
     scanResult: jsonb('scan_result').$type<JsonObject>(),
+    storageProvider: text('storage_provider').notNull().default('CRM'),
+    externalId: text('external_id'),
     uploadedByUserId: uuid('uploaded_by_user_id').references(() => appUsers.id, {
       onDelete: 'set null',
     }),
@@ -847,7 +849,18 @@ export const fileObjects = pgTable(
     uniqueIndex('file_objects_bucket_key_uidx').on(table.bucket, table.objectKey),
     index('file_objects_sha256_idx').on(table.sha256),
     index('file_objects_status_idx').on(table.status, table.createdAt),
+    uniqueIndex('file_objects_provider_external_uidx')
+      .on(table.storageProvider, table.externalId)
+      .where(sql`${table.externalId} is not null`),
     check('file_objects_size_check', sql`${table.sizeBytes} >= 0`),
+    check(
+      'file_objects_storage_provider_check',
+      sql`${table.storageProvider} in ('CRM', 'LOCKER')`,
+    ),
+    check(
+      'file_objects_external_storage_check',
+      sql`(${table.storageProvider} = 'CRM' and ${table.externalId} is null) or (${table.storageProvider} = 'LOCKER' and ${table.externalId} is not null)`,
+    ),
     check(
       'file_objects_sha256_check',
       sql`${table.sha256} is null or ${table.sha256} ~ '^[0-9a-f]{64}$'`,
@@ -1683,6 +1696,51 @@ export const externalIdentities = pgTable(
       .on(table.organizationId, table.sourceNamespace, table.externalId)
       .where(sql`${table.archivedAt} is null`),
     index('external_identities_person_idx').on(table.personId),
+  ],
+);
+
+// Server-to-server Locker integration ---------------------------------------------
+
+export const lockerEventLinks = pgTable(
+  'locker_event_links',
+  {
+    lockerEventId: uuid('locker_event_id').primaryKey(),
+    eventId: uuid('event_id')
+      .notNull()
+      .references(() => events.id, { onDelete: 'restrict' }),
+    ...timestamps(),
+  },
+  (table) => [index('locker_event_links_event_idx').on(table.eventId)],
+);
+
+export const lockerSubmissionLinks = pgTable(
+  'locker_submission_links',
+  {
+    lockerSubmissionId: uuid('locker_submission_id').primaryKey(),
+    lockerUserId: uuid('locker_user_id').notNull(),
+    telegramUserId: text('telegram_user_id').notNull(),
+    personId: uuid('person_id')
+      .notNull()
+      .references(() => persons.id, { onDelete: 'restrict' }),
+    lockerEventId: uuid('locker_event_id').notNull(),
+    eventId: uuid('event_id')
+      .notNull()
+      .references(() => events.id, { onDelete: 'restrict' }),
+    artifactId: uuid('artifact_id')
+      .notNull()
+      .references(() => artifacts.id, { onDelete: 'restrict' }),
+    artifactVersionId: uuid('artifact_version_id')
+      .notNull()
+      .references(() => artifactVersions.id, { onDelete: 'restrict' }),
+    payloadHash: text('payload_hash').notNull(),
+    ...timestamps(),
+  },
+  (table) => [
+    uniqueIndex('locker_submission_links_artifact_uidx').on(table.artifactId),
+    uniqueIndex('locker_submission_links_version_uidx').on(table.artifactVersionId),
+    index('locker_submission_links_person_idx').on(table.personId, table.createdAt),
+    check('locker_submission_links_telegram_check', sql`${table.telegramUserId} ~ '^[0-9]+$'`),
+    check('locker_submission_links_hash_check', sql`${table.payloadHash} ~ '^[0-9a-f]{64}$'`),
   ],
 );
 

@@ -30,6 +30,10 @@ const config: ApiConfig = {
     quarantineBucket: 'test-quarantine',
     privateBucket: 'test-private',
   },
+  locker: {
+    baseUrl: 'https://locker.example.test',
+    integrationToken: 'test-locker-integration-token-000000',
+  },
 };
 
 describe('HTTP security policy', () => {
@@ -48,6 +52,15 @@ describe('HTTP security policy', () => {
         authRequired: true,
       }),
     ).toBe(false);
+    expect(
+      isMutationOriginAllowed({
+        method: 'POST',
+        origin: undefined,
+        webOrigin: WEB_ORIGIN,
+        authRequired: true,
+        routeUrl: '/integrations/locker/v1/submissions',
+      }),
+    ).toBe(true);
     expect(
       isMutationOriginAllowed({
         method: 'PATCH',

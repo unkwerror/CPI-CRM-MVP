@@ -198,8 +198,11 @@ export async function registerFileRoutes(app: FastifyInstance): Promise<void> {
         object_key: string;
         original_filename: string;
         status: string;
+        storage_provider: 'CRM' | 'LOCKER';
+        external_id: string | null;
       }>(
-        `SELECT bucket, object_key, original_filename, status
+        `SELECT bucket, object_key, original_filename, status,
+                storage_provider, external_id
            FROM file_objects fo
           WHERE fo.id = $1
             AND (fo.uploaded_by_user_id = $2 OR EXISTS (
@@ -211,24 +214,73 @@ export async function registerFileRoutes(app: FastifyInstance): Promise<void> {
       const file = result.rows[0];
       if (!file) throw new HttpProblem(404, 'Файл не найден');
       if (file.status !== 'AVAILABLE') throw new HttpProblem(409, 'Файл ещё не прошёл проверку');
-      const downloadUrl = await getSignedUrl(
-        s3,
-        new GetObjectCommand(
-          privateDownloadRequest({
-            bucket: file.bucket,
-            objectKey: file.object_key,
-            originalFilename: file.original_filename,
-          }),
-        ),
-        { expiresIn: 5 * 60 },
-      );
+      const remote = file.storage_provider === 'LOCKER';
+      if (remote && !file.external_id)
+        throw new HttpProblem(500, 'У файла Locker отсутствует внешний идентификатор');
+      const remoteDownload = remote ? await requestLockerDownloadUrl(app, file.external_id!) : null;
+      const downloadUrl = remoteDownload
+        ? remoteDownload.url
+        : await getSignedUrl(
+            s3,
+            new GetObjectCommand(
+              privateDownloadRequest({
+                bucket: file.bucket,
+                objectKey: file.object_key,
+                originalFilename: file.original_filename,
+              }),
+            ),
+            { expiresIn: 5 * 60 },
+          );
       await app.pool.query(
         `INSERT INTO audit_log
            (actor_user_id, actor_subject, request_id, action, entity_type, entity_id)
          VALUES ($1, $2, $3, 'file.download_url_issued', 'file_object', $4)`,
         [request.authUser!.userId, request.authUser!.sub, request.id, id],
       );
-      return { downloadUrl, expiresInSeconds: 300 };
+      return {
+        downloadUrl,
+        expiresInSeconds: remoteDownload?.expiresInSeconds ?? 300,
+      };
     },
   );
+}
+
+async function requestLockerDownloadUrl(
+  app: FastifyInstance,
+  lockerArtifactId: string,
+): Promise<{ url: string; expiresInSeconds: number }> {
+  let response: Response;
+  try {
+    response = await fetch(
+      `${app.config.locker.baseUrl}/api/v1/integrations/crm/artifacts/${encodeURIComponent(lockerArtifactId)}/download`,
+      {
+        headers: { authorization: `Bearer ${app.config.locker.integrationToken}` },
+        signal: AbortSignal.timeout(10_000),
+      },
+    );
+  } catch {
+    throw new HttpProblem(502, 'Locker временно недоступен');
+  }
+  if (!response.ok) throw new HttpProblem(502, 'Locker не выдал ссылку на файл');
+  const payload = (await response.json()) as { url?: unknown; expiresInSeconds?: unknown };
+  if (typeof payload.url !== 'string')
+    throw new HttpProblem(502, 'Locker вернул некорректную ссылку на файл');
+  let url: URL;
+  try {
+    url = new URL(payload.url);
+  } catch {
+    throw new HttpProblem(502, 'Locker вернул некорректную ссылку на файл');
+  }
+  if (!['http:', 'https:'].includes(url.protocol))
+    throw new HttpProblem(502, 'Locker вернул небезопасную ссылку на файл');
+  return {
+    url: url.href,
+    expiresInSeconds:
+      typeof payload.expiresInSeconds === 'number' &&
+      Number.isInteger(payload.expiresInSeconds) &&
+      payload.expiresInSeconds > 0 &&
+      payload.expiresInSeconds <= 3600
+        ? payload.expiresInSeconds
+        : 300,
+  };
 }

@@ -16,6 +16,7 @@ import { registerEventRoutes } from './modules/events/routes.js';
 import { registerExportRoutes } from './modules/exports/routes.js';
 import { registerFileRoutes } from './modules/files/routes.js';
 import { registerImportRoutes } from './modules/imports/routes.js';
+import { registerLockerIntegrationRoutes } from './modules/integrations/locker-routes.js';
 import { registerMetricRoutes } from './modules/metrics/routes.js';
 import { registerOperationRoutes } from './modules/operations/routes.js';
 import { registerPartnerRoutes } from './modules/partners/routes.js';
@@ -30,8 +31,10 @@ export function isMutationOriginAllowed(input: {
   origin: string | undefined;
   webOrigin: string;
   authRequired: boolean;
+  routeUrl?: string | undefined;
 }): boolean {
   if (SAFE_METHODS.has(input.method.toUpperCase())) return true;
+  if (input.routeUrl?.startsWith('/integrations/locker/')) return true;
   if (input.origin === input.webOrigin) return true;
 
   // Explicit local development mode remains compatible with CLI/inject calls
@@ -102,6 +105,7 @@ export async function buildServer(config: ApiConfig = loadConfig()) {
         { name: 'Файлы' },
         { name: 'Дубли' },
         { name: 'Импорт' },
+        { name: 'Интеграции' },
         { name: 'Дашборд' },
       ],
     },
@@ -116,6 +120,7 @@ export async function buildServer(config: ApiConfig = loadConfig()) {
         origin: request.headers.origin,
         webOrigin: config.webOrigin,
         authRequired: config.authRequired,
+        routeUrl: request.url.split('?', 1)[0],
       })
     ) {
       throw new HttpProblem(403, 'Недопустимый Origin', 'Запрос мутации отклонён CSRF-защитой.');
@@ -143,6 +148,7 @@ export async function buildServer(config: ApiConfig = loadConfig()) {
   });
 
   await registerPeopleRoutes(app);
+  await registerLockerIntegrationRoutes(app);
   await registerEventRoutes(app);
   await registerExportRoutes(app);
   await registerArtifactRoutes(app);

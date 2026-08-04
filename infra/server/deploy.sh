@@ -41,6 +41,7 @@ required_variables=(
   KEYCLOAK_ADMIN_USERNAME KEYCLOAK_ADMIN_PASSWORD
   CRM_ADMIN_USERNAME CRM_ADMIN_PASSWORD CRM_ADMIN_EMAIL
   OIDC_CLIENT_ID OIDC_CLIENT_SECRET SESSION_KEY_BASE64
+  LOCKER_BASE_URL LOCKER_INTEGRATION_TOKEN
   MINIO_ROOT_USER MINIO_ROOT_PASSWORD S3_APP_USER S3_APP_PASSWORD
 )
 for variable_name in "${required_variables[@]}"; do
@@ -49,12 +50,16 @@ for variable_name in "${required_variables[@]}"; do
     exit 1
   fi
 done
-for variable_name in POSTGRES_PASSWORD APP_DB_PASSWORD OIDC_CLIENT_SECRET; do
+for variable_name in POSTGRES_PASSWORD APP_DB_PASSWORD OIDC_CLIENT_SECRET LOCKER_INTEGRATION_TOKEN; do
   if [[ "${!variable_name}" == *[^A-Za-z0-9._~-]* ]]; then
     echo "$variable_name must be URL-safe (hex is recommended)" >&2
     exit 1
   fi
 done
+if [ "${#LOCKER_INTEGRATION_TOKEN}" -lt 32 ]; then
+  echo "LOCKER_INTEGRATION_TOKEN must contain at least 32 characters" >&2
+  exit 1
+fi
 if ! session_key_bytes=$(printf '%s' "$SESSION_KEY_BASE64" | base64 -d 2>/dev/null | wc -c); then
   echo "SESSION_KEY_BASE64 is not valid base64" >&2
   exit 1

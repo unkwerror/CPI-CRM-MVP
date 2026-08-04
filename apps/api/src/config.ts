@@ -40,6 +40,10 @@ export interface ApiConfig {
     quarantineBucket: string;
     privateBucket: string;
   };
+  locker: {
+    baseUrl: string;
+    integrationToken: string;
+  };
 }
 
 export function loadConfig(): ApiConfig {
@@ -50,6 +54,12 @@ export function loadConfig(): ApiConfig {
   if (key.length !== 32) throw new Error('SESSION_KEY_BASE64 must decode to exactly 32 bytes');
   const baseline = new Date(required('ARTIFACT_BASELINE_AT', '2026-07-22T00:00:00.000Z'));
   if (Number.isNaN(baseline.getTime())) throw new Error('ARTIFACT_BASELINE_AT is invalid');
+  const lockerIntegrationToken = required(
+    'LOCKER_INTEGRATION_TOKEN',
+    'local-locker-integration-token-change-me',
+  );
+  if (lockerIntegrationToken.length < 32)
+    throw new Error('LOCKER_INTEGRATION_TOKEN must be at least 32 characters');
 
   return {
     databaseUrl: required(
@@ -79,6 +89,10 @@ export function loadConfig(): ApiConfig {
       secretKey: required('S3_SECRET_KEY', 'cpi-minio-local-secret'),
       quarantineBucket: required('S3_QUARANTINE_BUCKET', 'cpi-quarantine'),
       privateBucket: required('S3_PRIVATE_BUCKET', 'cpi-private'),
+    },
+    locker: {
+      baseUrl: required('LOCKER_BASE_URL', 'http://localhost:8080').replace(/\/+$/u, ''),
+      integrationToken: lockerIntegrationToken,
     },
   };
 }
