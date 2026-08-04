@@ -148,6 +148,7 @@ export interface CommitResult {
   readonly dataHygiene: {
     readonly summary: PersonNameHygieneSummary;
     readonly cleanup: PersonNameHygieneCleanupResult;
+    readonly duplicateContactsArchived: number;
   };
   readonly created: {
     readonly sourceRecords: number;

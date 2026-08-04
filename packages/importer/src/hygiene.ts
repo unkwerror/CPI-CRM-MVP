@@ -1,8 +1,10 @@
 import type { PoolClient } from 'pg';
 
+import { parseRussianFullName } from '@cpi-crm/domain';
+
 import type { JsonValue, PersonObservation, WorkbookImportPlan } from './types.js';
 
-export const PERSON_NAME_HYGIENE_POLICY_VERSION = 'PERSON_NAME_HYGIENE_V1';
+export const PERSON_NAME_HYGIENE_POLICY_VERSION = 'PERSON_NAME_HYGIENE_V2';
 
 export type InvalidPersonNameReason =
   | 'MISSING_OR_GENERATED_PLACEHOLDER'
@@ -14,7 +16,8 @@ export type InvalidPersonNameReason =
   | 'PHONE_OR_NUMERIC_IN_NAME'
   | 'NO_LETTERS'
   | 'TOO_SHORT'
-  | 'REPEATED_CHARACTER';
+  | 'REPEATED_CHARACTER'
+  | 'NOT_THREE_PART_RUSSIAN_FULL_NAME';
 
 export type PersonNameAssessment =
   | { readonly accepted: true }
@@ -51,6 +54,7 @@ const EMPTY_REASON_COUNTS: Record<InvalidPersonNameReason, number> = {
   NO_LETTERS: 0,
   TOO_SHORT: 0,
   REPEATED_CHARACTER: 0,
+  NOT_THREE_PART_RUSSIAN_FULL_NAME: 0,
 };
 
 const SERVICE_PLACEHOLDER =
@@ -66,8 +70,8 @@ function normalizedInput(value: unknown): string {
 }
 
 /**
- * Deliberately conservative: it rejects deterministic placeholders and impossible
- * names, but accepts uncommon, one-token and mixed-script names for later human use.
+ * CRM identity requires three separate Russian-Cyrillic components. Deterministic
+ * placeholder reasons remain distinct so import reports stay actionable.
  */
 export function assessPersonName(value: unknown): PersonNameAssessment {
   const name = normalizedInput(value);
@@ -112,6 +116,9 @@ export function assessPersonName(value: unknown): PersonNameAssessment {
     /(.)\1{4,}/u.test(lowered)
   ) {
     return { accepted: false, reason: 'REPEATED_CHARACTER' };
+  }
+  if (!parseRussianFullName(name)) {
+    return { accepted: false, reason: 'NOT_THREE_PART_RUSSIAN_FULL_NAME' };
   }
   return { accepted: true };
 }

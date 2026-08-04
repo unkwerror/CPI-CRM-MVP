@@ -1,4 +1,5 @@
 import { Permissions, normalizeEmail, normalizeFullName, normalizePhone } from '@cpi-crm/domain';
+import { createEventParticipantsWorkbook } from '@cpi-crm/importer';
 import { Type } from '@sinclair/typebox';
 import type { FastifyInstance } from 'fastify';
 import { Readable } from 'node:stream';
@@ -259,6 +260,9 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
                LEFT JOIN LATERAL jsonb_array_elements(source.raw_json->'cells') cell
                  ON COALESCE(cell->>'normalizedHeader', '') = 'комментарий'
                 AND btrim(COALESCE(NULLIF(cell->>'displayText', ''), cell->>'value', '')) <> ''
+                AND char_length(btrim(COALESCE(NULLIF(cell->>'displayText', ''), cell->>'value', ''))) <= 10000
+                AND lower(btrim(COALESCE(NULLIF(cell->>'displayText', ''), cell->>'value', ''))) !~ '^(нет|не указано|отсутствует|none|null|n/?a|test|тест|[-—.]+)$'
+                AND btrim(COALESCE(NULLIF(cell->>'displayText', ''), cell->>'value', '')) ~ '[[:alnum:]А-Яа-яЁё]'
               WHERE participation.person_id IN ${clusterSql}
                 AND participation.archived_at IS NULL
                 ${eventParameter ? `AND participation.event_id = ${eventParameter}` : ''}
@@ -353,6 +357,165 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
         .header('X-Content-Type-Options', 'nosniff')
         .send(Readable.from(streamCsv()));
     },
+  );
+
+  app.get(
+    '/exports/events/:id/participants.xlsx',
+    {
+      config: { rateLimit: heavyOperationRateLimit(4, '1 minute') },
+      preHandler: [app.requirePermission(Permissions.EXPORTS_BULK), guardExportConcurrency],
+      schema: {
+        tags: ['Экспорт'],
+        summary: 'XLSX-таблица участников мероприятия',
+        params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
+      },
+    },
+    async (request, reply) => {
+      const eventId = (request.params as { id: string }).id;
+      const organization = await getOrganizationContext(app.pool);
+      const eventResult = await app.pool.query<{ id: string; name: string }>(
+        `SELECT id, name FROM events
+          WHERE id = $1 AND organization_id = $2 AND archived_at IS NULL`,
+        [eventId, organization.id],
+      );
+      const event = eventResult.rows[0];
+      if (!event) return reply.code(404).send({ title: 'Мероприятие не найдено', status: 404 });
+
+      const result = await app.pool.query<{
+        last_name: string;
+        first_name: string;
+        patronymic: string;
+        canonical_full_name: string;
+        email: string | null;
+        phone: string | null;
+        telegram: string | null;
+        telegram_user_id: string | null;
+        attended: boolean | null;
+        decisions: string[];
+      }>(
+        `WITH canonical_participants AS (
+           SELECT DISTINCT COALESCE(member.merged_into_person_id, member.id) AS person_id
+             FROM event_participations participation
+             JOIN persons member ON member.id = participation.person_id
+            WHERE participation.event_id = $1
+              AND participation.archived_at IS NULL AND member.archived_at IS NULL
+         )
+         SELECT person.last_name, person.first_name, person.patronymic,
+                person.canonical_full_name,
+                contacts.email, contacts.phone, contacts.telegram,
+                contacts.telegram_user_id,
+                CASE
+                  WHEN participation.attended THEN true
+                  WHEN participation.no_show THEN false
+                  ELSE NULL
+                END AS attended,
+                participation.decisions
+           FROM canonical_participants canonical
+           JOIN persons person ON person.id = canonical.person_id
+           LEFT JOIN LATERAL (
+             SELECT
+               (SELECT contact.raw_value FROM contact_points contact
+                 WHERE contact.person_id IN (
+                         SELECT id FROM persons
+                          WHERE id = person.id OR merged_into_person_id = person.id
+                       )
+                   AND contact.archived_at IS NULL AND contact.type = 'EMAIL'
+                 ORDER BY contact.is_primary DESC, contact.created_at, contact.id LIMIT 1) AS email,
+               (SELECT contact.raw_value FROM contact_points contact
+                 WHERE contact.person_id IN (
+                         SELECT id FROM persons
+                          WHERE id = person.id OR merged_into_person_id = person.id
+                       )
+                   AND contact.archived_at IS NULL AND contact.type = 'PHONE'
+                 ORDER BY contact.is_primary DESC, contact.created_at, contact.id LIMIT 1) AS phone,
+               (SELECT contact.raw_value FROM contact_points contact
+                 WHERE contact.person_id IN (
+                         SELECT id FROM persons
+                          WHERE id = person.id OR merged_into_person_id = person.id
+                       )
+                   AND contact.archived_at IS NULL AND contact.type = 'TELEGRAM'
+                 ORDER BY (contact.messenger_stable_id IS NOT NULL) DESC,
+                          contact.is_primary DESC, contact.created_at, contact.id LIMIT 1) AS telegram,
+               (SELECT contact.messenger_stable_id FROM contact_points contact
+                 WHERE contact.person_id IN (
+                         SELECT id FROM persons
+                          WHERE id = person.id OR merged_into_person_id = person.id
+                       )
+                   AND contact.archived_at IS NULL AND contact.type = 'TELEGRAM'
+                   AND contact.messenger_stable_id IS NOT NULL
+                 ORDER BY contact.is_primary DESC, contact.created_at, contact.id LIMIT 1)
+                   AS telegram_user_id
+           ) contacts ON true
+           LEFT JOIN LATERAL (
+             SELECT bool_or(item.attendance = 'ATTENDED') AS attended,
+                    bool_or(item.attendance = 'NO_SHOW') AS no_show,
+                    array_agg(DISTINCT item.decision::text ORDER BY item.decision::text)
+                      AS decisions
+               FROM event_participations item
+              WHERE item.event_id = $1 AND item.archived_at IS NULL
+                AND item.person_id IN (
+                  SELECT id FROM persons
+                   WHERE id = person.id OR merged_into_person_id = person.id
+                )
+           ) participation ON true
+          WHERE person.organization_id = $2 AND person.archived_at IS NULL
+          ORDER BY person.last_name, person.first_name, person.patronymic, person.id`,
+        [eventId, organization.id],
+      );
+      const bytes = await createEventParticipantsWorkbook({
+        eventName: event.name,
+        rows: result.rows.map((row, index) => ({
+          number: index + 1,
+          lastName: row.last_name,
+          firstName: row.first_name,
+          patronymic: row.patronymic,
+          canonicalFullName: row.canonical_full_name,
+          email: row.email,
+          phone: row.phone,
+          telegram: row.telegram,
+          telegramUserId: row.telegram_user_id,
+          attended: row.attended,
+          decision: exportDecisionLabel(row.decisions),
+          eventName: event.name,
+        })),
+      });
+      await app.pool.query(
+        `INSERT INTO audit_log
+           (actor_user_id, actor_subject, request_id, action, entity_type, entity_id, after, reason)
+         VALUES ($1, $2, $3, 'event.participants_xlsx_exported', 'event', $4,
+                 $5::jsonb, 'Выгрузка таблицы участников мероприятия')`,
+        [
+          request.authUser!.userId,
+          request.authUser!.sub,
+          request.id,
+          eventId,
+          JSON.stringify({ rows: result.rows.length }),
+        ],
+      );
+      return reply
+        .header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        .header(
+          'Content-Disposition',
+          `attachment; filename="cpi-event-participants-${eventId}.xlsx"`,
+        )
+        .header('Cache-Control', 'private, no-store, max-age=0')
+        .header('X-Content-Type-Options', 'nosniff')
+        .send(Buffer.from(bytes));
+    },
+  );
+}
+
+function exportDecisionLabel(values: readonly string[]): string {
+  const priority = ['ACCEPTED', 'PENDING', 'WAITLISTED', 'REJECTED', 'UNKNOWN'];
+  const selected = priority.find((value) => values.includes(value)) ?? 'UNKNOWN';
+  return (
+    {
+      ACCEPTED: 'Одобрено',
+      PENDING: 'На рассмотрении',
+      WAITLISTED: 'Лист ожидания',
+      REJECTED: 'Отклонено',
+      UNKNOWN: 'Не указано',
+    }[selected] ?? selected
   );
 }
 

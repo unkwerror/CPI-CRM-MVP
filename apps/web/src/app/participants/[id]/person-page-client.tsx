@@ -378,9 +378,16 @@ export function PersonPageClient({ id }: { id: string }) {
                   <span>
                     <small>
                       {contact.type}
-                      {contact.isPrimary ? ' · основной' : ''}
+                      {contact.isIdentity
+                        ? ' · главный идентификатор'
+                        : contact.isPrimary
+                          ? ' · основной'
+                          : ''}
                     </small>
                     <strong>{contact.rawValue}</strong>
+                    {contact.isIdentity && contact.telegramUserId && (
+                      <em>Telegram ID: {contact.telegramUserId}</em>
+                    )}
                   </span>
                 </div>
               ))}

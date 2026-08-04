@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from 'pg';
 
-export const AUTO_DEDUPE_POLICY_VERSION = 'AUTO_DEDUPE_V1' as const;
+export const AUTO_DEDUPE_POLICY_VERSION = 'AUTO_DEDUPE_V2' as const;
 
 const AUTO_MERGE_REASON = `${AUTO_DEDUPE_POLICY_VERSION}: автоматическое объединение совместимых карточек`;
 const AUTO_NOT_DUPLICATE_REASON = `${AUTO_DEDUPE_POLICY_VERSION}: конфликт стабильных внешних идентификаторов`;
@@ -149,8 +149,14 @@ export function areNormalizedFullNamesCompatible(left: string, right: string): b
   return smaller.every((token) => larger.has(token));
 }
 
+function isExactStrictRussianFullName(left: string, right: string): boolean {
+  if (left !== right) return false;
+  const parts = left.trim().split(/\s+/u);
+  return parts.length === 3 && parts.every((part) => /^[а-яё]+(?:-[а-яё]+)*$/iu.test(part));
+}
+
 /**
- * Builds a deterministic, database-independent plan for AUTO_DEDUPE_V1.
+ * Builds a deterministic, database-independent plan for AUTO_DEDUPE_V2.
  * Strong candidate edges are evaluated first as a graph. A whole connected
  * component is rejected when any two full names are incompatible or when it
  * contains different external IDs from the same source namespace.
@@ -185,6 +191,11 @@ export function buildAutoDeduplicationPlan(
     if (!left || !right) return false;
     if (!areNormalizedFullNamesCompatible(left.normalizedFullName, right.normalizedFullName)) {
       return false;
+    }
+    // A complete exact FIO is the deterministic legacy identity fallback.
+    // Conflicting stable external identities are still checked for the whole component below.
+    if (isExactStrictRussianFullName(left.normalizedFullName, right.normalizedFullName)) {
+      return true;
     }
     const leftContacts = contactsByPerson.get(left.id);
     const rightContacts = contactsByPerson.get(right.id);
@@ -321,7 +332,7 @@ export function buildAutoDeduplicationPlan(
   };
 }
 
-/** Runs AUTO_DEDUPE_V1 in its own transaction. */
+/** Runs AUTO_DEDUPE_V2 in its own transaction. */
 export async function autoResolveDuplicateCandidates(
   pool: Pool,
   input: AutoDeduplicationInput,

@@ -21,6 +21,8 @@ interface EditableContact {
   id?: string;
   type: ContactType;
   value: string;
+  telegramUserId?: string;
+  isIdentity?: boolean;
   isPrimary: boolean;
 }
 
@@ -29,7 +31,7 @@ function toEditableContacts(contacts: ContactPoint[]): EditableContact[] {
     return [
       {
         key: crypto.randomUUID(),
-        type: 'PHONE',
+        type: 'TELEGRAM',
         value: '',
         isPrimary: true,
       },
@@ -40,6 +42,8 @@ function toEditableContacts(contacts: ContactPoint[]): EditableContact[] {
     id: contact.id,
     type: contact.type,
     value: contact.rawValue,
+    ...(contact.telegramUserId ? { telegramUserId: contact.telegramUserId } : {}),
+    ...(contact.isIdentity ? { isIdentity: true } : {}),
     isPrimary: contact.isPrimary,
   }));
 }
@@ -56,7 +60,9 @@ export function EditPersonDialog({
   onSaved: () => void | Promise<void>;
 }) {
   const primaryAffiliation = person.affiliations[0];
-  const [name, setName] = useState(person.canonicalFullName);
+  const [lastName, setLastName] = useState(person.lastName);
+  const [firstName, setFirstName] = useState(person.firstName);
+  const [patronymic, setPatronymic] = useState(person.patronymic);
   const [organization, setOrganization] = useState(
     primaryAffiliation?.organization ?? person.organization ?? '',
   );
@@ -86,7 +92,7 @@ export function EditPersonDialog({
     setContacts((current) => {
       const next = current.filter((contact) => contact.key !== key);
       if (next.length === 0) {
-        return [{ key: crypto.randomUUID(), type: 'PHONE', value: '', isPrimary: true }];
+        return [{ key: crypto.randomUUID(), type: 'TELEGRAM', value: '', isPrimary: true }];
       }
       if (!next.some((contact) => contact.isPrimary) && next[0]) {
         next[0] = { ...next[0], isPrimary: true };
@@ -100,7 +106,7 @@ export function EditPersonDialog({
       ...current,
       {
         key: crypto.randomUUID(),
-        type: 'PHONE',
+        type: 'TELEGRAM',
         value: '',
         isPrimary: current.length === 0,
       },
@@ -111,9 +117,8 @@ export function EditPersonDialog({
     event.preventDefault();
     setError(null);
 
-    const trimmedName = name.trim();
-    if (trimmedName.length < 2) {
-      setError('Укажите ФИО не короче двух символов');
+    if (![lastName, firstName, patronymic].every((part) => part.trim().length > 0)) {
+      setError('Заполните фамилию, имя и отчество');
       return;
     }
 
@@ -128,10 +133,7 @@ export function EditPersonDialog({
       const invalidPrimaryGroups = new Map<string, number>();
       for (const contact of filledContacts) {
         if (!contact.isPrimary) continue;
-        invalidPrimaryGroups.set(
-          contact.type,
-          (invalidPrimaryGroups.get(contact.type) ?? 0) + 1,
-        );
+        invalidPrimaryGroups.set(contact.type, (invalidPrimaryGroups.get(contact.type) ?? 0) + 1);
       }
       for (const [type, count] of invalidPrimaryGroups) {
         if (count > 1) {
@@ -145,7 +147,9 @@ export function EditPersonDialog({
     try {
       const payload: Record<string, unknown> = {
         version: person.version,
-        canonicalFullName: trimmedName,
+        lastName: lastName.trim(),
+        firstName: firstName.trim(),
+        patronymic: patronymic.trim(),
         organization: organization.trim() || null,
         faculty: faculty.trim() || null,
         roleTitle: roleTitle.trim() || null,
@@ -155,6 +159,7 @@ export function EditPersonDialog({
           ...(contact.id ? { id: contact.id } : {}),
           type: contact.type,
           value: contact.value,
+          ...(contact.telegramUserId ? { telegramUserId: contact.telegramUserId } : {}),
           isPrimary: contact.isPrimary,
         }));
       }
@@ -200,15 +205,32 @@ export function EditPersonDialog({
 
         <form onSubmit={(event) => void submit(event)}>
           <div className="form-grid">
-            <label className="form-field form-field--full">
-              <span>ФИО *</span>
+            <label className="form-field">
+              <span>Фамилия *</span>
               <input
                 autoFocus
-                maxLength={500}
-                minLength={2}
-                onChange={(event) => setName(event.target.value)}
+                maxLength={200}
+                onChange={(event) => setLastName(event.target.value)}
                 required
-                value={name}
+                value={lastName}
+              />
+            </label>
+            <label className="form-field">
+              <span>Имя *</span>
+              <input
+                maxLength={200}
+                onChange={(event) => setFirstName(event.target.value)}
+                required
+                value={firstName}
+              />
+            </label>
+            <label className="form-field form-field--full">
+              <span>Отчество *</span>
+              <input
+                maxLength={200}
+                onChange={(event) => setPatronymic(event.target.value)}
+                required
+                value={patronymic}
               />
             </label>
 
@@ -256,6 +278,7 @@ export function EditPersonDialog({
                       <label className="form-field">
                         <span className="sr-only">Тип контакта</span>
                         <select
+                          disabled={contact.isIdentity}
                           onChange={(event) =>
                             updateContact(contact.key, {
                               type: event.target.value as ContactType,
@@ -277,12 +300,19 @@ export function EditPersonDialog({
                             updateContact(contact.key, { value: event.target.value })
                           }
                           placeholder="Значение"
+                          readOnly={contact.isIdentity}
                           value={contact.value}
                         />
+                        {contact.isIdentity && contact.telegramUserId && (
+                          <small className="form-field__hint">
+                            Главный идентификатор Telegram ID: {contact.telegramUserId}
+                          </small>
+                        )}
                       </label>
                       <label className="edit-person-contact-row__primary">
                         <input
                           checked={contact.isPrimary}
+                          disabled={contact.isIdentity}
                           onChange={(event) => {
                             const checked = event.target.checked;
                             setContacts((current) =>
@@ -304,6 +334,7 @@ export function EditPersonDialog({
                       <button
                         aria-label="Удалить контакт"
                         className="icon-button"
+                        disabled={contact.isIdentity}
                         onClick={() => removeContact(contact.key)}
                         type="button"
                       >
@@ -313,7 +344,8 @@ export function EditPersonDialog({
                   ))}
                 </div>
                 <small className="form-field__hint">
-                  Пустые строки не сохраняются. Контакты, убранные из списка, будут архивированы.
+                  Telegram ID — главный идентификатор и меняется только синхронизацией с ботом.
+                  Остальные пустые строки не сохраняются, убранные контакты архивируются.
                 </small>
               </div>
             )}
@@ -336,7 +368,7 @@ export function EditPersonDialog({
             </button>
             <button
               className="button button--primary"
-              disabled={saving || name.trim().length < 2}
+              disabled={saving || !lastName.trim() || !firstName.trim() || !patronymic.trim()}
               type="submit"
             >
               {saving ? 'Сохраняем…' : 'Сохранить'}

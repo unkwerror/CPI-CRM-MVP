@@ -7,22 +7,28 @@ import {
   ExternalLink,
   FileCheck2,
   MessageSquare,
+  Upload,
   Users,
 } from 'lucide-react';
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { ArtifactReviewDialog } from '@/components/artifact-review-dialog';
 import { EmptyState } from '@/components/empty-state';
 import { StatusBadge } from '@/components/status-badge';
-import { api, formatDate, initials } from '@/lib/api';
-import type { CurrentUser, EventDetail } from '@/lib/types';
+import { ApiError, api, formatDate, initials } from '@/lib/api';
+import type { CurrentUser, EventAttendanceImportResult, EventDetail } from '@/lib/types';
 
 export function EventPageClient({ id }: { id: string }) {
   const [event, setEvent] = useState<EventDetail | null>(null);
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [canExport, setCanExport] = useState(false);
+  const [canImport, setCanImport] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importResult, setImportResult] = useState<EventAttendanceImportResult | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let active = true;
@@ -35,10 +41,16 @@ export function EventPageClient({ id }: { id: string }) {
       });
     void api<CurrentUser>('/auth/me')
       .then((user) => {
-        if (active) setCanExport(user.permissions.includes('exports.bulk'));
+        if (active) {
+          setCanExport(user.permissions.includes('exports.bulk'));
+          setCanImport(user.permissions.includes('people.write'));
+        }
       })
       .catch(() => {
-        if (active) setCanExport(false);
+        if (active) {
+          setCanExport(false);
+          setCanImport(false);
+        }
       });
     return () => {
       active = false;
@@ -47,6 +59,46 @@ export function EventPageClient({ id }: { id: string }) {
 
   if (error) return <EmptyState title="Не удалось открыть мероприятие" text={error} />;
   if (!event) return <div className="page-loading">Загружаем мероприятие…</div>;
+
+  async function importAttendance(file: File) {
+    setImporting(true);
+    setImportError(null);
+    setImportResult(null);
+    try {
+      const response = await fetch(`/api/events/${id}/participants/import-xlsx`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        },
+        body: file,
+      });
+      if (!response.ok) {
+        const problem = (await response.json().catch(() => null)) as {
+          title?: string;
+          detail?: string;
+        } | null;
+        throw new ApiError(
+          problem?.title ?? 'Не удалось загрузить таблицу',
+          response.status,
+          problem?.detail,
+        );
+      }
+      const result = (await response.json()) as EventAttendanceImportResult;
+      setImportResult(result);
+      setEvent(await api<EventDetail>(`/events/${id}`));
+    } catch (caught) {
+      setImportError(
+        caught instanceof ApiError
+          ? (caught.detail ?? caught.message)
+          : 'Не удалось загрузить таблицу посещений',
+      );
+    } finally {
+      setImporting(false);
+      if (fileInput.current) fileInput.current.value = '';
+    }
+  }
 
   return (
     <div className="page-stack">
@@ -69,10 +121,32 @@ export function EventPageClient({ id }: { id: string }) {
           {canExport && (
             <a
               className="button button--secondary"
-              href={`/api/exports/participants.csv?eventId=${event.id}`}
+              href={`/api/exports/events/${event.id}/participants.xlsx`}
             >
-              <Download size={16} /> Экспорт участников
+              <Download size={16} /> Скачать XLSX
             </a>
+          )}
+          {canImport && (
+            <>
+              <input
+                accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                className="sr-only"
+                onChange={(inputEvent) => {
+                  const file = inputEvent.target.files?.[0];
+                  if (file) void importAttendance(file);
+                }}
+                ref={fileInput}
+                type="file"
+              />
+              <button
+                className="button button--secondary"
+                disabled={importing}
+                onClick={() => fileInput.current?.click()}
+                type="button"
+              >
+                <Upload size={16} /> {importing ? 'Загружаем…' : 'Загрузить посещения'}
+              </button>
+            </>
           )}
           <div className="event-detail-hero__count">
             <Users size={18} />
@@ -81,6 +155,57 @@ export function EventPageClient({ id }: { id: string }) {
           </div>
         </div>
       </section>
+
+      {(importResult || importError) && (
+        <section className="panel">
+          <header className="panel__header">
+            <div>
+              <p className="eyebrow">Загрузка посещений</p>
+              <h2>{importError ? 'Таблица не загружена' : 'Таблица обработана'}</h2>
+            </div>
+          </header>
+          {importError ? (
+            <p className="form-error">{importError}</p>
+          ) : importResult ? (
+            <div className="page-stack page-stack--compact">
+              <p>
+                Строк «Да»: <strong>{importResult.attendedRows}</strong> · найдено в CRM:{' '}
+                <strong>{importResult.resolved}</strong> · добавлено:{' '}
+                <strong>{importResult.added}</strong> · отмечено посещение:{' '}
+                <strong>{importResult.markedAttended}</strong>.
+              </p>
+              {(importResult.invalid.length > 0 ||
+                importResult.unmatched.length > 0 ||
+                importResult.ambiguous.length > 0) && (
+                <details>
+                  <summary className="muted">
+                    Не прошли ФИО: {importResult.invalid.length}; не найдены:{' '}
+                    {importResult.unmatched.length}; неоднозначны: {importResult.ambiguous.length}
+                  </summary>
+                  <ul>
+                    {importResult.invalid.slice(0, 20).map((item) => (
+                      <li key={`invalid-${item.rowNumber}`}>
+                        Строка {item.rowNumber}: {item.rawFullName || 'ФИО не заполнено'} — неверное
+                        ФИО
+                      </li>
+                    ))}
+                    {importResult.unmatched.slice(0, 20).map((item) => (
+                      <li key={`unmatched-${item.rowNumber}`}>
+                        Строка {item.rowNumber}: {item.fullName} — нет в базе
+                      </li>
+                    ))}
+                    {importResult.ambiguous.slice(0, 20).map((item) => (
+                      <li key={`ambiguous-${item.rowNumber}`}>
+                        Строка {item.rowNumber}: {item.fullName} — несколько карточек
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+            </div>
+          ) : null}
+        </section>
+      )}
 
       <section className="table-panel">
         <header className="panel__header event-participants-heading">

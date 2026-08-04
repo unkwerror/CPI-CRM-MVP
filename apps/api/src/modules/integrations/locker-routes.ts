@@ -6,6 +6,7 @@ import {
   normalizePhone,
   normalizeTelegramUsername,
   normalizeUnicode,
+  parseRussianFullName,
 } from '@cpi-crm/domain';
 import { Type } from '@sinclair/typebox';
 import type { FastifyInstance } from 'fastify';
@@ -273,8 +274,8 @@ async function resolveLockerPerson(
     throw new HttpProblem(409, 'Идентификаторы Locker связаны с разными участниками CRM');
   }
 
-  const normalizedName = normalizeFullName(user.fullName);
-  if (!normalizedName) throw new HttpProblem(400, 'ФИО пользователя Locker не заполнено');
+  const fio = parseRussianFullName(user.fullName);
+  const normalizedName = fio?.normalizedFullName ?? normalizeFullName(user.fullName);
   const phone = user.phone?.trim() ? normalizePhone(user.phone) : null;
   const hadExternalLink = externallyLinkedIds.length === 1;
   let personId = externallyLinkedIds[0];
@@ -298,7 +299,7 @@ async function resolveLockerPerson(
     personId = ids[0];
   }
 
-  if (!personId && phone) {
+  if (!personId && phone && fio) {
     const phoneMatch = await client.query<{ person_id: string }>(
       `SELECT DISTINCT COALESCE(person.merged_into_person_id, person.id) AS person_id
          FROM contact_points contact
@@ -315,15 +316,62 @@ async function resolveLockerPerson(
     if (ids.length === 1) personId = ids[0];
   }
 
+  if (!personId && fio) {
+    const exactNameMatch = await client.query<{ person_id: string }>(
+      `WITH candidates AS (
+         SELECT person.id AS person_id
+           FROM persons person
+          WHERE person.organization_id = $1
+            AND person.archived_at IS NULL AND person.merged_into_person_id IS NULL
+            AND person.normalized_full_name = $2
+         UNION
+         SELECT canonical.id
+           FROM person_aliases alias
+           JOIN persons member ON member.id = alias.person_id
+           JOIN persons canonical
+             ON canonical.id = COALESCE(member.merged_into_person_id, member.id)
+          WHERE canonical.organization_id = $1
+            AND canonical.archived_at IS NULL AND canonical.merged_into_person_id IS NULL
+            AND alias.archived_at IS NULL AND alias.normalized_value = $2
+       )
+       SELECT DISTINCT person_id FROM candidates ORDER BY person_id`,
+      [organization.id, fio.normalizedFullName],
+    );
+    const ids = [...new Set(exactNameMatch.rows.map((row) => row.person_id))];
+    if (ids.length > 1) {
+      throw new HttpProblem(
+        409,
+        'ФИО соответствует нескольким участникам CRM',
+        'Свяжите карточку вручную через crmPersonId, не объединяя разные Telegram ID.',
+      );
+    }
+    personId = ids[0];
+  }
+
   if (!personId) {
-    const fullName = cleanText(user.fullName, 500);
+    if (!fio) {
+      throw new HttpProblem(
+        422,
+        'Для участника требуется полное ФИО',
+        'Укажите в боте фамилию, имя и отчество русскими буквами.',
+      );
+    }
     const created = await client.query<{ id: string }>(
       `INSERT INTO persons
-         (organization_id, canonical_full_name, normalized_full_name, lifecycle_data_state,
+         (organization_id, canonical_full_name, normalized_full_name,
+          last_name, first_name, patronymic, lifecycle_data_state,
           activation_state, activity_status, applied_lifecycle_rule_set_id)
-       VALUES ($1, $2, $3, 'COMPLETE', 'NOT_ACTIVATED', 'UNKNOWN', $4)
+       VALUES ($1, $2, $3, $4, $5, $6, 'COMPLETE', 'NOT_ACTIVATED', 'UNKNOWN', $7)
        RETURNING id`,
-      [organization.id, fullName, normalizedName, organization.ruleSetId],
+      [
+        organization.id,
+        fio.canonicalFullName,
+        fio.normalizedFullName,
+        fio.lastName,
+        fio.firstName,
+        fio.patronymic,
+        organization.ruleSetId,
+      ],
     );
     personId = created.rows[0]!.id;
     resolution = 'CREATED';
@@ -331,13 +379,13 @@ async function resolveLockerPerson(
       `INSERT INTO person_aliases
          (person_id, raw_value, normalized_value, alias_type, data_origin, is_preferred)
        VALUES ($1, $2, $3, 'SOURCE_VARIANT', 'LIVE', true)`,
-      [personId, fullName, normalizedName],
+      [personId, fio.canonicalFullName, fio.normalizedFullName],
     );
     await client.query(
       `INSERT INTO person_search_documents
          (person_id, internal_ids, canonical_name, search_text)
        VALUES ($1::uuid, $1::uuid::text, $2, $2 || ' ' || $1::uuid::text)`,
-      [personId, normalizedName],
+      [personId, fio.normalizedFullName],
     );
     await writeAudit(client, {
       actor: LOCKER_ACTOR,
@@ -349,6 +397,35 @@ async function resolveLockerPerson(
     });
   } else if (!hadExternalLink) {
     resolution = 'CONTACT';
+  }
+
+  const conflictingTelegramIdentity = await client.query<{ telegram_user_id: string }>(
+    `WITH cluster AS (
+       SELECT id FROM persons WHERE id = $1 OR merged_into_person_id = $1
+     ), identities AS (
+       SELECT contact.messenger_stable_id AS telegram_user_id
+         FROM contact_points contact
+        WHERE contact.person_id IN (SELECT id FROM cluster)
+          AND contact.type = 'TELEGRAM' AND contact.archived_at IS NULL
+          AND contact.messenger_stable_id IS NOT NULL
+       UNION
+       SELECT identity.external_id
+         FROM external_identities identity
+        WHERE identity.person_id IN (SELECT id FROM cluster)
+          AND identity.source_namespace = 'locker.telegram'
+          AND identity.archived_at IS NULL
+     )
+     SELECT telegram_user_id FROM identities
+      WHERE telegram_user_id <> $2
+      ORDER BY telegram_user_id LIMIT 1`,
+    [personId, user.telegramUserId],
+  );
+  if (conflictingTelegramIdentity.rows[0]) {
+    throw new HttpProblem(
+      409,
+      'Участник CRM уже связан с другим Telegram ID',
+      'Разные стабильные Telegram ID нельзя объединять в одну сущность участника.',
+    );
   }
 
   await upsertLockerIdentities(client, organization.id, personId, user);
@@ -400,32 +477,58 @@ async function upsertLockerContacts(
   const username = user.telegramUsername ? normalizeTelegramUsername(user.telegramUsername) : null;
   const telegramRaw = username ? `@${username}` : `Telegram ID ${user.telegramUserId}`;
   const telegramNormalized = username ?? `id:${user.telegramUserId}`;
+  await client.query(
+    `UPDATE contact_points
+        SET is_primary = false, updated_at = now()
+      WHERE person_id IN (
+              SELECT id FROM persons WHERE id = $1 OR merged_into_person_id = $1
+            )
+        AND type = 'TELEGRAM' AND archived_at IS NULL
+        AND messenger_stable_id IS DISTINCT FROM $2`,
+    [personId, user.telegramUserId],
+  );
   const telegram = await client.query<{ id: string }>(
     `SELECT id FROM contact_points
-      WHERE person_id = $1 AND type = 'TELEGRAM' AND messenger_stable_id = $2
+      WHERE person_id IN (
+              SELECT id FROM persons WHERE id = $1 OR merged_into_person_id = $1
+            )
+        AND type = 'TELEGRAM'
+        AND (
+          messenger_stable_id = $2
+          OR (messenger_stable_id IS NULL AND normalized_value = $3)
+        )
         AND archived_at IS NULL
+      ORDER BY (messenger_stable_id = $2) DESC, is_verified DESC,
+               is_primary DESC, created_at, id
       LIMIT 1`,
-    [personId, user.telegramUserId],
+    [personId, user.telegramUserId, telegramNormalized],
   );
   if (telegram.rows[0]) {
     await client.query(
       `UPDATE contact_points
-          SET raw_value = $2, normalized_value = $3, is_verified = true, updated_at = now()
+          SET archived_at = now(), is_primary = false,
+              updated_at = now(), version = version + 1
+        WHERE person_id IN (
+                SELECT id FROM persons WHERE id = $1 OR merged_into_person_id = $1
+              )
+          AND type = 'TELEGRAM' AND normalized_value = $2
+          AND messenger_stable_id IS NULL AND archived_at IS NULL AND id <> $3`,
+      [personId, telegramNormalized, telegram.rows[0].id],
+    );
+    await client.query(
+      `UPDATE contact_points
+          SET raw_value = $2, normalized_value = $3, messenger_stable_id = $4,
+              is_primary = true, is_verified = true,
+              updated_at = now(), version = version + 1
         WHERE id = $1`,
-      [telegram.rows[0].id, telegramRaw, telegramNormalized],
+      [telegram.rows[0].id, telegramRaw, telegramNormalized, user.telegramUserId],
     );
   } else {
     await client.query(
       `INSERT INTO contact_points
          (person_id, type, raw_value, normalized_value, messenger_stable_id,
           is_primary, is_verified, data_origin)
-       VALUES ($1, 'TELEGRAM', $2, $3, $4,
-               NOT EXISTS (
-                 SELECT 1 FROM contact_points
-                  WHERE person_id = $1 AND type = 'TELEGRAM'
-                    AND is_primary = true AND archived_at IS NULL
-               ),
-               true, 'LIVE')`,
+       VALUES ($1, 'TELEGRAM', $2, $3, $4, true, true, 'LIVE')`,
       [personId, telegramRaw, telegramNormalized, user.telegramUserId],
     );
   }
@@ -436,7 +539,10 @@ async function upsertLockerContacts(
        SELECT $1, 'PHONE', $2, $3, false, false, 'LIVE'
         WHERE NOT EXISTS (
           SELECT 1 FROM contact_points
-           WHERE person_id = $1 AND type = 'PHONE' AND normalized_value = $3
+           WHERE person_id IN (
+                   SELECT id FROM persons WHERE id = $1 OR merged_into_person_id = $1
+                 )
+             AND type = 'PHONE' AND normalized_value = $3
              AND archived_at IS NULL
         )`,
       [personId, cleanText(user.phone, 100), normalizedPhone],
@@ -451,10 +557,12 @@ async function queuePhoneDuplicateCandidates(
   normalizedPhone: string,
 ): Promise<void> {
   const matches = await client.query<{ person_id: string }>(
-    `SELECT DISTINCT person_id
-       FROM contact_points
-      WHERE type = 'PHONE' AND normalized_value = $1 AND person_id <> $2
-        AND archived_at IS NULL`,
+    `SELECT DISTINCT COALESCE(person.merged_into_person_id, person.id) AS person_id
+       FROM contact_points contact
+       JOIN persons person ON person.id = contact.person_id
+      WHERE contact.type = 'PHONE' AND contact.normalized_value = $1
+        AND contact.archived_at IS NULL AND person.archived_at IS NULL
+        AND COALESCE(person.merged_into_person_id, person.id) <> $2`,
     [normalizedPhone, personId],
   );
   for (const match of matches.rows) {

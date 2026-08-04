@@ -404,6 +404,9 @@ export const persons = pgTable(
       .references(() => organizations.id, { onDelete: 'restrict' }),
     canonicalFullName: text('canonical_full_name').notNull(),
     normalizedFullName: text('normalized_full_name').notNull(),
+    lastName: text('last_name'),
+    firstName: text('first_name'),
+    patronymic: text('patronymic'),
     notes: text('notes'),
     ownerUserId: uuid('owner_user_id').references(() => appUsers.id, { onDelete: 'set null' }),
     lifecycleDataState: lifecycleDataStateEnum('lifecycle_data_state')
@@ -429,12 +432,29 @@ export const persons = pgTable(
   (table) => [
     index('persons_organization_idx').on(table.organizationId),
     index('persons_normalized_full_name_idx').on(table.normalizedFullName),
+    index('persons_name_parts_idx').on(table.lastName, table.firstName, table.patronymic),
     index('persons_owner_idx').on(table.ownerUserId),
     index('persons_lifecycle_queue_idx').on(table.activityStatus, table.nextStatusTransitionAt),
     index('persons_merged_into_idx').on(table.mergedIntoPersonId),
     check(
       'persons_no_self_merge_check',
       sql`${table.mergedIntoPersonId} is null or ${table.mergedIntoPersonId} <> ${table.id}`,
+    ),
+    check(
+      'persons_active_russian_fio_check',
+      sql`${table.archivedAt} is not null or ${table.mergedIntoPersonId} is not null or (
+        ${table.lastName} ~ '^[А-Яа-яЁё]+(-[А-Яа-яЁё]+)*$'
+        and ${table.firstName} ~ '^[А-Яа-яЁё]+(-[А-Яа-яЁё]+)*$'
+        and ${table.patronymic} ~ '^[А-Яа-яЁё]+(-[А-Яа-яЁё]+)*$'
+        and ${table.canonicalFullName} = ${table.lastName} || ' ' || ${table.firstName} || ' ' || ${table.patronymic}
+      )`,
+    ),
+    check(
+      'persons_notes_valid_check',
+      sql`${table.archivedAt} is not null or ${table.mergedIntoPersonId} is not null or ${table.notes} is null or (
+        ${table.notes} = btrim(${table.notes})
+        and char_length(${table.notes}) between 1 and 10000
+      )`,
     ),
   ],
 );
@@ -495,9 +515,21 @@ export const contactPoints = pgTable(
     uniqueIndex('contact_points_primary_type_uidx')
       .on(table.personId, table.type)
       .where(sql`${table.isPrimary} and ${table.archivedAt} is null`),
+    uniqueIndex('contact_points_person_value_uidx')
+      .on(table.personId, table.type, table.normalizedValue)
+      .where(sql`${table.archivedAt} is null`),
+    uniqueIndex('contact_points_telegram_stable_id_uidx')
+      .on(table.messengerStableId)
+      .where(
+        sql`${table.type} = 'TELEGRAM' and ${table.messengerStableId} is not null and ${table.archivedAt} is null`,
+      ),
     check(
       'contact_points_period_check',
       sql`${table.validTo} is null or ${table.validFrom} is null or ${table.validTo} > ${table.validFrom}`,
+    ),
+    check(
+      'contact_points_telegram_stable_id_check',
+      sql`${table.type} <> 'TELEGRAM' or ${table.messengerStableId} is null or ${table.messengerStableId} ~ '^[0-9]+$'`,
     ),
   ],
 );
@@ -1386,18 +1418,19 @@ export const deals = pgTable(
     index('deals_organization_idx').on(table.organizationId),
     index('deals_partner_idx').on(table.partnerId),
     index('deals_pipeline_idx').on(table.status, table.closedAt),
-    index('deals_paid_idx').on(table.paidAt).where(sql`${table.paidAt} is not null`),
-    index('deals_person_idx').on(table.personId).where(sql`${table.personId} is not null`),
+    index('deals_paid_idx')
+      .on(table.paidAt)
+      .where(sql`${table.paidAt} is not null`),
+    index('deals_person_idx')
+      .on(table.personId)
+      .where(sql`${table.personId} is not null`),
     check('deals_amount_check', sql`${table.amount} >= 0`),
     check(
       'deals_closed_fields_check',
       sql`${table.status} in ('LEAD', 'NEGOTIATION') or ${table.closedAt} is not null`,
     ),
     check('deals_paid_pair_check', sql`(${table.paidAt} is null) = (${table.paidAmount} is null)`),
-    check(
-      'deals_paid_amount_check',
-      sql`${table.paidAmount} is null or ${table.paidAmount} >= 0`,
-    ),
+    check('deals_paid_amount_check', sql`${table.paidAmount} is null or ${table.paidAmount} >= 0`),
   ],
 );
 

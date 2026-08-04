@@ -5,6 +5,8 @@ import { autoResolveDuplicateCandidatesInTransaction } from '@cpi-crm/db';
 import {
   HEAD_QUALITY_BAND_LABELS,
   Permissions,
+  assessParticipantComment,
+  buildRussianFullName,
   computeHeadQuality,
   hasPermission,
   interpretHeadQuality,
@@ -69,6 +71,9 @@ interface PersonListRow {
   id: string;
   canonical_full_name: string;
   normalized_full_name: string;
+  last_name: string;
+  first_name: string;
+  patronymic: string;
   activation_state: 'UNKNOWN_LEGACY' | 'NOT_ACTIVATED' | 'ACTIVATED';
   live_activity_status: 'UNKNOWN' | 'ACTIVE' | 'MEDIUM' | 'INACTIVE';
   last_artifact_at: Date | null;
@@ -212,7 +217,8 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
       values.push(limit + 1);
 
       const result = await app.pool.query<PersonListRow>(
-        `SELECT p.id, p.canonical_full_name, p.normalized_full_name, p.activation_state,
+        `SELECT p.id, p.canonical_full_name, p.normalized_full_name,
+                p.last_name, p.first_name, p.patronymic, p.activation_state,
                 ${LIVE_ACTIVITY_SQL} AS live_activity_status,
                 p.last_artifact_at,
                 affiliation.organization_name, affiliation.faculty,
@@ -229,7 +235,8 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
              SELECT cp.raw_value AS primary_contact
                FROM contact_points cp
               WHERE cp.person_id IN ${clusterMemberIdsSql} AND cp.archived_at IS NULL
-              ORDER BY cp.is_primary DESC, cp.created_at
+              ORDER BY (cp.type = 'TELEGRAM' AND cp.messenger_stable_id IS NOT NULL) DESC,
+                       (cp.type = 'TELEGRAM') DESC, cp.is_primary DESC, cp.created_at
               LIMIT 1
            ) contact ON true
            LEFT JOIN LATERAL (
@@ -301,11 +308,14 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
     },
     async (request, reply) => {
       const body = request.body as {
-        canonicalFullName: string;
+        lastName: string;
+        firstName: string;
+        patronymic: string;
         lifecycleDataState?: 'LEGACY_INCOMPLETE' | 'COMPLETE';
         contacts?: Array<{
           type: 'EMAIL' | 'PHONE' | 'TELEGRAM' | 'MAX' | 'OTHER';
           value: string;
+          telegramUserId?: string;
           isPrimary?: boolean;
         }>;
         organization?: string;
@@ -323,23 +333,64 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
       }
       const actor = request.authUser!;
       const organization = await getOrganizationContext(app.pool);
-      const name = normalizeUnicode(body.canonicalFullName).replace(/\s+/gu, ' ').trim();
-      const normalizedName = normalizeFullName(name);
-      if (!normalizedName) throw new HttpProblem(400, 'ФИО не заполнено');
+      const fio = buildRussianFullName(body);
+      if (!fio) {
+        throw new HttpProblem(
+          400,
+          'Некорректное ФИО',
+          'Фамилия, имя и отчество обязательны и должны быть написаны русскими буквами.',
+        );
+      }
+      const preparedContacts = (body.contacts ?? []).map((contact) => {
+        const rawValue = normalizeUnicode(contact.value).replace(/\s+/gu, ' ').trim();
+        const normalizedValue = normalizeContact(contact.type, rawValue);
+        const telegramUserId = normalizeTelegramStableId(contact.type, contact.telegramUserId);
+        return {
+          ...contact,
+          rawValue,
+          normalizedValue,
+          telegramUserId,
+          isPrimary: telegramUserId !== null ? true : (contact.isPrimary ?? false),
+        };
+      });
+      const contactFacts = new Set<string>();
+      const primaryTypes = new Set<string>();
+      const telegramIdentities = new Set<string>();
+      for (const contact of preparedContacts) {
+        const fact = `${contact.type}\u0000${contact.normalizedValue}`;
+        if (contactFacts.has(fact)) {
+          throw new HttpProblem(409, 'Один и тот же контакт указан несколько раз');
+        }
+        contactFacts.add(fact);
+        if (contact.isPrimary) {
+          if (primaryTypes.has(contact.type)) {
+            throw new HttpProblem(409, `Для типа ${contact.type} возможен один основной контакт`);
+          }
+          primaryTypes.add(contact.type);
+        }
+        if (contact.telegramUserId) telegramIdentities.add(contact.telegramUserId);
+      }
+      if (telegramIdentities.size > 1) {
+        throw new HttpProblem(409, 'У участника может быть только один главный Telegram ID');
+      }
 
       const result = await transaction(app.pool, async (client) => {
         const inserted = await client.query<{ id: string }>(
           `INSERT INTO persons
-             (organization_id, canonical_full_name, normalized_full_name, lifecycle_data_state,
+             (organization_id, canonical_full_name, normalized_full_name,
+              last_name, first_name, patronymic, lifecycle_data_state,
               activation_state, activity_status, applied_lifecycle_rule_set_id)
-           VALUES ($1, $2, $3, $4::lifecycle_data_state,
-                   CASE WHEN $4::text = 'COMPLETE' THEN 'NOT_ACTIVATED'::activation_state ELSE 'UNKNOWN_LEGACY'::activation_state END,
-                   'UNKNOWN', $5)
+           VALUES ($1, $2, $3, $4, $5, $6, $7::lifecycle_data_state,
+                   CASE WHEN $7::text = 'COMPLETE' THEN 'NOT_ACTIVATED'::activation_state ELSE 'UNKNOWN_LEGACY'::activation_state END,
+                   'UNKNOWN', $8)
            RETURNING id`,
           [
             organization.id,
-            name,
-            normalizedName,
+            fio.canonicalFullName,
+            fio.normalizedFullName,
+            fio.lastName,
+            fio.firstName,
+            fio.patronymic,
             body.lifecycleDataState ?? 'COMPLETE',
             organization.ruleSetId,
           ],
@@ -349,18 +400,26 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
           `INSERT INTO person_aliases
              (person_id, raw_value, normalized_value, alias_type, data_origin, is_preferred)
            VALUES ($1, $2, $3, 'SOURCE_VARIANT', 'LIVE', true)`,
-          [personId, name, normalizedName],
+          [personId, fio.canonicalFullName, fio.normalizedFullName],
         );
 
-        for (const contact of body.contacts ?? []) {
-          const normalized = normalizeContact(contact.type, contact.value);
+        for (const contact of preparedContacts) {
           await client.query(
             `INSERT INTO contact_points
-               (person_id, type, raw_value, normalized_value, is_primary, data_origin)
-             VALUES ($1, $2, $3, $4, $5, 'LIVE')`,
-            [personId, contact.type, contact.value, normalized, contact.isPrimary ?? false],
+               (person_id, type, raw_value, normalized_value, messenger_stable_id,
+                is_primary, is_verified, data_origin)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'LIVE')`,
+            [
+              personId,
+              contact.type,
+              contact.rawValue,
+              contact.normalizedValue,
+              contact.telegramUserId,
+              contact.isPrimary,
+              contact.telegramUserId !== null,
+            ],
           );
-          await queueContactDuplicates(client, personId, contact.type, normalized);
+          await queueContactDuplicates(client, personId, contact.type, contact.normalizedValue);
         }
 
         if (body.organization?.trim()) {
@@ -380,7 +439,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
           `INSERT INTO person_search_documents
              (person_id, internal_ids, canonical_name, search_text)
            VALUES ($1::uuid, $1::uuid::text, $2, $2 || ' ' || $1::uuid::text)`,
-          [personId, normalizedName],
+          [personId, fio.normalizedFullName],
         );
         const auditId = await writeAudit(client, {
           actor,
@@ -389,7 +448,10 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
           entityType: 'person',
           entityId: personId,
           after: {
-            canonicalFullName: name,
+            canonicalFullName: fio.canonicalFullName,
+            lastName: fio.lastName,
+            firstName: fio.firstName,
+            patronymic: fio.patronymic,
             lifecycleDataState: body.lifecycleDataState ?? 'COMPLETE',
           },
         });
@@ -398,7 +460,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
              (entity_type, entity_id, field_name, raw_value, normalized_value, audit_log_id,
               observed_by_user_id, is_canonical)
            VALUES ('person', $1, 'canonical_full_name', to_jsonb($2::text), to_jsonb($3::text), $4, $5, true)`,
-          [personId, name, normalizedName, auditId, actor.userId],
+          [personId, fio.canonicalFullName, fio.normalizedFullName, auditId, actor.userId],
         );
         await autoResolveDuplicateCandidatesInTransaction(client, {
           organizationId: organization.id,
@@ -439,7 +501,8 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
           notes: string | null;
         }
       >(
-        `SELECT p.id, p.canonical_full_name, p.normalized_full_name, p.activation_state,
+        `SELECT p.id, p.canonical_full_name, p.normalized_full_name,
+                p.last_name, p.first_name, p.patronymic, p.activation_state,
                 ${LIVE_ACTIVITY_SQL} AS live_activity_status, p.last_artifact_at, p.notes,
                 p.lifecycle_data_state, p.activated_at, p.next_status_transition_at, p.version,
                 affiliation.organization_name, affiliation.faculty,
@@ -452,7 +515,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
            JOIN organization_settings os ON os.organization_id = p.organization_id
            JOIN lifecycle_rule_sets lrs ON lrs.id = os.current_lifecycle_rule_set_id
            LEFT JOIN app_users owner ON owner.id = p.owner_user_id
-           LEFT JOIN LATERAL (SELECT cp.raw_value AS primary_contact FROM contact_points cp WHERE cp.person_id IN (SELECT id FROM persons WHERE id = p.id OR merged_into_person_id = p.id) AND cp.archived_at IS NULL ORDER BY cp.is_primary DESC, cp.created_at LIMIT 1) contact ON true
+           LEFT JOIN LATERAL (SELECT cp.raw_value AS primary_contact FROM contact_points cp WHERE cp.person_id IN (SELECT id FROM persons WHERE id = p.id OR merged_into_person_id = p.id) AND cp.archived_at IS NULL ORDER BY (cp.type = 'TELEGRAM' AND cp.messenger_stable_id IS NOT NULL) DESC, (cp.type = 'TELEGRAM') DESC, cp.is_primary DESC, cp.created_at LIMIT 1) contact ON true
            LEFT JOIN LATERAL (SELECT o.name AS organization_name, af.faculty FROM affiliations af JOIN organizations o ON o.id = af.organization_id WHERE af.person_id IN (SELECT id FROM persons WHERE id = p.id OR merged_into_person_id = p.id) AND af.archived_at IS NULL ORDER BY af.is_primary DESC, af.created_at LIMIT 1) affiliation ON true
            LEFT JOIN LATERAL (SELECT count(DISTINCT av.artifact_id) AS artifact_count FROM artifact_version_contributors avc JOIN artifact_versions av ON av.id = avc.artifact_version_id JOIN artifacts a ON a.id = av.artifact_id WHERE avc.person_id IN (SELECT id FROM persons WHERE id = p.id OR merged_into_person_id = p.id) AND avc.contribution_role = 'AUTHOR' AND av.qualifies_for_activity AND av.status = 'SUBMITTED' AND a.status <> 'VOIDED' AND a.archived_at IS NULL) artifact_agg ON true
            LEFT JOIN LATERAL (SELECT ar.score FROM artifact_version_contributors avc JOIN artifact_versions av ON av.id = avc.artifact_version_id JOIN artifacts a ON a.id = av.artifact_id LEFT JOIN artifact_review_selections ars ON ars.artifact_version_id = av.id LEFT JOIN artifact_reviews ar ON ar.id = ars.current_final_review_id WHERE avc.person_id IN (SELECT id FROM persons WHERE id = p.id OR merged_into_person_id = p.id) AND avc.contribution_role = 'AUTHOR' AND av.qualifies_for_activity AND av.status = 'SUBMITTED' AND a.status <> 'VOIDED' AND a.archived_at IS NULL ORDER BY av.submitted_at DESC NULLS LAST, av.id LIMIT 1) latest ON true
@@ -476,28 +539,32 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
         participations,
         headQualityRows,
       ] = await Promise.all([
-          app.pool.query(
-            `SELECT id, type, raw_value, is_primary FROM contact_points WHERE person_id IN ${clusterSql} AND archived_at IS NULL ORDER BY is_primary DESC, created_at`,
-            [canonical],
-          ),
-          app.pool.query(
-            `SELECT id, raw_value FROM person_aliases WHERE person_id IN ${clusterSql} AND archived_at IS NULL ORDER BY is_preferred DESC, created_at`,
-            [canonical],
-          ),
-          app.pool.query(
-            `SELECT af.id, o.name AS organization, af.faculty, af.role_title AS role FROM affiliations af JOIN organizations o ON o.id = af.organization_id WHERE af.person_id IN ${clusterSql} AND af.archived_at IS NULL ORDER BY af.is_primary DESC`,
-            [canonical],
-          ),
-          app.pool.query(
-            `SELECT a.id, a.title, a.event_id, at.name AS type_name, a.status, av.id AS version_id, av.version_number, av.status AS version_status, av.submitted_at, ar.score, COALESCE(jsonb_agg(DISTINCT jsonb_build_object('id', author.id, 'name', author.canonical_full_name)) FILTER (WHERE author.id IS NOT NULL AND avc.contribution_role = 'AUTHOR'), '[]') AS authors FROM artifacts a JOIN artifact_types at ON at.id = a.type_id LEFT JOIN LATERAL (SELECT v.* FROM artifact_versions v WHERE v.artifact_id = a.id AND v.status <> 'VOIDED' ORDER BY v.version_number DESC LIMIT 1) av ON true LEFT JOIN artifact_version_contributors avc ON avc.artifact_version_id = av.id LEFT JOIN persons contributor ON contributor.id = avc.person_id LEFT JOIN persons author ON author.id = COALESCE(contributor.merged_into_person_id, contributor.id) LEFT JOIN artifact_review_selections ars ON ars.artifact_version_id = av.id LEFT JOIN artifact_reviews ar ON ar.id = ars.current_final_review_id WHERE a.archived_at IS NULL AND a.status <> 'VOIDED' AND EXISTS (SELECT 1 FROM artifact_version_contributors own JOIN artifact_versions ownv ON ownv.id = own.artifact_version_id WHERE ownv.artifact_id = a.id AND ownv.status <> 'VOIDED' AND own.person_id IN ${clusterSql}) GROUP BY a.id, at.name, av.id, av.version_number, av.status, av.submitted_at, ar.score ORDER BY av.submitted_at DESC NULLS LAST`,
-            [canonical],
-          ),
-          app.pool.query(
-            `SELECT id, title, status, due_at FROM tasks WHERE person_id IN ${clusterSql} AND archived_at IS NULL ORDER BY status = 'OPEN' DESC, due_at NULLS LAST`,
-            [canonical],
-          ),
-          app.pool.query(
-            `SELECT sr.id, ib.original_filename AS file_name, sr.sheet_name, sr.row_number,
+        app.pool.query(
+          `SELECT id, type, raw_value, messenger_stable_id, is_primary, is_verified
+               FROM contact_points
+              WHERE person_id IN ${clusterSql} AND archived_at IS NULL
+              ORDER BY (type = 'TELEGRAM' AND messenger_stable_id IS NOT NULL) DESC,
+                       (type = 'TELEGRAM') DESC, is_primary DESC, created_at`,
+          [canonical],
+        ),
+        app.pool.query(
+          `SELECT id, raw_value FROM person_aliases WHERE person_id IN ${clusterSql} AND archived_at IS NULL ORDER BY is_preferred DESC, created_at`,
+          [canonical],
+        ),
+        app.pool.query(
+          `SELECT af.id, o.name AS organization, af.faculty, af.role_title AS role FROM affiliations af JOIN organizations o ON o.id = af.organization_id WHERE af.person_id IN ${clusterSql} AND af.archived_at IS NULL ORDER BY af.is_primary DESC`,
+          [canonical],
+        ),
+        app.pool.query(
+          `SELECT a.id, a.title, a.event_id, at.name AS type_name, a.status, av.id AS version_id, av.version_number, av.status AS version_status, av.submitted_at, ar.score, COALESCE(jsonb_agg(DISTINCT jsonb_build_object('id', author.id, 'name', author.canonical_full_name)) FILTER (WHERE author.id IS NOT NULL AND avc.contribution_role = 'AUTHOR'), '[]') AS authors FROM artifacts a JOIN artifact_types at ON at.id = a.type_id LEFT JOIN LATERAL (SELECT v.* FROM artifact_versions v WHERE v.artifact_id = a.id AND v.status <> 'VOIDED' ORDER BY v.version_number DESC LIMIT 1) av ON true LEFT JOIN artifact_version_contributors avc ON avc.artifact_version_id = av.id LEFT JOIN persons contributor ON contributor.id = avc.person_id LEFT JOIN persons author ON author.id = COALESCE(contributor.merged_into_person_id, contributor.id) LEFT JOIN artifact_review_selections ars ON ars.artifact_version_id = av.id LEFT JOIN artifact_reviews ar ON ar.id = ars.current_final_review_id WHERE a.archived_at IS NULL AND a.status <> 'VOIDED' AND EXISTS (SELECT 1 FROM artifact_version_contributors own JOIN artifact_versions ownv ON ownv.id = own.artifact_version_id WHERE ownv.artifact_id = a.id AND ownv.status <> 'VOIDED' AND own.person_id IN ${clusterSql}) GROUP BY a.id, at.name, av.id, av.version_number, av.status, av.submitted_at, ar.score ORDER BY av.submitted_at DESC NULLS LAST`,
+          [canonical],
+        ),
+        app.pool.query(
+          `SELECT id, title, status, due_at FROM tasks WHERE person_id IN ${clusterSql} AND archived_at IS NULL ORDER BY status = 'OPEN' DESC, due_at NULLS LAST`,
+          [canonical],
+        ),
+        app.pool.query(
+          `SELECT sr.id, ib.original_filename AS file_name, sr.sheet_name, sr.row_number,
                     string_agg(DISTINCT sel.relation, ', ' ORDER BY sel.relation) AS relation,
                     ${canReadRaw ? 'sr.raw_json' : 'NULL::jsonb'} AS raw_json
                FROM source_entity_links sel
@@ -507,14 +574,14 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
                 AND sel.entity_id IN ${clusterSql} AND sel.detached_at IS NULL
               GROUP BY sr.id, ib.original_filename
               ORDER BY sr.sheet_name, sr.row_number`,
-            [canonical],
-          ),
-          app.pool.query(
-            `SELECT t.name FROM person_tags pt JOIN tags t ON t.id = pt.tag_id WHERE pt.person_id IN ${clusterSql} AND t.archived_at IS NULL ORDER BY t.name`,
-            [canonical],
-          ),
-          app.pool.query(
-            `SELECT ep.id AS participation_id, ep.registered_at, ep.decision, ep.decision_at,
+          [canonical],
+        ),
+        app.pool.query(
+          `SELECT t.name FROM person_tags pt JOIN tags t ON t.id = pt.tag_id WHERE pt.person_id IN ${clusterSql} AND t.archived_at IS NULL ORDER BY t.name`,
+          [canonical],
+        ),
+        app.pool.query(
+          `SELECT ep.id AS participation_id, ep.registered_at, ep.decision, ep.decision_at,
                   ep.attendance, ep.attended_at, ep.data_origin,
                   e.id AS event_id, e.name AS event_name, e.status AS event_status,
                   e.starts_at, e.ends_at,
@@ -547,8 +614,11 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
                      btrim(COALESCE(cell ->> 'displayText', cell ->> 'value')),
                      ''
                    ) AS value
-                     FROM jsonb_array_elements(COALESCE(sr.raw_json -> 'cells', '[]'::jsonb)) cell
+                    FROM jsonb_array_elements(COALESCE(sr.raw_json -> 'cells', '[]'::jsonb)) cell
                     WHERE lower(btrim(cell ->> 'header')) = 'комментарий'
+                      AND char_length(btrim(COALESCE(cell ->> 'displayText', cell ->> 'value'))) BETWEEN 1 AND 10000
+                      AND lower(btrim(COALESCE(cell ->> 'displayText', cell ->> 'value'))) !~ '^(нет|не указано|отсутствует|none|null|n/?a|test|тест|[-—.]+)$'
+                      AND btrim(COALESCE(cell ->> 'displayText', cell ->> 'value')) ~ '[[:alnum:]А-Яа-яЁё]'
                  ) source_comment ON true
                 WHERE upper(sel.entity_type) = 'EVENT_PARTICIPATION'
                   AND sel.entity_id = ep.id
@@ -559,16 +629,16 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
               AND e.archived_at IS NULL
             ORDER BY COALESCE(e.starts_at, ep.attended_at, ep.registered_at, e.created_at) DESC,
                      e.name, ep.id`,
-            [canonical],
-          ),
-          // Q_head: компоненты индекса качества головы за последние 90 дней.
-          app.pool.query<{
-            avg_score: string | null;
-            quality_windows: string;
-            involved: boolean;
-            commercial: boolean;
-          }>(
-            `WITH reviewed AS (
+          [canonical],
+        ),
+        // Q_head: компоненты индекса качества головы за последние 90 дней.
+        app.pool.query<{
+          avg_score: string | null;
+          quality_windows: string;
+          involved: boolean;
+          commercial: boolean;
+        }>(
+          `WITH reviewed AS (
                SELECT DISTINCT ar.id, ar.score, ar.criteria, ar.decision, av.submitted_at
                  FROM artifact_version_contributors avc
                  JOIN artifact_versions av ON av.id = avc.artifact_version_id
@@ -595,9 +665,9 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
                           AND tm.archived_at IS NULL AND tm.valid_to IS NULL) AS involved,
                EXISTS (SELECT 1 FROM deals d
                         WHERE d.person_id IN ${clusterSql} AND d.archived_at IS NULL) AS commercial`,
-            [canonical],
-          ),
-        ]);
+          [canonical],
+        ),
+      ]);
       const mappedArtifacts = artifacts.rows.map((item) => ({
         id: item.id,
         title: item.title,
@@ -661,6 +731,8 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
               id: item.id,
               type: item.type,
               rawValue: item.raw_value,
+              telegramUserId: item.messenger_stable_id,
+              isIdentity: item.type === 'TELEGRAM' && item.messenger_stable_id !== null,
               isPrimary: item.is_primary,
             }))
           : [],
@@ -704,7 +776,9 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
       const id = await resolveCanonicalId(app, (request.params as { id: string }).id);
       const body = request.body as {
         version: number;
-        canonicalFullName?: string;
+        lastName?: string;
+        firstName?: string;
+        patronymic?: string;
         ownerUserId?: string | null;
         organization?: string | null;
         faculty?: string | null;
@@ -714,15 +788,13 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
           id?: string;
           type: 'EMAIL' | 'PHONE' | 'TELEGRAM' | 'MAX' | 'OTHER';
           value: string;
+          telegramUserId?: string;
           isPrimary?: boolean;
           archive?: boolean;
         }>;
       };
       const hasContacts = body.contacts !== undefined;
-      if (
-        hasContacts &&
-        !hasPermission(request.authUser!.roles, Permissions.CONTACTS_WRITE)
-      ) {
+      if (hasContacts && !hasPermission(request.authUser!.roles, Permissions.CONTACTS_WRITE)) {
         throw new HttpProblem(
           403,
           'Доступ к контактам запрещён',
@@ -733,11 +805,17 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
       return transaction(app.pool, async (client) => {
         const current = await client.query<{
           canonical_full_name: string;
+          last_name: string | null;
+          first_name: string | null;
+          patronymic: string | null;
           owner_user_id: string | null;
           version: number;
-        }>('SELECT canonical_full_name, owner_user_id, version FROM persons WHERE id = $1 FOR UPDATE', [
-          id,
-        ]);
+        }>(
+          `SELECT canonical_full_name, last_name, first_name, patronymic,
+                  owner_user_id, version
+             FROM persons WHERE id = $1 FOR UPDATE`,
+          [id],
+        );
         if (!current.rows[0]) throw new HttpProblem(404, 'Участник не найден');
         if (current.rows[0].version !== body.version)
           throw new HttpProblem(
@@ -746,13 +824,30 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
             'Обновите страницу перед повторным сохранением.',
           );
 
-        const name =
-          body.canonicalFullName !== undefined
-            ? normalizeUnicode(body.canonicalFullName).replace(/\s+/gu, ' ').trim()
-            : current.rows[0].canonical_full_name;
-        if (!name || [...name].length < 2) throw new HttpProblem(400, 'ФИО не заполнено');
-        const normalized = normalizeFullName(name);
-        if (!normalized) throw new HttpProblem(400, 'ФИО не заполнено');
+        const fio = buildRussianFullName({
+          lastName: body.lastName ?? current.rows[0].last_name ?? '',
+          firstName: body.firstName ?? current.rows[0].first_name ?? '',
+          patronymic: body.patronymic ?? current.rows[0].patronymic ?? '',
+        });
+        if (!fio) {
+          throw new HttpProblem(
+            400,
+            'Некорректное ФИО',
+            'Фамилия, имя и отчество обязательны и должны быть написаны русскими буквами.',
+          );
+        }
+        const nameTouched =
+          body.lastName !== undefined ||
+          body.firstName !== undefined ||
+          body.patronymic !== undefined;
+        const comment = body.notes === undefined ? null : assessParticipantComment(body.notes);
+        if (comment && !comment.accepted) {
+          throw new HttpProblem(
+            400,
+            'Некорректный комментарий',
+            'Комментарий должен быть осмысленным текстом не длиннее 10 000 знаков.',
+          );
+        }
 
         const nextOwnerUserId =
           body.ownerUserId !== undefined ? body.ownerUserId : current.rows[0].owner_user_id;
@@ -768,16 +863,29 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
           `UPDATE persons
               SET canonical_full_name = $2,
                   normalized_full_name = $3,
-                  owner_user_id = $4,
-                  notes = CASE WHEN $5 THEN $6 ELSE notes END,
+                  last_name = $4,
+                  first_name = $5,
+                  patronymic = $6,
+                  owner_user_id = $7,
+                  notes = CASE WHEN $8 THEN $9 ELSE notes END,
                   version = version + 1,
                   updated_at = now()
             WHERE id = $1
             RETURNING id, version`,
-          [id, name, normalized, nextOwnerUserId, body.notes !== undefined, body.notes ?? null],
+          [
+            id,
+            fio.canonicalFullName,
+            fio.normalizedFullName,
+            fio.lastName,
+            fio.firstName,
+            fio.patronymic,
+            nextOwnerUserId,
+            body.notes !== undefined,
+            comment?.accepted ? comment.value : null,
+          ],
         );
 
-        if (body.canonicalFullName !== undefined) {
+        if (nameTouched) {
           await client.query(
             `UPDATE person_search_documents
                 SET canonical_name = $2,
@@ -785,7 +893,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
                     rebuilt_at = now(),
                     updated_at = now()
               WHERE person_id = $1`,
-            [id, normalized],
+            [id, fio.normalizedFullName],
           );
           await client.query(
             `UPDATE person_aliases
@@ -796,7 +904,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
               WHERE person_id = $1
                 AND is_preferred = true
                 AND archived_at IS NULL`,
-            [id, name, normalized],
+            [id, fio.canonicalFullName, fio.normalizedFullName],
           );
         }
 
@@ -822,6 +930,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
           id: string;
           type: string;
           rawValue: string;
+          telegramUserId: string | null;
           isPrimary: boolean;
         }> = [];
         if (hasContacts) {
@@ -832,9 +941,10 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
             id: string;
             type: string;
             raw_value: string;
+            messenger_stable_id: string | null;
             is_primary: boolean;
           }>(
-            `SELECT id, type, raw_value, is_primary
+            `SELECT id, type, raw_value, messenger_stable_id, is_primary
                FROM contact_points
               WHERE person_id IN ${contactClusterSql} AND archived_at IS NULL
               FOR UPDATE`,
@@ -842,11 +952,28 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
           );
           const existingById = new Map(existing.rows.map((row) => [row.id, row]));
           const keptIds = new Set<string>();
+          const submittedTelegramIdentities = new Set<string>();
+          for (const contact of body.contacts ?? []) {
+            if (contact.archive) continue;
+            const previous = contact.id ? existingById.get(contact.id) : undefined;
+            const telegramUserId = normalizeTelegramStableId(
+              contact.type,
+              contact.telegramUserId ??
+                (previous?.type === 'TELEGRAM' ? previous.messenger_stable_id : undefined),
+            );
+            if (telegramUserId) submittedTelegramIdentities.add(telegramUserId);
+          }
+          if (submittedTelegramIdentities.size > 1) {
+            throw new HttpProblem(409, 'У участника может быть только один главный Telegram ID');
+          }
 
           for (const contact of body.contacts ?? []) {
             if (contact.archive) {
               if (!contact.id || !existingById.has(contact.id)) {
                 throw new HttpProblem(400, 'Контакт для удаления не найден');
+              }
+              if (existingById.get(contact.id)?.messenger_stable_id !== null) {
+                throw new HttpProblem(409, 'Главный Telegram ID нельзя удалить из карточки');
               }
               await client.query(
                 `UPDATE contact_points
@@ -860,7 +987,50 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
             const rawValue = normalizeUnicode(contact.value).replace(/\s+/gu, ' ').trim();
             if (!rawValue) throw new HttpProblem(400, 'Контакт не заполнен');
             const normalizedContact = normalizeContact(contact.type, rawValue);
-            const isPrimary = contact.isPrimary ?? false;
+            const previous = contact.id ? existingById.get(contact.id) : undefined;
+            const telegramUserId = normalizeTelegramStableId(
+              contact.type,
+              contact.telegramUserId ??
+                (previous?.type === 'TELEGRAM' ? previous.messenger_stable_id : undefined),
+            );
+            if (
+              previous?.messenger_stable_id !== null &&
+              previous?.messenger_stable_id !== undefined &&
+              telegramUserId !== previous.messenger_stable_id
+            ) {
+              throw new HttpProblem(409, 'Главный Telegram ID нельзя заменить вручную');
+            }
+            if (
+              telegramUserId !== null &&
+              existing.rows.some(
+                (item) => item.id !== contact.id && item.messenger_stable_id !== null,
+              )
+            ) {
+              throw new HttpProblem(409, 'Участник уже связан с главным Telegram ID');
+            }
+            const isPrimary = telegramUserId !== null ? true : (contact.isPrimary ?? false);
+            if (
+              contact.type === 'TELEGRAM' &&
+              isPrimary &&
+              telegramUserId === null &&
+              submittedTelegramIdentities.size > 0
+            ) {
+              throw new HttpProblem(
+                409,
+                'Главным Telegram-контактом должен оставаться Telegram ID',
+              );
+            }
+            const repeated = await client.query<{ id: string }>(
+              `SELECT id FROM contact_points
+                WHERE person_id IN ${contactClusterSql}
+                  AND type = $2 AND normalized_value = $3 AND archived_at IS NULL
+                  AND ($4::uuid IS NULL OR id <> $4::uuid)
+                LIMIT 1`,
+              [id, contact.type, normalizedContact, contact.id ?? null],
+            );
+            if (repeated.rows[0]) {
+              throw new HttpProblem(409, 'Такой контакт уже указан у участника');
+            }
 
             if (contact.id) {
               if (!existingById.has(contact.id)) {
@@ -878,18 +1048,21 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
                 id: string;
                 type: string;
                 raw_value: string;
+                messenger_stable_id: string | null;
                 is_primary: boolean;
               }>(
                 `UPDATE contact_points
                     SET type = $2,
                         raw_value = $3,
                         normalized_value = $4,
-                        is_primary = $5,
+                        messenger_stable_id = $5,
+                        is_primary = $6,
+                        is_verified = CASE WHEN $5 IS NOT NULL THEN true ELSE is_verified END,
                         updated_at = now(),
                         version = version + 1
                   WHERE id = $1 AND archived_at IS NULL
-                  RETURNING id, type, raw_value, is_primary`,
-                [contact.id, contact.type, rawValue, normalizedContact, isPrimary],
+                  RETURNING id, type, raw_value, messenger_stable_id, is_primary`,
+                [contact.id, contact.type, rawValue, normalizedContact, telegramUserId, isPrimary],
               );
               if (!row.rows[0]) throw new HttpProblem(400, 'Контакт для обновления не найден');
               keptIds.add(row.rows[0].id);
@@ -897,6 +1070,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
                 id: row.rows[0].id,
                 type: row.rows[0].type,
                 rawValue: row.rows[0].raw_value,
+                telegramUserId: row.rows[0].messenger_stable_id,
                 isPrimary: row.rows[0].is_primary,
               });
               await queueContactDuplicates(client, id, contact.type, normalizedContact);
@@ -913,19 +1087,30 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
                 id: string;
                 type: string;
                 raw_value: string;
+                messenger_stable_id: string | null;
                 is_primary: boolean;
               }>(
                 `INSERT INTO contact_points
-                   (person_id, type, raw_value, normalized_value, is_primary, data_origin)
-                 VALUES ($1, $2, $3, $4, $5, 'LIVE')
-                 RETURNING id, type, raw_value, is_primary`,
-                [id, contact.type, rawValue, normalizedContact, isPrimary],
+                   (person_id, type, raw_value, normalized_value, messenger_stable_id,
+                    is_primary, is_verified, data_origin)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, 'LIVE')
+                 RETURNING id, type, raw_value, messenger_stable_id, is_primary`,
+                [
+                  id,
+                  contact.type,
+                  rawValue,
+                  normalizedContact,
+                  telegramUserId,
+                  isPrimary,
+                  telegramUserId !== null,
+                ],
               );
               keptIds.add(row.rows[0]!.id);
               contactsAfter.push({
                 id: row.rows[0]!.id,
                 type: row.rows[0]!.type,
                 rawValue: row.rows[0]!.raw_value,
+                telegramUserId: row.rows[0]!.messenger_stable_id,
                 isPrimary: row.rows[0]!.is_primary,
               });
               await queueContactDuplicates(client, id, contact.type, normalizedContact);
@@ -935,6 +1120,9 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
           // Contacts omitted from the payload are archived so the form can fully replace the list.
           for (const existingContact of existing.rows) {
             if (keptIds.has(existingContact.id)) continue;
+            if (existingContact.messenger_stable_id !== null) {
+              throw new HttpProblem(409, 'Главный Telegram ID нельзя удалить из карточки');
+            }
             await client.query(
               `UPDATE contact_points
                   SET archived_at = now(), is_primary = false, updated_at = now(), version = version + 1
@@ -943,7 +1131,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
             );
           }
 
-          await rebuildPersonSearchDocument(client, id, normalized);
+          await rebuildPersonSearchDocument(client, id, fio.normalizedFullName);
           await autoResolveDuplicateCandidatesInTransaction(client, {
             organizationId: organization.id,
             actorUserId: request.authUser!.userId,
@@ -951,12 +1139,15 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
             requestId: `${request.id}:auto-dedupe`,
             newlyCreatedPersonIds: [id],
           });
-        } else if (body.canonicalFullName !== undefined) {
-          await rebuildPersonSearchDocument(client, id, normalized);
+        } else if (nameTouched) {
+          await rebuildPersonSearchDocument(client, id, fio.normalizedFullName);
         }
 
         const after = {
-          canonicalFullName: name,
+          canonicalFullName: fio.canonicalFullName,
+          lastName: fio.lastName,
+          firstName: fio.firstName,
+          patronymic: fio.patronymic,
           ownerUserId: nextOwnerUserId,
           ...(affiliationAfter ? { affiliation: affiliationAfter } : {}),
           ...(hasContacts ? { contacts: contactsAfter } : {}),
@@ -988,6 +1179,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
         body: Type.Object({
           type: Type.String(),
           value: Type.String({ minLength: 1 }),
+          telegramUserId: Type.Optional(Type.String({ pattern: '^[0-9]+$', maxLength: 32 })),
           isPrimary: Type.Optional(Type.Boolean()),
         }),
       },
@@ -997,19 +1189,67 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
       const body = request.body as {
         type: 'EMAIL' | 'PHONE' | 'TELEGRAM' | 'MAX' | 'OTHER';
         value: string;
+        telegramUserId?: string;
         isPrimary?: boolean;
       };
       const normalized = normalizeContact(body.type, body.value);
+      const telegramUserId = normalizeTelegramStableId(body.type, body.telegramUserId);
+      const isPrimary = telegramUserId !== null ? true : (body.isPrimary ?? false);
+      const rawValue = normalizeUnicode(body.value).replace(/\s+/gu, ' ').trim();
       const organization = await getOrganizationContext(app.pool);
       const created = await transaction(app.pool, async (client) => {
-        if (body.isPrimary)
+        const clusterContacts = await client.query<{
+          id: string;
+          type: string;
+          normalized_value: string;
+          messenger_stable_id: string | null;
+        }>(
+          `SELECT contact.id, contact.type, contact.normalized_value,
+                  contact.messenger_stable_id
+             FROM contact_points contact
+            WHERE contact.person_id IN (
+                    SELECT id FROM persons WHERE id = $1 OR merged_into_person_id = $1
+                  )
+              AND contact.archived_at IS NULL
+            FOR UPDATE`,
+          [id],
+        );
+        if (
+          clusterContacts.rows.some(
+            (contact) => contact.type === body.type && contact.normalized_value === normalized,
+          )
+        ) {
+          throw new HttpProblem(409, 'Такой контакт уже указан у участника');
+        }
+        if (
+          telegramUserId !== null &&
+          clusterContacts.rows.some((contact) => contact.messenger_stable_id !== null)
+        ) {
+          throw new HttpProblem(409, 'Участник уже связан с главным Telegram ID');
+        }
+        if (
+          body.type === 'TELEGRAM' &&
+          isPrimary &&
+          telegramUserId === null &&
+          clusterContacts.rows.some((contact) => contact.messenger_stable_id !== null)
+        ) {
+          throw new HttpProblem(409, 'Главным Telegram-контактом должен оставаться Telegram ID');
+        }
+        if (isPrimary)
           await client.query(
-            `UPDATE contact_points SET is_primary = false, updated_at = now() WHERE person_id = $1 AND type = $2 AND archived_at IS NULL`,
+            `UPDATE contact_points SET is_primary = false, updated_at = now()
+              WHERE person_id IN (
+                      SELECT id FROM persons WHERE id = $1 OR merged_into_person_id = $1
+                    )
+                AND type = $2 AND archived_at IS NULL`,
             [id, body.type],
           );
         const result = await client.query(
-          `INSERT INTO contact_points (person_id, type, raw_value, normalized_value, is_primary, data_origin) VALUES ($1, $2, $3, $4, $5, 'LIVE') RETURNING id`,
-          [id, body.type, body.value, normalized, body.isPrimary ?? false],
+          `INSERT INTO contact_points
+             (person_id, type, raw_value, normalized_value, messenger_stable_id,
+              is_primary, is_verified, data_origin)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'LIVE') RETURNING id`,
+          [id, body.type, rawValue, normalized, telegramUserId, isPrimary, telegramUserId !== null],
         );
         await queueContactDuplicates(client, id, body.type, normalized);
         await writeAudit(client, {
@@ -1018,7 +1258,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
           action: 'contact.created',
           entityType: 'contact_point',
           entityId: result.rows[0].id,
-          after: { type: body.type, isPrimary: body.isPrimary ?? false },
+          after: { type: body.type, isPrimary, hasTelegramIdentity: telegramUserId !== null },
         });
         await autoResolveDuplicateCandidatesInTransaction(client, {
           organizationId: organization.id,
@@ -1073,6 +1313,9 @@ function mapPersonSummary(row: PersonListRow, includeContact = true) {
   return {
     id: row.id,
     canonicalFullName: row.canonical_full_name,
+    lastName: row.last_name,
+    firstName: row.first_name,
+    patronymic: row.patronymic,
     organization: row.organization_name,
     faculty: row.faculty,
     primaryContact: includeContact ? row.primary_contact : null,
@@ -1106,6 +1349,21 @@ function normalizeContact(type: string, rawValue: string): string {
     return username;
   }
   return normalizeFullName(raw);
+}
+
+function normalizeTelegramStableId(type: string, value: string | null | undefined): string | null {
+  if (type !== 'TELEGRAM') {
+    if (value !== undefined && value !== null && value.trim() !== '') {
+      throw new HttpProblem(400, 'Telegram ID допустим только для Telegram-контакта');
+    }
+    return null;
+  }
+  if (value === undefined || value === null || value.trim() === '') return null;
+  const normalized = normalizeUnicode(value).trim();
+  if (!/^[0-9]+$/u.test(normalized)) {
+    throw new HttpProblem(400, 'Некорректный Telegram user ID');
+  }
+  return normalized;
 }
 
 async function findOrCreateOrganization(

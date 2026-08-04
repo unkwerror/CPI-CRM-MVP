@@ -1,5 +1,6 @@
 import rateLimit from '@fastify/rate-limit';
 import { Permissions, Roles, hasPermission, permissionsForRoles, type Role } from '@cpi-crm/domain';
+import { readEventAttendanceWorkbook } from '@cpi-crm/importer';
 import Fastify from 'fastify';
 import type { Pool } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
@@ -52,6 +53,57 @@ async function exportTestApp(query: ReturnType<typeof vi.fn>, roles: Role[]) {
 }
 
 describe('participant export route', () => {
+  it('exports an event XLSX with separate FIO columns and attendance', async () => {
+    const query = vi.fn(async (sql: string, parameters?: unknown[]) => {
+      if (sql.includes('FROM organization_settings os')) return { rows: [organizationRow] };
+      if (sql.includes('SELECT id, name FROM events')) {
+        expect(parameters).toEqual([EVENT_ID, ORGANIZATION_ID]);
+        return { rows: [{ id: EVENT_ID, name: 'Demo day' }] };
+      }
+      if (sql.includes('WITH canonical_participants AS')) {
+        return {
+          rows: [
+            {
+              last_name: 'Иванов',
+              first_name: 'Иван',
+              patronymic: 'Иванович',
+              canonical_full_name: 'Иванов Иван Иванович',
+              email: null,
+              phone: null,
+              telegram: '@ivanov',
+              telegram_user_id: '12345',
+              attended: true,
+              decisions: ['ACCEPTED'],
+            },
+          ],
+        };
+      }
+      if (sql.includes('INSERT INTO audit_log')) return { rows: [] };
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const app = await exportTestApp(query, [Roles.DATA_STEWARD]);
+
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/exports/events/${EVENT_ID}/participants.xlsx`,
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['content-type']).toContain(
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      const workbook = await readEventAttendanceWorkbook(response.rawPayload);
+      expect(workbook.people[0]).toMatchObject({
+        lastName: 'Иванов',
+        firstName: 'Иван',
+        patronymic: 'Иванович',
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
   it('fails closed without exports.bulk and does not access source data', async () => {
     const query = vi.fn();
     const app = await exportTestApp(query, [Roles.COMMUNITY_MANAGER]);

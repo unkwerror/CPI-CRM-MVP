@@ -290,8 +290,10 @@ function CreatePersonDialog({
   onClose: () => void;
   onCreated: (id: string) => void;
 }) {
-  const [name, setName] = useState('');
-  const [contactType, setContactType] = useState<'PHONE' | 'EMAIL' | 'TELEGRAM'>('PHONE');
+  const [lastName, setLastName] = useState('');
+  const [firstName, setFirstName] = useState('');
+  const [patronymic, setPatronymic] = useState('');
+  const [contactType, setContactType] = useState<'PHONE' | 'EMAIL' | 'TELEGRAM'>('TELEGRAM');
   const [contact, setContact] = useState('');
   const [organization, setOrganization] = useState('');
   const [faculty, setFaculty] = useState('');
@@ -306,7 +308,9 @@ function CreatePersonDialog({
       const result = await api<{ id: string }>('/people', {
         method: 'POST',
         body: JSON.stringify({
-          canonicalFullName: name,
+          lastName,
+          firstName,
+          patronymic,
           lifecycleDataState: 'COMPLETE',
           contacts: contact ? [{ type: contactType, value: contact, isPrimary: true }] : [],
           organization: organization || undefined,
@@ -340,15 +344,32 @@ function CreatePersonDialog({
         </header>
         <form onSubmit={submit}>
           <div className="form-grid">
-            <label className="form-field form-field--full">
-              <span>ФИО *</span>
+            <label className="form-field">
+              <span>Фамилия *</span>
               <input
                 autoFocus
                 required
-                minLength={2}
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                placeholder="Иванов Иван Иванович"
+                value={lastName}
+                onChange={(event) => setLastName(event.target.value)}
+                placeholder="Иванов"
+              />
+            </label>
+            <label className="form-field">
+              <span>Имя *</span>
+              <input
+                required
+                value={firstName}
+                onChange={(event) => setFirstName(event.target.value)}
+                placeholder="Иван"
+              />
+            </label>
+            <label className="form-field form-field--full">
+              <span>Отчество *</span>
+              <input
+                required
+                value={patronymic}
+                onChange={(event) => setPatronymic(event.target.value)}
+                placeholder="Иванович"
               />
             </label>
             <label className="form-field">
@@ -363,11 +384,11 @@ function CreatePersonDialog({
               </select>
             </label>
             <label className="form-field">
-              <span>Контакт</span>
+              <span>{contactType === 'TELEGRAM' ? 'Telegram (главный контакт)' : 'Контакт'}</span>
               <input
                 value={contact}
                 onChange={(event) => setContact(event.target.value)}
-                placeholder="+7 999 123-45-67"
+                placeholder={contactType === 'TELEGRAM' ? '@username' : '+7 999 123-45-67'}
               />
             </label>
             <label className="form-field">

@@ -10,7 +10,7 @@ import {
 
 const FINGERPRINT = 'a'.repeat(64);
 
-describe('AUTO_DEDUPE_V1 name compatibility', () => {
+describe('AUTO_DEDUPE_V2 name compatibility', () => {
   it('ignores order and accepts a two-token subset of a fuller name', () => {
     expect(areNormalizedFullNamesCompatible('иванов иван', 'иван иванов')).toBe(true);
     expect(areNormalizedFullNamesCompatible('иван иванов', 'иванов иван иванович')).toBe(true);
@@ -22,7 +22,37 @@ describe('AUTO_DEDUPE_V1 name compatibility', () => {
   });
 });
 
-describe('AUTO_DEDUPE_V1 planning', () => {
+describe('AUTO_DEDUPE_V2 planning', () => {
+  it('merges an exact three-part Russian FIO without a contact', () => {
+    const snapshot: AutoDeduplicationSnapshot = {
+      persons: [person('p1', 'иванов иван иванович'), person('p2', 'иванов иван иванович')],
+      contacts: [],
+      externalIdentities: [],
+      candidates: [candidate('c1', 'p1', 'p2')],
+    };
+
+    const plan = buildAutoDeduplicationPlan(snapshot);
+
+    expect(plan.components).toHaveLength(1);
+    expect(plan.mergedCandidateIds).toEqual(['c1']);
+  });
+
+  it('does not merge the same FIO when stable Telegram identities conflict', () => {
+    const snapshot: AutoDeduplicationSnapshot = {
+      persons: [person('p1', 'иванов иван иванович'), person('p2', 'иванов иван иванович')],
+      contacts: [],
+      externalIdentities: [
+        { personId: 'p1', sourceNamespace: 'locker.telegram', externalId: '100' },
+        { personId: 'p2', sourceNamespace: 'locker.telegram', externalId: '200' },
+      ],
+      candidates: [candidate('c1', 'p1', 'p2')],
+    };
+
+    const plan = buildAutoDeduplicationPlan(snapshot);
+
+    expect(plan.components).toEqual([]);
+    expect(plan.notDuplicateCandidateIds).toEqual(['c1']);
+  });
   it('merges a compatible component through clean contacts and resolves weak edges inside it', () => {
     const snapshot: AutoDeduplicationSnapshot = {
       persons: [

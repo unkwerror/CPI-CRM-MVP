@@ -43,21 +43,22 @@ describe('real CPI workbook controls', () => {
     );
   });
 
-  it('rejects only deterministic invalid names while retaining their observations', () => {
+  it('requires complete Russian FIO while retaining raw observations', () => {
     expect(summarizePersonNameHygiene(plan)).toMatchObject({
-      acceptedObservations: 12_110,
-      rejectedObservations: 12,
-      ignoredSourceRows: 11,
+      acceptedObservations: 10_645,
+      rejectedObservations: 1_477,
+      ignoredSourceRows: 1_440,
       reasons: {
         TEST_PLACEHOLDER: 4,
         MISSING_OR_GENERATED_PLACEHOLDER: 7,
         TOO_SHORT: 1,
+        NOT_THREE_PART_RUSSIAN_FULL_NAME: 1_465,
       },
     });
     expect(report.outcomes).toMatchObject({
-      readyPersonObservations: 12_110,
-      rejectedPersonObservations: 12,
-      ignoredSourceRows: 11,
+      readyPersonObservations: 10_645,
+      rejectedPersonObservations: 1_477,
+      ignoredSourceRows: 1_440,
     });
   });
 

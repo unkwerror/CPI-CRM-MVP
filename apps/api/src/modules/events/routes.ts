@@ -1,4 +1,5 @@
 import { Permissions, hasPermission } from '@cpi-crm/domain';
+import { EventAttendanceImportError, importEventAttendanceWorkbook } from '@cpi-crm/importer';
 import { Type } from '@sinclair/typebox';
 import type { FastifyInstance } from 'fastify';
 
@@ -13,6 +14,19 @@ const LIVE_ACTIVITY_SQL = `CASE
 END`;
 
 export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
+  const spreadsheetContentTypes = [
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/octet-stream',
+  ];
+  for (const contentType of spreadsheetContentTypes) {
+    if (!app.hasContentTypeParser(contentType)) {
+      app.addContentTypeParser(
+        contentType,
+        { parseAs: 'buffer', bodyLimit: 5 * 1024 * 1024 },
+        (_request, body, done) => done(null, body),
+      );
+    }
+  }
   app.get(
     '/events',
     {
@@ -120,6 +134,45 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  app.post(
+    '/events/:id/participants/import-xlsx',
+    {
+      preHandler: app.requirePermission(Permissions.PEOPLE_WRITE),
+      config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
+      schema: {
+        tags: ['Мероприятия'],
+        summary: 'Привязать существующих участников по таблице посещений',
+        params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
+      },
+    },
+    async (request) => {
+      const eventId = (request.params as { id: string }).id;
+      if (!Buffer.isBuffer(request.body) || request.body.length === 0) {
+        throw new HttpProblem(400, 'XLSX-файл не передан');
+      }
+      const organization = await getOrganizationContext(app.pool);
+      try {
+        return await importEventAttendanceWorkbook(app.pool, {
+          organizationId: organization.id,
+          eventId,
+          actorUserId: request.authUser!.userId,
+          actorSubject: request.authUser!.sub,
+          requestId: request.id,
+          workbookBytes: request.body,
+        });
+      } catch (error) {
+        if (error instanceof EventAttendanceImportError) {
+          throw new HttpProblem(
+            error.kind === 'EVENT_NOT_FOUND' ? 404 : 400,
+            error.message,
+            error.detail,
+          );
+        }
+        throw error;
+      }
+    },
+  );
+
   app.get(
     '/events/:id',
     {
@@ -152,7 +205,9 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
                        WHERE member.id = p.id OR member.merged_into_person_id = p.id
                     )
                 AND contact.archived_at IS NULL
-              ORDER BY contact.is_primary DESC, contact.created_at, contact.id
+              ORDER BY (contact.type = 'TELEGRAM' AND contact.messenger_stable_id IS NOT NULL) DESC,
+                       (contact.type = 'TELEGRAM') DESC,
+                       contact.is_primary DESC, contact.created_at, contact.id
               LIMIT 1
            ) primary_contact ON true`
         : 'LEFT JOIN LATERAL (SELECT NULL::text AS primary_contact) primary_contact ON true';
@@ -214,6 +269,13 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
                       CASE WHEN jsonb_typeof(cell->'value') = 'string'
                            THEN cell->>'value' ELSE '' END
                     )) <> ''
+                AND char_length(btrim(COALESCE(
+                      NULLIF(cell->>'displayText', ''),
+                      CASE WHEN jsonb_typeof(cell->'value') = 'string'
+                           THEN cell->>'value' ELSE '' END
+                    ))) <= 10000
+                AND lower(btrim(COALESCE(NULLIF(cell->>'displayText', ''), cell->>'value', ''))) !~ '^(нет|не указано|отсутствует|none|null|n/?a|test|тест|[-—.]+)$'
+                AND btrim(COALESCE(NULLIF(cell->>'displayText', ''), cell->>'value', '')) ~ '[[:alnum:]А-Яа-яЁё]'
               WHERE participation.event_id = $1
                 AND participation.archived_at IS NULL
                 AND COALESCE(observed.merged_into_person_id, observed.id) = p.id

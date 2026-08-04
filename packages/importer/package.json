@@ -18,6 +18,8 @@
     "build": "tsc -p tsconfig.build.json",
     "clean": "rm -rf dist tsconfig.tsbuildinfo",
     "import": "tsx src/cli.ts import",
+    "event-attendance-import": "tsx src/event-attendance-import-cli.ts",
+    "participant-hygiene": "tsx src/participant-hygiene-cli.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit"

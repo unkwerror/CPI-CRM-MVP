@@ -1,4 +1,5 @@
 import { Permissions, Roles, hasPermission, permissionsForRoles, type Role } from '@cpi-crm/domain';
+import { createEventParticipantsWorkbook } from '@cpi-crm/importer';
 import Fastify from 'fastify';
 import type { Pool } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
@@ -24,6 +25,7 @@ const organizationRow = {
 async function eventTestApp(
   query: ReturnType<typeof vi.fn>,
   roles: Role[] = [Roles.METHODOLOGIST],
+  connect?: ReturnType<typeof vi.fn>,
 ) {
   const app = Fastify({ logger: false });
   const authUser: AuthUser = {
@@ -34,7 +36,7 @@ async function eventTestApp(
     permissions: [...permissionsForRoles(roles)],
   };
   app.decorateRequest('authUser', null);
-  app.decorate('pool', { query } as unknown as Pool);
+  app.decorate('pool', { query, ...(connect ? { connect } : {}) } as unknown as Pool);
   app.decorate(
     'requirePermission',
     (permission: (typeof Permissions)[keyof typeof Permissions]) => async (request) => {
@@ -53,6 +55,79 @@ async function eventTestApp(
 }
 
 describe('event routes', () => {
+  it('imports attended XLSX rows by exact FIO without creating people', async () => {
+    const bytes = await createEventParticipantsWorkbook({
+      eventName: 'Demo day',
+      rows: [
+        {
+          number: 1,
+          lastName: 'Иванов',
+          firstName: 'Иван',
+          patronymic: 'Иванович',
+          canonicalFullName: 'Иванов Иван Иванович',
+          attended: true,
+          eventName: 'Demo day',
+        },
+      ],
+    });
+    const query = vi.fn(async (sql: string, parameters?: unknown[]) => {
+      if (sql.includes('FROM organization_settings os')) return { rows: [organizationRow] };
+      throw new Error(`Unexpected pool SQL: ${sql}; ${JSON.stringify(parameters)}`);
+    });
+    const clientQuery = vi.fn(async (sql: string, parameters?: unknown[]) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] };
+      if (sql.includes('SELECT id, name, starts_at FROM events')) {
+        expect(parameters).toEqual([EVENT_ID, ORGANIZATION_ID]);
+        return {
+          rows: [{ id: EVENT_ID, name: 'Demo day', starts_at: new Date('2026-08-04T04:00:00Z') }],
+        };
+      }
+      if (sql.includes('WITH matching_names AS')) {
+        expect(parameters).toEqual([ORGANIZATION_ID, ['иванов иван иванович']]);
+        return { rows: [{ match_name: 'иванов иван иванович', person_id: PERSON_ID }] };
+      }
+      if (sql.includes('FROM event_participations participation')) return { rows: [] };
+      if (sql.includes('INSERT INTO event_participations')) return { rows: [], rowCount: 1 };
+      if (sql.includes('INSERT INTO audit_log')) {
+        return { rows: [{ id: '00000000-0000-4000-8000-000000000099' }] };
+      }
+      throw new Error(`Unexpected client SQL: ${sql}`);
+    });
+    const release = vi.fn();
+    const connect = vi.fn(
+      async () => ({ query: clientQuery, release }) as unknown as import('pg').PoolClient,
+    );
+    const app = await eventTestApp(query, [Roles.COMMUNITY_MANAGER], connect);
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/events/${EVENT_ID}/participants/import-xlsx`,
+        headers: {
+          'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        },
+        payload: Buffer.from(bytes),
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        attendedRows: 1,
+        resolved: 1,
+        added: 1,
+        markedAttended: 0,
+        invalid: [],
+        unmatched: [],
+        ambiguous: [],
+      });
+      expect(clientQuery.mock.calls.some(([sql]) => sql.includes('INSERT INTO persons'))).toBe(
+        false,
+      );
+      expect(release).toHaveBeenCalledOnce();
+    } finally {
+      await app.close();
+    }
+  });
+
   it('applies search and limit while counting canonical participants', async () => {
     const query = vi.fn(async (sql: string, parameters?: unknown[]) => {
       if (sql.includes('FROM organization_settings os')) return { rows: [organizationRow] };

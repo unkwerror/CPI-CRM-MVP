@@ -13,12 +13,17 @@ export interface ContactPoint {
   id: string;
   type: 'EMAIL' | 'PHONE' | 'TELEGRAM' | 'MAX' | 'OTHER';
   rawValue: string;
+  telegramUserId?: string | null;
+  isIdentity?: boolean;
   isPrimary: boolean;
 }
 
 export interface PersonSummary {
   id: string;
   canonicalFullName: string;
+  lastName: string;
+  firstName: string;
+  patronymic: string;
   organization?: string | null;
   faculty?: string | null;
   primaryContact?: string | null;
@@ -128,6 +133,21 @@ export interface EventDetail {
   participants: EventParticipantSummary[];
 }
 
+export interface EventAttendanceImportResult {
+  eventId: string;
+  eventName: string;
+  dataRows: number;
+  attendedRows: number;
+  duplicateRows: number;
+  resolved: number;
+  added: number;
+  markedAttended: number;
+  alreadyAttended: number;
+  invalid: { rowNumber: number; rawFullName: string; reason: string }[];
+  unmatched: { rowNumber: number; fullName: string }[];
+  ambiguous: { rowNumber: number; fullName: string }[];
+}
+
 export interface ArtifactVersionDetail {
   id: string;
   artifactId: string;
@@ -217,12 +237,7 @@ export interface ImportRunSummary {
 }
 
 export type PartnerKind =
-  | 'COMMERCIAL'
-  | 'GRANT_FUND'
-  | 'UNIVERSITY'
-  | 'GOVERNMENT'
-  | 'MEDIA'
-  | 'OTHER';
+  'COMMERCIAL' | 'GRANT_FUND' | 'UNIVERSITY' | 'GOVERNMENT' | 'MEDIA' | 'OTHER';
 export type PartnerStatus = 'PROSPECT' | 'DEVELOPING' | 'ACTIVE' | 'PAUSED' | 'CLOSED';
 export type AgreementType = 'GRANT' | 'COMMERCIAL' | 'PARTNERSHIP' | 'INFO_PARTNERSHIP';
 export type AgreementStatus = 'DRAFT' | 'NEGOTIATION' | 'ACTIVE' | 'COMPLETED' | 'TERMINATED';
@@ -345,12 +360,7 @@ export interface DealSummary {
   personName?: string | null;
 }
 
-export type ExpenseCategory =
-  | 'VARIABLE'
-  | 'OPEX'
-  | 'BACK_OFFICE'
-  | 'ACQUISITION'
-  | 'ACTIVATION';
+export type ExpenseCategory = 'VARIABLE' | 'OPEX' | 'BACK_OFFICE' | 'ACQUISITION' | 'ACTIVATION';
 
 export interface ExpenseSummary {
   id: string;

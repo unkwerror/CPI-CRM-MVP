@@ -58,6 +58,7 @@ export function renderMarkdownReport(report: AuditReport): string {
       `- Политика очистки ФИО: \`${report.commit.dataHygiene.summary.policyVersion}\``,
       `- Отклонено наблюдений ФИО: ${report.commit.dataHygiene.summary.rejectedObservations}`,
       `- Архивировано мусорных карточек: ${report.commit.dataHygiene.cleanup.archivedPersons}`,
+      `- Архивировано повторяющихся контактов: ${report.commit.dataHygiene.duplicateContactsArchived}`,
       `- Создано SourceRecord: ${report.commit.created.sourceRecords}`,
       `- Создано PersonObservation: ${report.commit.created.personObservations}`,
       `- Создано Person: ${report.commit.created.persons}`,

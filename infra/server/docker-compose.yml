@@ -233,11 +233,35 @@ services:
     pids_limit: 128
     logging: *default-logging
 
+  participant-hygiene:
+    image: cpi-crm-tools:${IMAGE_TAG:-latest}
+    command:
+      - corepack
+      - pnpm
+      - --filter
+      - '@cpi-crm/importer'
+      - participant-hygiene
+      - --
+      - --apply
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      CPI_IMPORT_ORGANIZATION_ID: 00000000-0000-4000-8000-000000000010
+      CPI_IMPORT_USER_ID: 00000000-0000-4000-8000-000000000001
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    networks: [backend]
+    restart: 'no'
+    mem_limit: 384m
+    cpus: 0.75
+    pids_limit: 128
+    logging: *default-logging
+
   api:
     <<: *api-image
     environment: *api-environment
     depends_on:
-      seed:
+      participant-hygiene:
         condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully
@@ -272,7 +296,7 @@ services:
       WORKER_OUTBOX_BATCH_SIZE: ${WORKER_OUTBOX_BATCH_SIZE:-5}
       WORKER_RECONCILIATION_BATCH_SIZE: ${WORKER_RECONCILIATION_BATCH_SIZE:-100}
     depends_on:
-      seed:
+      participant-hygiene:
         condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully

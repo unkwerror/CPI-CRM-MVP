@@ -34,11 +34,14 @@ export const ContactInput = Type.Object({
     Type.Literal('OTHER'),
   ]),
   value: Type.String({ minLength: 1, maxLength: 500 }),
+  telegramUserId: Type.Optional(Type.String({ pattern: '^[0-9]+$', maxLength: 32 })),
   isPrimary: Type.Optional(Type.Boolean()),
 });
 
 export const CreatePersonBody = Type.Object({
-  canonicalFullName: Type.String({ minLength: 2, maxLength: 500 }),
+  lastName: Type.String({ minLength: 1, maxLength: 200 }),
+  firstName: Type.String({ minLength: 1, maxLength: 200 }),
+  patronymic: Type.String({ minLength: 1, maxLength: 200 }),
   lifecycleDataState: Type.Optional(
     Type.Union([Type.Literal('LEGACY_INCOMPLETE'), Type.Literal('COMPLETE')]),
   ),
@@ -57,18 +60,21 @@ export const PatchPersonContactInput = Type.Object({
     Type.Literal('OTHER'),
   ]),
   value: Type.String({ minLength: 1, maxLength: 500 }),
+  telegramUserId: Type.Optional(Type.String({ pattern: '^[0-9]+$', maxLength: 32 })),
   isPrimary: Type.Optional(Type.Boolean()),
   archive: Type.Optional(Type.Boolean()),
 });
 
 export const PatchPersonBody = Type.Object({
   version: Type.Integer({ minimum: 1 }),
-  canonicalFullName: Type.Optional(Type.String({ minLength: 2, maxLength: 500 })),
+  lastName: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
+  firstName: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
+  patronymic: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
   ownerUserId: Type.Optional(Type.Union([Uuid, Type.Null()])),
   organization: Type.Optional(Type.Union([Type.String({ maxLength: 500 }), Type.Null()])),
   faculty: Type.Optional(Type.Union([Type.String({ maxLength: 500 }), Type.Null()])),
   roleTitle: Type.Optional(Type.Union([Type.String({ maxLength: 500 }), Type.Null()])),
-  notes: Type.Optional(Type.Union([Type.String({ maxLength: 50_000 }), Type.Null()])),
+  notes: Type.Optional(Type.Union([Type.String({ maxLength: 10_000 }), Type.Null()])),
   contacts: Type.Optional(Type.Array(PatchPersonContactInput, { maxItems: 20 })),
 });
 
@@ -334,7 +340,9 @@ export const PatchDealBody = Type.Object(
     expectedCloseAt: Type.Optional(Type.Union([IsoDateTime, Type.Null()])),
     /** Факт оплаты: оба поля вместе; null снимает отметку об оплате. */
     paidAt: Type.Optional(Type.Union([IsoDateTime, Type.Null()])),
-    paidAmount: Type.Optional(Type.Union([Type.Number({ minimum: 0, maximum: 1e12 }), Type.Null()])),
+    paidAmount: Type.Optional(
+      Type.Union([Type.Number({ minimum: 0, maximum: 1e12 }), Type.Null()]),
+    ),
     comment: Type.Optional(Type.Union([Type.String({ maxLength: 10_000 }), Type.Null()])),
   },
   { additionalProperties: false },

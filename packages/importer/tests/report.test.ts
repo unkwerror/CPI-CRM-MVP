@@ -62,7 +62,7 @@ describe('reports', () => {
         runId: '00000000-0000-4000-8000-000000000011',
         reusedBatch: false,
         deduplication: {
-          policyVersion: 'AUTO_DEDUPE_V1',
+          policyVersion: 'AUTO_DEDUPE_V2',
           candidatesExamined: 1_602,
           mergedCandidates: 1_252,
           notDuplicateCandidates: 5,
@@ -74,7 +74,7 @@ describe('reports', () => {
         },
         dataHygiene: {
           summary: {
-            policyVersion: 'PERSON_NAME_HYGIENE_V1',
+            policyVersion: 'PERSON_NAME_HYGIENE_V2',
             acceptedObservations: 12_110,
             rejectedObservations: 12,
             ignoredSourceRows: 11,
@@ -89,10 +89,11 @@ describe('reports', () => {
               NO_LETTERS: 0,
               TOO_SHORT: 1,
               REPEATED_CHARACTER: 0,
+              NOT_THREE_PART_RUSSIAN_FULL_NAME: 0,
             },
           },
           cleanup: {
-            policyVersion: 'PERSON_NAME_HYGIENE_V1',
+            policyVersion: 'PERSON_NAME_HYGIENE_V2',
             archivedPersons: 0,
             archivedContacts: 0,
             archivedEventParticipations: 0,
@@ -102,6 +103,7 @@ describe('reports', () => {
             dismissedDuplicateCandidates: 0,
             protectedPersons: 0,
           },
+          duplicateContactsArchived: 0,
         },
         created: {
           sourceRecords: 11_739,

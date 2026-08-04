@@ -17,18 +17,19 @@ describe('person name hygiene', () => {
     ['---', 'NO_LETTERS'],
     ['Я', 'TOO_SHORT'],
     ['ааааа', 'REPEATED_CHARACTER'],
+    ['Ли', 'NOT_THREE_PART_RUSSIAN_FULL_NAME'],
+    ['Мадина', 'NOT_THREE_PART_RUSSIAN_FULL_NAME'],
+    ['O’Connor Siobhan', 'NOT_THREE_PART_RUSSIAN_FULL_NAME'],
+    ['Жан-Пьер', 'NOT_THREE_PART_RUSSIAN_FULL_NAME'],
+    ['Aлексей Иванов', 'NOT_THREE_PART_RUSSIAN_FULL_NAME'],
   ])('rejects deterministic garbage without exposing it as a person: %s', (value, reason) => {
     expect(assessPersonName(value)).toEqual({ accepted: false, reason });
   });
 
-  it.each([
-    'Тестов Иван Иванович',
-    'Ли',
-    'Мадина',
-    'O’Connor Siobhan',
-    'Жан-Пьер',
-    'Aлексей Иванов',
-  ])('keeps uncommon but plausible names: %s', (value) => {
-    expect(assessPersonName(value)).toEqual({ accepted: true });
-  });
+  it.each(['Тестов Иван Иванович', 'Петрова-Сидорова Анна Сергеевна'])(
+    'keeps a complete Russian FIO: %s',
+    (value) => {
+      expect(assessPersonName(value)).toEqual({ accepted: true });
+    },
+  );
 });

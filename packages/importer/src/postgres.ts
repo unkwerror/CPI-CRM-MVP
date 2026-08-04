@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { autoResolveDuplicateCandidatesInTransaction } from '@cpi-crm/db';
-import { collapseWhitespace, normalizeFullName } from '@cpi-crm/domain';
+import { collapseWhitespace, normalizeFullName, parseRussianFullName } from '@cpi-crm/domain';
 import { Pool, type PoolClient } from 'pg';
 
 import { extractPersonAttributes, type AttributeSourceRow } from './attributes.js';
@@ -403,12 +403,17 @@ async function persistPeopleAndObservations(
     if (personId === undefined) personId = randomUUID();
 
     if (!createdPersons.has(personId) && !existingExternalPersonIds.has(personId)) {
+      const fio = parseRussianFullName(observation.canonicalFullName);
+      if (!fio) throw new Error('Accepted observation has no strict Russian FIO');
       createdPersons.add(personId);
       personRows.push({
         id: personId,
         organization_id: options.organizationId,
-        canonical_full_name: observation.canonicalFullName,
-        normalized_full_name: observation.normalizedFullName,
+        canonical_full_name: fio.canonicalFullName,
+        normalized_full_name: fio.normalizedFullName,
+        last_name: fio.lastName,
+        first_name: fio.firstName,
+        patronymic: fio.patronymic,
       });
     }
     assignments.push({
@@ -424,11 +429,14 @@ async function persistPeopleAndObservations(
     client,
     `insert into persons
        (id, organization_id, canonical_full_name, normalized_full_name,
+        last_name, first_name, patronymic,
         lifecycle_data_state, activation_state, activity_status)
      select x.id, x.organization_id, x.canonical_full_name, x.normalized_full_name,
+       x.last_name, x.first_name, x.patronymic,
        'LEGACY_INCOMPLETE', 'UNKNOWN_LEGACY', 'UNKNOWN'
      from jsonb_to_recordset($1::jsonb) as x(
-       id uuid, organization_id uuid, canonical_full_name text, normalized_full_name text)`,
+       id uuid, organization_id uuid, canonical_full_name text, normalized_full_name text,
+       last_name text, first_name text, patronymic text)`,
     personRows,
   );
 
@@ -1110,7 +1118,9 @@ export interface BackfillAttributesResult {
  * extraction existed, reading the immutable raw row JSON already stored in
  * source_records. Safe to re-run: existing rows are skipped.
  */
-export async function backfillPersonAttributes(databaseUrl: string): Promise<BackfillAttributesResult> {
+export async function backfillPersonAttributes(
+  databaseUrl: string,
+): Promise<BackfillAttributesResult> {
   const pool = new Pool({ connectionString: databaseUrl, max: 1 });
   const client = await pool.connect();
   try {
@@ -1320,6 +1330,40 @@ async function rebuildSearchDocuments(
   );
 }
 
+async function archiveDuplicateEntityContacts(
+  client: PoolClient,
+  organizationId: string,
+): Promise<number> {
+  const result = await client.query(
+    `with ranked as (
+       select contact.id,
+              row_number() over (
+                partition by coalesce(person.merged_into_person_id, person.id),
+                             contact.type, contact.normalized_value
+                order by (contact.messenger_stable_id is not null) desc,
+                         contact.is_verified desc, contact.is_primary desc,
+                         contact.created_at, contact.id
+              ) as position
+         from contact_points contact
+         join persons person on person.id = contact.person_id
+         join persons canonical
+           on canonical.id = coalesce(person.merged_into_person_id, person.id)
+        where canonical.organization_id = $1
+          and canonical.archived_at is null
+          and canonical.merged_into_person_id is null
+          and person.archived_at is null
+          and contact.archived_at is null
+     )
+     update contact_points contact
+        set archived_at = now(), is_primary = false,
+            updated_at = now(), version = version + 1
+       from ranked
+      where contact.id = ranked.id and ranked.position > 1`,
+    [organizationId],
+  );
+  return result.rowCount ?? 0;
+}
+
 export async function commitImportPlan(
   plan: WorkbookImportPlan,
   options: CommitOptions,
@@ -1411,6 +1455,10 @@ export async function commitImportPlan(
       requestId: `import:${runId}:auto-dedupe`,
       importRunId: runId,
     });
+    const duplicateContactsArchived = await archiveDuplicateEntityContacts(
+      client,
+      options.organizationId,
+    );
     await recalculateLegacyArtifactAuthors(client, legacyArtifacts.versionIds);
 
     const result: CommitResult = {
@@ -1418,7 +1466,11 @@ export async function commitImportPlan(
       runId,
       reusedBatch: batch.reused,
       deduplication,
-      dataHygiene: { summary: hygieneSummary, cleanup: hygieneCleanup },
+      dataHygiene: {
+        summary: hygieneSummary,
+        cleanup: hygieneCleanup,
+        duplicateContactsArchived,
+      },
       created: {
         sourceRecords: sources.created,
         personObservations: people.createdObservations,
