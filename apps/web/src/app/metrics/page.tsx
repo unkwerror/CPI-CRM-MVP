@@ -1,22 +1,40 @@
 'use client';
 
 import {
-  Banknote,
-  ChevronLeft,
-  ChevronRight,
-  Handshake,
-  Package,
-  TrendingDown,
-  TrendingUp,
-  Users,
-  Wallet,
+  BanknoteIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  HandshakeIcon,
+  type LucideIcon,
+  PackageIcon,
+  TrendingDownIcon,
+  TrendingUpIcon,
+  UsersIcon,
+  WalletIcon,
 } from 'lucide-react';
 import Link from 'next/link';
-import { useEffect, useMemo, useState } from 'react';
+import { type ComponentProps, type ReactNode, useEffect, useMemo, useState } from 'react';
 
 import { EmptyState } from '@/components/empty-state';
+import { PageHeader, PageStack } from '@/components/page-header';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Skeleton } from '@/components/ui/skeleton';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+  TableWrapper,
+} from '@/components/ui/table';
 import { api, formatMoney } from '@/lib/api';
 import type { CpiMetrics } from '@/lib/types';
+
+type BadgeVariant = NonNullable<ComponentProps<typeof Badge>['variant']>;
 
 function monthKey(date: Date): string {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
@@ -36,8 +54,74 @@ function shiftMonth(key: string, delta: number): string {
 
 const money = (value: number | null | undefined) =>
   value === null || value === undefined ? 'н/д' : formatMoney(value);
-const pct = (value: number | null | undefined) =>
+
+const percent = (value: number | null | undefined) =>
   value === null || value === undefined ? 'н/д' : `${value.toFixed(1)} %`;
+
+const count = (value: number | null | undefined) =>
+  value === null || value === undefined ? 'н/д' : value.toLocaleString('ru-RU');
+
+const decimal = (value: number | null | undefined) =>
+  value === null || value === undefined ? 'н/д' : value.toFixed(1);
+
+function Metric({
+  label,
+  value,
+  hint,
+  loading,
+  href,
+  icon: Icon,
+  kicker,
+}: {
+  label: string;
+  value: string;
+  hint: ReactNode;
+  loading: boolean;
+  href?: string;
+  icon?: LucideIcon;
+  kicker?: { text: string; variant: BadgeVariant };
+}) {
+  const body = (
+    <div className="group-hover:border-primary/40 flex h-full flex-col gap-1 rounded-lg border px-3.5 py-3 transition-colors">
+      <div className="flex items-start justify-between gap-2">
+        <span className="text-muted-foreground text-[13px] font-medium">{label}</span>
+        {kicker ? (
+          <Badge variant={kicker.variant}>{kicker.text}</Badge>
+        ) : Icon ? (
+          <Icon className="text-muted-foreground size-4 shrink-0" />
+        ) : null}
+      </div>
+      {loading ? (
+        <Skeleton className="my-1 h-7 w-28" />
+      ) : (
+        <strong className="text-2xl font-semibold tracking-tight tabular">{value}</strong>
+      )}
+      {loading ? (
+        <Skeleton className="mt-auto h-3.5 w-full" />
+      ) : (
+        <span className="text-muted-foreground mt-auto text-xs">{hint}</span>
+      )}
+    </div>
+  );
+
+  if (!href) return body;
+  return (
+    <Link className="group block" href={href}>
+      {body}
+    </Link>
+  );
+}
+
+function MetricGroup({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{title}</CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{children}</CardContent>
+    </Card>
+  );
+}
 
 export default function MetricsPage() {
   const [month, setMonth] = useState(() => monthKey(new Date()));
@@ -52,257 +136,256 @@ export default function MetricsPage() {
     const params = new URLSearchParams({ from: bounds.from, to: bounds.to });
     void api<CpiMetrics>(`/dashboard/cpi?${params}`)
       .then(setMetrics)
-      .catch((caught) =>
-        setError(caught instanceof Error ? caught.message : 'Метрики недоступны'),
-      );
+      .catch((caught) => setError(caught instanceof Error ? caught.message : 'Метрики недоступны'));
   }, [bounds]);
 
   if (error) {
     return (
-      <div className="page-stack">
-        <section className="page-heading">
-          <p className="eyebrow">Метрики ЦПИ</p>
-          <h1>Метрики недоступны</h1>
-        </section>
-        <section className="panel">
+      <PageStack>
+        <PageHeader eyebrow="Метрики ЦПИ" title="Метрики недоступны" />
+        <Card>
           <EmptyState title="Не удалось загрузить показатели" text={error} />
-        </section>
-      </div>
+        </Card>
+      </PageStack>
     );
   }
 
   const m = metrics;
+  const loading = m === null;
 
   return (
-    <div className="page-stack">
-      <section className="page-heading page-heading--split">
-        <div>
-          <p className="eyebrow">ЦПИ: метрики и рабочие определения</p>
-          <h1>Панель метрик</h1>
-          <p>
-            Выручка, поток и средний чек — по факту оплаты. Артефакт засчитывается только после
-            оценки по рубрикатору (Q ≥ 7 без нуля по релевантности и проверяемости).
-          </p>
-        </div>
-        <div className="heading-actions" style={{ alignItems: 'center', display: 'flex', gap: '0.4rem' }}>
-          <button
-            aria-label="Предыдущий месяц"
-            className="button button--secondary button--compact"
-            onClick={() => setMonth((current) => shiftMonth(current, -1))}
-            type="button"
-          >
-            <ChevronLeft size={16} />
-          </button>
-          <input
-            aria-label="Период"
-            className="select-control"
-            onChange={(event) => event.target.value && setMonth(event.target.value)}
-            type="month"
-            value={month}
-          />
-          <button
-            aria-label="Следующий месяц"
-            className="button button--secondary button--compact"
-            onClick={() => setMonth((current) => shiftMonth(current, 1))}
-            type="button"
-          >
-            <ChevronRight size={16} />
-          </button>
-        </div>
-      </section>
+    <PageStack>
+      <PageHeader
+        eyebrow="ЦПИ: метрики и рабочие определения"
+        title="Панель метрик"
+        description="Выручка, поток и средний чек — по факту оплаты. Артефакт засчитывается только после оценки по рубрикатору (Q ≥ 7 без нуля по релевантности и проверяемости)."
+        actions={
+          <div className="flex items-center gap-1.5">
+            <Button
+              aria-label="Предыдущий месяц"
+              onClick={() => setMonth((current) => shiftMonth(current, -1))}
+              size="icon-sm"
+              type="button"
+              variant="outline"
+            >
+              <ChevronLeftIcon />
+            </Button>
+            <Input
+              aria-label="Период"
+              className="w-40"
+              onChange={(event) => event.target.value && setMonth(event.target.value)}
+              type="month"
+              value={month}
+            />
+            <Button
+              aria-label="Следующий месяц"
+              onClick={() => setMonth((current) => shiftMonth(current, 1))}
+              size="icon-sm"
+              type="button"
+              variant="outline"
+            >
+              <ChevronRightIcon />
+            </Button>
+          </div>
+        }
+      />
 
-      <section className="page-heading">
-        <p className="eyebrow">Экономика</p>
-      </section>
-      <section className="metric-grid">
-        <Link className="metric-card metric-card--hero" href="/deals">
-          <span className="metric-card__icon">
-            <Banknote size={20} />
-          </span>
-          <span className="metric-card__label">Выручка (оплачено)</span>
-          <strong>{m ? money(m.economics.revenue) : '…'}</strong>
-          <small>{m?.economics.paidDeals ?? '…'} оплаченных сделок за период</small>
-        </Link>
-        <div className="metric-card">
-          <span className="metric-card__kicker metric-card__kicker--green">Главная метрика</span>
-          <span className="metric-card__label">Поток</span>
-          <strong>{m ? money(m.economics.flow) : '…'}</strong>
-          <small>
-            выручка − переменные затраты ({m ? money(m.economics.variableExpenses) : '…'})
-          </small>
-        </div>
-        <div className="metric-card">
-          <span className="metric-card__kicker metric-card__kicker--green">Пара к выручке</span>
-          <span className="metric-card__label">Средний чек</span>
-          <strong>{m ? money(m.economics.averageCheck) : '…'}</strong>
-          <small>по оплаченным сделкам периода</small>
-        </div>
-        <Link className="metric-card" href="/expenses">
-          <span className="metric-card__icon">
-            <Wallet size={20} />
-          </span>
-          <span className="metric-card__label">OpEx %</span>
-          <strong>{m ? pct(m.economics.opexPercent) : '…'}</strong>
-          <small>
-            операционные + бэк-офис: {m ? money(m.economics.opexExpenses) : '…'} (бэк-офис{' '}
-            {m ? pct(m.economics.backOfficePercent) : '…'})
-          </small>
-        </Link>
-        <div className="metric-card">
-          <span className="metric-card__label">Средняя выручка на голову</span>
-          <strong>{m ? money(m.economics.revenuePerActiveHead) : '…'}</strong>
-          <small>
-            активные головы: {m?.economics.activeHeadsStart ?? '…'} →{' '}
-            {m?.economics.activeHeadsEnd ?? '…'} (среднее за период)
-          </small>
-        </div>
-      </section>
+      <MetricGroup title="Экономика">
+        <Metric
+          href="/deals"
+          icon={BanknoteIcon}
+          label="Выручка (оплачено)"
+          loading={loading}
+          value={money(m?.economics.revenue)}
+          hint={`${count(m?.economics.paidDeals)} оплаченных сделок за период`}
+        />
+        <Metric
+          kicker={{ text: 'Главная метрика', variant: 'soft-success' }}
+          label="Поток"
+          loading={loading}
+          value={money(m?.economics.flow)}
+          hint={`выручка − переменные затраты (${money(m?.economics.variableExpenses)})`}
+        />
+        <Metric
+          kicker={{ text: 'Пара к выручке', variant: 'soft-primary' }}
+          label="Средний чек"
+          loading={loading}
+          value={money(m?.economics.averageCheck)}
+          hint="по оплаченным сделкам периода"
+        />
+        <Metric
+          href="/expenses"
+          icon={WalletIcon}
+          label="OpEx %"
+          loading={loading}
+          value={percent(m?.economics.opexPercent)}
+          hint={`операционные + бэк-офис: ${money(m?.economics.opexExpenses)} (бэк-офис ${percent(
+            m?.economics.backOfficePercent,
+          )})`}
+        />
+        <Metric
+          label="Средняя выручка на голову"
+          loading={loading}
+          value={money(m?.economics.revenuePerActiveHead)}
+          hint={`активные головы: ${count(m?.economics.activeHeadsStart)} → ${count(
+            m?.economics.activeHeadsEnd,
+          )} (среднее за период)`}
+        />
+      </MetricGroup>
 
-      <section className="page-heading">
-        <p className="eyebrow">Воронка и артефакты</p>
-      </section>
-      <section className="metric-grid">
-        <Link className="metric-card" href="/participants">
-          <span className="metric-card__icon">
-            <Users size={20} />
-          </span>
-          <span className="metric-card__label">Новые строки в базе</span>
-          <strong>{m?.funnel.newPeople ?? '…'}</strong>
-          <small>
-            стоимость строки: {m ? money(m.funnel.costPerNewPerson) : '…'} (привлечение{' '}
-            {m ? money(m.funnel.acquisitionExpenses) : '…'})
-          </small>
-        </Link>
-        <div className="metric-card">
-          <span className="metric-card__label">Конверсия в качественный артефакт</span>
-          <strong>{m ? pct(m.funnel.artifactConversion) : '…'}</strong>
-          <small>
-            {m?.funnel.qualityArtifactAuthors ?? '…'} авторов из{' '}
-            {m?.funnel.actualParticipants ?? '…'} фактических участников
-          </small>
-        </div>
-        <div className="metric-card">
-          <span className="metric-card__label">Стоимость человека с артефактом</span>
-          <strong>{m ? money(m.funnel.costPerQualityAuthor) : '…'}</strong>
-          <small>
-            прямые расходы {m ? money(m.funnel.directExpenses) : '…'} / уникальные авторы
-          </small>
-        </div>
-        <div className="metric-card">
-          <span className="metric-card__label">Средний Q_artifact</span>
-          <strong>
-            {m ? (m.funnel.averageQArtifact === null ? 'н/д' : m.funnel.averageQArtifact.toFixed(1)) : '…'}
-          </strong>
-          <small>{m?.funnel.reviewedArtifacts ?? '…'} оценённых артефактов за период</small>
-        </div>
-      </section>
+      <MetricGroup title="Воронка и артефакты">
+        <Metric
+          href="/participants"
+          icon={UsersIcon}
+          label="Новые строки в базе"
+          loading={loading}
+          value={count(m?.funnel.newPeople)}
+          hint={`стоимость строки: ${money(m?.funnel.costPerNewPerson)} (привлечение ${money(
+            m?.funnel.acquisitionExpenses,
+          )})`}
+        />
+        <Metric
+          label="Конверсия в качественный артефакт"
+          loading={loading}
+          value={percent(m?.funnel.artifactConversion)}
+          hint={`${count(m?.funnel.qualityArtifactAuthors)} авторов из ${count(
+            m?.funnel.actualParticipants,
+          )} фактических участников`}
+        />
+        <Metric
+          label="Стоимость человека с артефактом"
+          loading={loading}
+          value={money(m?.funnel.costPerQualityAuthor)}
+          hint={`прямые расходы ${money(m?.funnel.directExpenses)} / уникальные авторы`}
+        />
+        <Metric
+          label="Средний Q_artifact"
+          loading={loading}
+          value={decimal(m?.funnel.averageQArtifact)}
+          hint={`${count(m?.funnel.reviewedArtifacts)} оценённых артефактов за период`}
+        />
+      </MetricGroup>
 
-      <section className="page-heading">
-        <p className="eyebrow">Активация и удержание</p>
-      </section>
-      <section className="metric-grid">
-        <div className="metric-card">
-          <span className="metric-card__kicker metric-card__kicker--green">Ключевой переход</span>
-          <span className="metric-card__label">Процент активированных</span>
-          <strong>{m ? pct(m.activation.activationRate) : '…'}</strong>
-          <small>
-            {m?.activation.newActivatedHeads ?? '…'} активированных из{' '}
-            {m?.activation.firstQualityAuthors ?? '…'} с первым качественным артефактом
-          </small>
-        </div>
-        <div className="metric-card">
-          <span className="metric-card__label">Стоимость активации</span>
-          <strong>{m ? money(m.activation.activationCost) : '…'}</strong>
-          <small>
-            расходы на активацию: {m ? money(m.activation.activationExpenses) : '…'}
-          </small>
-        </div>
-        <div className="metric-card">
-          <span className="metric-card__kicker metric-card__kicker--amber">
-            Отрицательная метрика
-          </span>
-          <span className="metric-card__label">Отток 90</span>
-          <strong>{m ? pct(m.activation.churn90) : '…'}</strong>
-          <small>
-            <TrendingDown size={13} /> {m?.activation.churnedFromStart ?? '…'} из{' '}
-            {m?.activation.activeAtStart ?? '…'} активных на начало без артефакта 90 дней
-          </small>
-        </div>
-        <div className="metric-card">
-          <span className="metric-card__label">Удержание активных голов</span>
-          <strong>{m ? pct(m.activation.retention) : '…'}</strong>
-          <small>
-            <TrendingUp size={13} /> 100 % − отток 90
-          </small>
-        </div>
-      </section>
+      <MetricGroup title="Активация и удержание">
+        <Metric
+          kicker={{ text: 'Ключевой переход', variant: 'soft-success' }}
+          label="Процент активированных"
+          loading={loading}
+          value={percent(m?.activation.activationRate)}
+          hint={`${count(m?.activation.newActivatedHeads)} активированных из ${count(
+            m?.activation.firstQualityAuthors,
+          )} с первым качественным артефактом`}
+        />
+        <Metric
+          label="Стоимость активации"
+          loading={loading}
+          value={money(m?.activation.activationCost)}
+          hint={`расходы на активацию: ${money(m?.activation.activationExpenses)}`}
+        />
+        <Metric
+          kicker={{ text: 'Отрицательная метрика', variant: 'soft-warning' }}
+          label="Отток 90"
+          loading={loading}
+          value={percent(m?.activation.churn90)}
+          hint={
+            <span className="inline-flex items-center gap-1">
+              <TrendingDownIcon className="size-3.5 shrink-0" />
+              {count(m?.activation.churnedFromStart)} из {count(m?.activation.activeAtStart)}{' '}
+              активных на начало без артефакта 90 дней
+            </span>
+          }
+        />
+        <Metric
+          label="Удержание активных голов"
+          loading={loading}
+          value={percent(m?.activation.retention)}
+          hint={
+            <span className="inline-flex items-center gap-1">
+              <TrendingUpIcon className="size-3.5 shrink-0" />
+              100 % − отток 90
+            </span>
+          }
+        />
+      </MetricGroup>
 
-      <section className="page-heading">
-        <p className="eyebrow">Монетизация</p>
-      </section>
-      <section className="metric-grid">
-        <div className="metric-card">
-          <span className="metric-card__label">Конверсия в монетизацию</span>
-          <strong>{m ? pct(m.monetization.monetizationRate) : '…'}</strong>
-          <small>
-            {m?.monetization.monetizedHeads ?? '…'} из {m?.monetization.activatedHeads ?? '…'}{' '}
-            активированных связаны с оплаченной сделкой
-          </small>
-        </div>
-        <Link className="metric-card" href="/partners">
-          <span className="metric-card__icon">
-            <Handshake size={20} />
-          </span>
-          <span className="metric-card__label">Выручка на активного партнёра</span>
-          <strong>{m ? money(m.monetization.revenuePerActivePartner) : '…'}</strong>
-          <small>
-            {m ? money(m.monetization.partnerRevenue) : '…'} партнёрской выручки /{' '}
-            {m?.monetization.activePartners ?? '…'} активных партнёров
-          </small>
-        </Link>
-      </section>
+      <MetricGroup title="Монетизация">
+        <Metric
+          label="Конверсия в монетизацию"
+          loading={loading}
+          value={percent(m?.monetization.monetizationRate)}
+          hint={`${count(m?.monetization.monetizedHeads)} из ${count(
+            m?.monetization.activatedHeads,
+          )} активированных связаны с оплаченной сделкой`}
+        />
+        <Metric
+          href="/partners"
+          icon={HandshakeIcon}
+          label="Выручка на активного партнёра"
+          loading={loading}
+          value={money(m?.monetization.revenuePerActivePartner)}
+          hint={`${money(m?.monetization.partnerRevenue)} партнёрской выручки / ${count(
+            m?.monetization.activePartners,
+          )} активных партнёров`}
+        />
+      </MetricGroup>
 
-      <section className="panel panel--wide">
-        <header className="panel__header">
+      <Card>
+        <CardHeader>
           <div>
-            <p className="eyebrow">Поток продукта</p>
-            <h2>Продуктовая результативность</h2>
+            <p className="text-muted-foreground text-xs font-semibold tracking-wider uppercase">
+              Поток продукта
+            </p>
+            <CardTitle className="mt-1">Продуктовая результативность</CardTitle>
           </div>
-          <Link className="text-link" href="/products">
-            <Package size={14} /> Все продукты
-          </Link>
-        </header>
-        {m && m.monetization.products.length > 0 ? (
-          <div className="table-scroll">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Продукт</th>
-                  <th className="number-cell">Выручка (оплачено)</th>
-                  <th className="number-cell">Переменные затраты</th>
-                  <th className="number-cell">Поток</th>
-                </tr>
-              </thead>
-              <tbody>
-                {m.monetization.products.map((product) => (
-                  <tr key={product.productId}>
-                    <td>{product.name}</td>
-                    <td className="number-cell">{money(product.revenue)}</td>
-                    <td className="number-cell">{money(product.variableExpenses)}</td>
-                    <td className="number-cell">
-                      <strong>{money(product.flow)}</strong>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <CardAction>
+            <Button asChild size="sm" variant="ghost">
+              <Link href="/products">
+                <PackageIcon />
+                Все продукты
+              </Link>
+            </Button>
+          </CardAction>
+        </CardHeader>
+        {loading ? (
+          <CardContent className="space-y-3">
+            {[0, 1, 2].map((row) => (
+              <Skeleton className="h-9 w-full" key={row} />
+            ))}
+          </CardContent>
+        ) : m.monetization.products.length === 0 ? (
+          <EmptyState
+            title="Нет продуктовой выручки"
+            text="За период нет продуктов с выручкой или затратами."
+          />
         ) : (
-          <p className="muted">
-            {m ? 'За период нет продуктов с выручкой или затратами.' : 'Загружаем…'}
-          </p>
+          <TableWrapper>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Продукт</TableHead>
+                  <TableHead className="text-right">Выручка (оплачено)</TableHead>
+                  <TableHead className="text-right">Переменные затраты</TableHead>
+                  <TableHead className="text-right">Поток</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {m.monetization.products.map((product) => (
+                  <TableRow key={product.productId}>
+                    <TableCell className="font-medium">{product.name}</TableCell>
+                    <TableCell className="text-right tabular">{money(product.revenue)}</TableCell>
+                    <TableCell className="text-right tabular">
+                      {money(product.variableExpenses)}
+                    </TableCell>
+                    <TableCell className="text-right font-semibold tabular">
+                      {money(product.flow)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableWrapper>
         )}
-      </section>
-    </div>
+      </Card>
+    </PageStack>
   );
 }

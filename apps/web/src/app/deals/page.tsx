@@ -1,26 +1,46 @@
 'use client';
 
-import { HandCoins, Plus, RotateCcw, X } from 'lucide-react';
+import { HandCoinsIcon, PlusIcon } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { Suspense, type FormEvent, useCallback, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import { toast } from 'sonner';
 
+import { DataToolbar, ToolbarSearch, ToolbarSelect, ToolbarReset } from '@/components/data-toolbar';
+import { CreateDealDialog, MarkDealPaidDialog } from '@/components/deal-dialogs';
 import { EmptyState } from '@/components/empty-state';
-import { ApiError, api, formatDate, formatMoney } from '@/lib/api';
-import { DEAL_STATUS_LABELS, DEAL_TYPE_LABELS } from '@/lib/fpf-labels';
-import type {
-  CurrentUser,
-  DealStatus,
-  DealSummary,
-  DealType,
-  PartnerSummary,
-  PersonSummary,
-  ProductSummary,
-} from '@/lib/types';
+import { KanbanBoard, type KanbanColumn } from '@/components/kanban';
+import { PageHeader, PageStack } from '@/components/page-header';
+import { ViewSwitch, type RegistryView } from '@/components/view-switch';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
+import { Skeleton } from '@/components/ui/skeleton';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+  TableWrapper,
+} from '@/components/ui/table';
+import { useCurrentUser } from '@/hooks/use-current-user';
+import { api, apiErrorMessage, formatDate, formatMoney } from '@/lib/api';
+import { DEAL_TYPE_LABELS } from '@/lib/fpf-labels';
+import { DEAL_STATUS_LABELS, DEAL_STATUS_ORDER, DEAL_STATUS_VARIANTS } from '@/lib/status-labels';
+import type { DealStatus, DealSummary } from '@/lib/types';
+
+const COLUMN_ACCENTS: Record<DealStatus, string> = {
+  LEAD: 'text-info',
+  NEGOTIATION: 'text-warning',
+  WON: 'text-success',
+  LOST: 'text-destructive',
+};
 
 export default function DealsPage() {
   return (
-    <Suspense fallback={<div className="page-loading">Загружаем сделки…</div>}>
+    <Suspense fallback={<Skeleton className="h-96 rounded-xl" />}>
       <DealsContent />
     </Suspense>
   );
@@ -29,10 +49,13 @@ export default function DealsPage() {
 function DealsContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { can } = useCurrentUser();
+  const canWrite = can('deals.write');
   const [items, setItems] = useState<DealSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [canWrite, setCanWrite] = useState(false);
+  const [view, setView] = useState<RegistryView>('board');
+  const [search, setSearch] = useState('');
   const [showCreate, setShowCreate] = useState(false);
   const [payDeal, setPayDeal] = useState<DealSummary | null>(null);
 
@@ -48,7 +71,7 @@ function DealsContent() {
       const response = await api<{ items: DealSummary[] }>(`/deals?${params}`);
       setItems(response.items);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Не удалось загрузить сделки');
+      setError(apiErrorMessage(caught, 'Не удалось загрузить сделки'));
     } finally {
       setLoading(false);
     }
@@ -57,12 +80,6 @@ function DealsContent() {
   useEffect(() => {
     void loadDeals();
   }, [loadDeals]);
-
-  useEffect(() => {
-    void api<CurrentUser>('/auth/me')
-      .then((user) => setCanWrite(user.permissions.includes('deals.write')))
-      .catch(() => setCanWrite(false));
-  }, []);
 
   function updateParams(next: Record<string, string | null>) {
     const params = new URLSearchParams(searchParams.toString());
@@ -73,578 +90,293 @@ function DealsContent() {
     router.push(`/deals${params.size ? `?${params}` : ''}`);
   }
 
-  async function changeStatus(deal: DealSummary, status: DealStatus) {
+  async function changeStatus(dealId: string, status: string) {
+    const deal = items.find((candidate) => candidate.id === dealId);
+    if (!deal || deal.status === status) return;
+    const previous = items;
+    setItems((current) =>
+      current.map((item) =>
+        item.id === dealId ? { ...item, status: status as DealStatus } : item,
+      ),
+    );
     try {
-      await api(`/deals/${deal.id}`, {
+      await api(`/deals/${dealId}`, {
         method: 'PATCH',
         body: JSON.stringify({ version: deal.version, status }),
       });
       await loadDeals();
+      if (status === 'WON' && !deal.paidAt) {
+        toast.info('Сделка выиграна — не забудьте отметить оплату', {
+          action: { label: 'Отметить', onClick: () => setPayDeal(deal) },
+        });
+      }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Не удалось изменить статус');
+      setItems(previous);
+      toast.error(apiErrorMessage(caught, 'Не удалось изменить статус'));
     }
   }
 
+  const filtered = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    if (!needle) return items;
+    return items.filter(
+      (deal) =>
+        deal.title.toLowerCase().includes(needle) ||
+        (deal.partnerName ?? '').toLowerCase().includes(needle) ||
+        (deal.personName ?? '').toLowerCase().includes(needle),
+    );
+  }, [items, search]);
+
   const hasFilters = ['status', 'dealType'].some((key) => searchParams.has(key));
-  const paidAmount = items.reduce((sum, deal) => sum + (deal.paidAmount ?? 0), 0);
-  const openAmount = items
+  const paidAmount = filtered.reduce((sum, deal) => sum + (deal.paidAmount ?? 0), 0);
+  const openAmount = filtered
     .filter((deal) => deal.status === 'LEAD' || deal.status === 'NEGOTIATION')
     .reduce((sum, deal) => sum + deal.amount, 0);
 
-  return (
-    <div className="page-stack">
-      <section className="page-heading page-heading--split">
-        <div>
-          <p className="eyebrow">Обеспечение выручки: гранты и коммерция</p>
-          <h1>Продажи</h1>
-          <p>
-            Оплачено {formatMoney(paidAmount)} · в работе {formatMoney(openAmount)} — выручка
-            считается по факту оплаты
-          </p>
+  const columns: KanbanColumn[] = DEAL_STATUS_ORDER.map((status) => {
+    const sum = filtered
+      .filter((deal) => deal.status === status)
+      .reduce((total, deal) => total + (status === 'WON' ? (deal.paidAmount ?? deal.amount) : deal.amount), 0);
+    return {
+      id: status,
+      title: DEAL_STATUS_LABELS[status],
+      hint: formatMoney(sum),
+      accentClassName: COLUMN_ACCENTS[status],
+    };
+  });
+
+  function renderCard(deal: DealSummary) {
+    return (
+      <div className="space-y-2">
+        <p className="text-[13px] leading-snug font-medium">{deal.title}</p>
+        <p className="text-sm font-semibold tabular">{formatMoney(deal.amount, deal.currency)}</p>
+        <div className="text-muted-foreground space-y-0.5 text-xs">
+          {deal.partnerId && deal.partnerName && (
+            <Link href={`/partners/${deal.partnerId}`} className="block truncate hover:underline">
+              {deal.partnerName}
+            </Link>
+          )}
+          {deal.personId && deal.personName && (
+            <Link
+              href={`/participants/${deal.personId}`}
+              className="block truncate hover:underline"
+            >
+              {deal.personName}
+            </Link>
+          )}
+          {deal.productName && <p className="truncate">{deal.productName}</p>}
         </div>
-        {canWrite && (
-          <div className="heading-actions">
-            <button className="button button--primary" onClick={() => setShowCreate(true)}>
-              <Plus size={17} /> Новая сделка
-            </button>
-          </div>
-        )}
-      </section>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Badge variant="soft-muted">{DEAL_TYPE_LABELS[deal.dealType]}</Badge>
+          {deal.paidAt ? (
+            <Badge variant="soft-success">Оплачено {formatDate(deal.paidAt)}</Badge>
+          ) : (
+            canWrite &&
+            deal.status === 'WON' && (
+              <Button variant="outline" size="xs" onClick={() => setPayDeal(deal)}>
+                Отметить оплату
+              </Button>
+            )
+          )}
+        </div>
+      </div>
+    );
+  }
 
-      <section className="registry-toolbar registry-toolbar--filters">
-        <select
-          aria-label="Статус сделки"
-          className="select-control"
+  return (
+    <PageStack>
+      <PageHeader
+        eyebrow="Обеспечение выручки: гранты и коммерция"
+        title="Продажи"
+        description={`Оплачено ${formatMoney(paidAmount)} · в работе ${formatMoney(openAmount)} — выручка считается по факту оплаты`}
+        actions={
+          canWrite && (
+            <Button onClick={() => setShowCreate(true)}>
+              <PlusIcon />
+              Новая сделка
+            </Button>
+          )
+        }
+      />
+
+      <DataToolbar>
+        <ToolbarSearch
+          value={search}
+          onChange={setSearch}
+          placeholder="Поиск по сделке, партнёру, участнику…"
+        />
+        <ToolbarSelect
+          label="Статус"
           value={searchParams.get('status') ?? ''}
-          onChange={(event) => updateParams({ status: event.target.value || null })}
-        >
-          <option value="">Любой статус</option>
-          {Object.entries(DEAL_STATUS_LABELS).map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </select>
-        <select
-          aria-label="Тип сделки"
-          className="select-control"
+          onChange={(value) => updateParams({ status: value || null })}
+          options={[
+            { value: '', label: 'Любой статус' },
+            ...DEAL_STATUS_ORDER.map((status) => ({
+              value: status,
+              label: DEAL_STATUS_LABELS[status],
+            })),
+          ]}
+        />
+        <ToolbarSelect
+          label="Тип"
           value={searchParams.get('dealType') ?? ''}
-          onChange={(event) => updateParams({ dealType: event.target.value || null })}
-        >
-          <option value="">Гранты и коммерция</option>
-          {Object.entries(DEAL_TYPE_LABELS).map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </select>
-        {hasFilters && (
-          <button
-            className="button button--secondary registry-filter-reset"
-            type="button"
-            onClick={() => router.push('/deals')}
-          >
-            <RotateCcw size={15} /> Сбросить
-          </button>
-        )}
-        <span className="registry-result-count">Найдено: {items.length}</span>
-      </section>
+          onChange={(value) => updateParams({ dealType: value || null })}
+          options={[
+            { value: '', label: 'Гранты и коммерция' },
+            ...Object.entries(DEAL_TYPE_LABELS).map(([value, label]) => ({ value, label })),
+          ]}
+        />
+        {hasFilters && <ToolbarReset onClick={() => router.push('/deals')} />}
+        <div className="ml-auto">
+          <ViewSwitch value={view} onChange={setView} />
+        </div>
+      </DataToolbar>
 
-      <section className="table-panel">
-        {error ? (
+      {error ? (
+        <Card>
           <EmptyState title="Ошибка загрузки" text={error} />
-        ) : !loading && items.length === 0 ? (
+        </Card>
+      ) : loading ? (
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {Array.from({ length: 4 }, (_, index) => (
+            <Skeleton key={index} className="h-64 rounded-xl" />
+          ))}
+        </div>
+      ) : filtered.length === 0 ? (
+        <Card>
           <EmptyState
+            icon={HandCoinsIcon}
             title="Сделок нет"
             text="Заведите первую сделку: продажу «голов», проекта или продукта."
+            action={
+              canWrite && (
+                <Button onClick={() => setShowCreate(true)}>
+                  <PlusIcon />
+                  Новая сделка
+                </Button>
+              )
+            }
           />
-        ) : (
-          <div className="table-scroll">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Сделка</th>
-                  <th>Тип</th>
-                  <th>Партнёр</th>
-                  <th className="number-cell">Сумма</th>
-                  <th>Статус</th>
-                  <th>Оплата</th>
+        </Card>
+      ) : view === 'board' ? (
+        <KanbanBoard
+          columns={columns}
+          items={filtered}
+          getId={(deal) => deal.id}
+          getColumnId={(deal) => deal.status}
+          renderCard={renderCard}
+          {...(canWrite ? { onMove: changeStatus } : {})}
+          emptyColumnText="Нет сделок"
+        />
+      ) : (
+        <Card>
+          <TableWrapper>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Сделка</TableHead>
+                  <TableHead>Тип</TableHead>
+                  <TableHead>Партнёр</TableHead>
+                  <TableHead className="text-right">Сумма</TableHead>
+                  <TableHead>Статус</TableHead>
+                  <TableHead>Оплата</TableHead>
                   {canWrite && (
-                    <th>
+                    <TableHead>
                       <span className="sr-only">Действия</span>
-                    </th>
+                    </TableHead>
                   )}
-                </tr>
-              </thead>
-              <tbody>
-                {loading
-                  ? Array.from({ length: 6 }, (_, index) => (
-                      <tr className="skeleton-row" key={index}>
-                        <td colSpan={canWrite ? 7 : 6}>
-                          <span />
-                        </td>
-                      </tr>
-                    ))
-                  : items.map((deal) => (
-                      <tr key={deal.id}>
-                        <td>
-                          <span className="event-name-cell">
-                            <span className="table-file-icon">
-                              <HandCoins size={16} />
-                            </span>
-                            <span>
-                              <strong>{deal.title}</strong>
-                              {deal.productName && (
-                                <small style={{ display: 'block' }}>{deal.productName}</small>
-                              )}
-                              {deal.personId && (
-                                <small style={{ display: 'block' }}>
-                                  <Link className="text-link" href={`/participants/${deal.personId}`}>
-                                    {deal.personName}
-                                  </Link>
-                                </small>
-                              )}
-                            </span>
-                          </span>
-                        </td>
-                        <td>{DEAL_TYPE_LABELS[deal.dealType]}</td>
-                        <td>
-                          {deal.partnerId ? (
-                            <Link className="text-link" href={`/partners/${deal.partnerId}`}>
-                              {deal.partnerName}
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {filtered.map((deal) => (
+                  <TableRow key={deal.id}>
+                    <TableCell>
+                      <span className="flex items-center gap-2.5">
+                        <span className="bg-muted text-muted-foreground flex size-8 shrink-0 items-center justify-center rounded-lg">
+                          <HandCoinsIcon className="size-4" />
+                        </span>
+                        <span className="min-w-0">
+                          <strong className="block truncate font-medium">{deal.title}</strong>
+                          {deal.productName && (
+                            <small className="text-muted-foreground block truncate">
+                              {deal.productName}
+                            </small>
+                          )}
+                          {deal.personId && deal.personName && (
+                            <Link
+                              href={`/participants/${deal.personId}`}
+                              className="text-primary block truncate text-xs hover:underline"
+                            >
+                              {deal.personName}
                             </Link>
-                          ) : (
-                            '—'
                           )}
-                        </td>
-                        <td className="number-cell">{formatMoney(deal.amount, deal.currency)}</td>
-                        <td>
-                          <span className="event-status">{DEAL_STATUS_LABELS[deal.status]}</span>
-                        </td>
-                        <td>
-                          {deal.paidAt ? (
-                            <span>
-                              <strong>{formatMoney(deal.paidAmount ?? 0, deal.currency)}</strong>
-                              <small style={{ display: 'block' }}>{formatDate(deal.paidAt)}</small>
-                            </span>
-                          ) : (
-                            '—'
+                        </span>
+                      </span>
+                    </TableCell>
+                    <TableCell>{DEAL_TYPE_LABELS[deal.dealType]}</TableCell>
+                    <TableCell>
+                      {deal.partnerId && deal.partnerName ? (
+                        <Link
+                          href={`/partners/${deal.partnerId}`}
+                          className="text-primary hover:underline"
+                        >
+                          {deal.partnerName}
+                        </Link>
+                      ) : (
+                        '—'
+                      )}
+                    </TableCell>
+                    <TableCell className="text-right tabular">
+                      {formatMoney(deal.amount, deal.currency)}
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant={DEAL_STATUS_VARIANTS[deal.status]}>
+                        {DEAL_STATUS_LABELS[deal.status]}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>
+                      {deal.paidAt ? (
+                        <span>
+                          <strong className="tabular">
+                            {formatMoney(deal.paidAmount ?? 0, deal.currency)}
+                          </strong>
+                          <small className="text-muted-foreground block">
+                            {formatDate(deal.paidAt)}
+                          </small>
+                        </span>
+                      ) : (
+                        '—'
+                      )}
+                    </TableCell>
+                    {canWrite && (
+                      <TableCell>
+                        <div className="flex justify-end gap-1.5">
+                          {!deal.paidAt && (
+                            <Button variant="outline" size="xs" onClick={() => setPayDeal(deal)}>
+                              Оплата
+                            </Button>
                           )}
-                        </td>
-                        {canWrite && (
-                          <td>
-                            <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
-                              <select
-                                aria-label={`Статус «${deal.title}»`}
-                                className="select-control"
-                                value={deal.status}
-                                onChange={(event) =>
-                                  void changeStatus(deal, event.target.value as DealStatus)
-                                }
-                              >
-                                {Object.entries(DEAL_STATUS_LABELS).map(([value, label]) => (
-                                  <option key={value} value={value}>
-                                    {label}
-                                  </option>
-                                ))}
-                              </select>
-                              {!deal.paidAt && (
-                                <button
-                                  className="button button--secondary button--compact"
-                                  type="button"
-                                  onClick={() => setPayDeal(deal)}
-                                >
-                                  Оплата
-                                </button>
-                              )}
-                            </div>
-                          </td>
-                        )}
-                      </tr>
-                    ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
+                        </div>
+                      </TableCell>
+                    )}
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableWrapper>
+        </Card>
+      )}
 
       {showCreate && (
-        <CreateDealDialog
-          onClose={() => setShowCreate(false)}
-          onCreated={() => {
-            setShowCreate(false);
-            void loadDeals();
-          }}
-        />
+        <CreateDealDialog onOpenChange={setShowCreate} onCreated={() => void loadDeals()} />
       )}
       {payDeal && (
-        <MarkPaidDialog
+        <MarkDealPaidDialog
           deal={payDeal}
-          onClose={() => setPayDeal(null)}
-          onSaved={() => {
-            setPayDeal(null);
-            void loadDeals();
-          }}
+          onOpenChange={(open) => !open && setPayDeal(null)}
+          onSaved={() => void loadDeals()}
         />
       )}
-    </div>
-  );
-}
-
-/** Отметка оплаты: выручка, поток и средний чек считаются по факту оплаты. */
-function MarkPaidDialog({
-  deal,
-  onClose,
-  onSaved,
-}: {
-  deal: DealSummary;
-  onClose: () => void;
-  onSaved: () => void;
-}) {
-  const [paidDate, setPaidDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [paidAmount, setPaidAmount] = useState(String(deal.amount));
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setSaving(true);
-    setError(null);
-    try {
-      await api(`/deals/${deal.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          version: deal.version,
-          paidAt: new Date(`${paidDate}T12:00:00`).toISOString(),
-          paidAmount: Number(paidAmount || 0),
-        }),
-      });
-      onSaved();
-    } catch (caught) {
-      setError(
-        caught instanceof ApiError
-          ? (caught.detail ?? caught.message)
-          : 'Не удалось отметить оплату',
-      );
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={() => !saving && onClose()}>
-      <section
-        aria-modal="true"
-        className="dialog"
-        onMouseDown={(event) => event.stopPropagation()}
-        role="dialog"
-      >
-        <header className="dialog__header">
-          <div>
-            <p className="eyebrow">Выручка по факту оплаты</p>
-            <h2>Оплата: {deal.title}</h2>
-          </div>
-          <button
-            aria-label="Закрыть"
-            className="icon-button"
-            disabled={saving}
-            onClick={onClose}
-            type="button"
-          >
-            <X size={18} />
-          </button>
-        </header>
-        <form onSubmit={submit}>
-          <div className="form-grid">
-            <label className="form-field">
-              <span>Дата оплаты *</span>
-              <input
-                onChange={(event) => setPaidDate(event.target.value)}
-                required
-                type="date"
-                value={paidDate}
-              />
-            </label>
-            <label className="form-field">
-              <span>Оплаченная сумма, ₽ *</span>
-              <input
-                min={0}
-                onChange={(event) => setPaidAmount(event.target.value)}
-                required
-                step="0.01"
-                type="number"
-                value={paidAmount}
-              />
-            </label>
-          </div>
-          {error && (
-            <p aria-live="polite" className="form-error">
-              {error}
-            </p>
-          )}
-          <footer className="dialog__footer">
-            <button
-              className="button button--secondary"
-              disabled={saving}
-              onClick={onClose}
-              type="button"
-            >
-              Отмена
-            </button>
-            <button
-              className="button button--primary"
-              disabled={saving || paidDate === '' || paidAmount === ''}
-              type="submit"
-            >
-              {saving ? 'Сохраняем…' : 'Отметить оплату'}
-            </button>
-          </footer>
-        </form>
-      </section>
-    </div>
-  );
-}
-
-function CreateDealDialog({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const [title, setTitle] = useState('');
-  const [dealType, setDealType] = useState<DealType>('COMMERCIAL');
-  const [amount, setAmount] = useState('');
-  const [partnerId, setPartnerId] = useState('');
-  const [productId, setProductId] = useState('');
-  const [expectedCloseAt, setExpectedCloseAt] = useState('');
-  const [comment, setComment] = useState('');
-  const [partners, setPartners] = useState<PartnerSummary[]>([]);
-  const [products, setProducts] = useState<ProductSummary[]>([]);
-  const [personQuery, setPersonQuery] = useState('');
-  const [personOptions, setPersonOptions] = useState<PersonSummary[]>([]);
-  const [selectedPerson, setSelectedPerson] = useState<PersonSummary | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  // Поиск участника для продажи компетенций/«голов».
-  useEffect(() => {
-    const query = personQuery.trim();
-    if (query.length < 2) {
-      setPersonOptions([]);
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      void api<{ items: PersonSummary[] }>(`/people?q=${encodeURIComponent(query)}`)
-        .then((response) => setPersonOptions(response.items.slice(0, 8)))
-        .catch(() => setPersonOptions([]));
-    }, 300);
-    return () => window.clearTimeout(timer);
-  }, [personQuery]);
-
-  useEffect(() => {
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === 'Escape' && !saving) onClose();
-    }
-    window.addEventListener('keydown', closeOnEscape);
-    return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [onClose, saving]);
-
-  useEffect(() => {
-    void api<{ items: PartnerSummary[] }>('/partners')
-      .then((response) => setPartners(response.items))
-      .catch(() => setPartners([]));
-    void api<{ items: ProductSummary[] }>('/products')
-      .then((response) => setProducts(response.items))
-      .catch(() => setProducts([]));
-  }, []);
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setError(null);
-    setSaving(true);
-    try {
-      await api('/deals', {
-        method: 'POST',
-        body: JSON.stringify({
-          title: title.trim(),
-          dealType,
-          amount: Number(amount || 0),
-          ...(partnerId ? { partnerId } : {}),
-          ...(productId ? { productId } : {}),
-          ...(selectedPerson ? { personId: selectedPerson.id } : {}),
-          ...(expectedCloseAt
-            ? { expectedCloseAt: new Date(expectedCloseAt).toISOString() }
-            : {}),
-          ...(comment.trim() ? { comment: comment.trim() } : {}),
-        }),
-      });
-      onCreated();
-    } catch (caught) {
-      setError(
-        caught instanceof ApiError
-          ? (caught.detail ?? caught.message)
-          : 'Не удалось создать сделку',
-      );
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={() => !saving && onClose()}>
-      <section
-        aria-modal="true"
-        className="dialog"
-        onMouseDown={(event) => event.stopPropagation()}
-        role="dialog"
-      >
-        <header className="dialog__header">
-          <div>
-            <p className="eyebrow">Обеспечение выручки</p>
-            <h2>Новая сделка</h2>
-          </div>
-          <button
-            aria-label="Закрыть"
-            className="icon-button"
-            disabled={saving}
-            onClick={onClose}
-            type="button"
-          >
-            <X size={18} />
-          </button>
-        </header>
-        <form onSubmit={submit}>
-          <div className="form-grid">
-            <label className="form-field form-field--full">
-              <span>Название *</span>
-              <input
-                autoFocus
-                maxLength={500}
-                minLength={2}
-                onChange={(event) => setTitle(event.target.value)}
-                placeholder="Например, Грант ФСИ «Студенческий стартап»"
-                required
-                value={title}
-              />
-            </label>
-            <label className="form-field">
-              <span>Тип *</span>
-              <select onChange={(event) => setDealType(event.target.value as DealType)} value={dealType}>
-                <option value="COMMERCIAL">Коммерция</option>
-                <option value="GRANT">Грант</option>
-              </select>
-            </label>
-            <label className="form-field">
-              <span>Сумма, ₽ *</span>
-              <input
-                min={0}
-                onChange={(event) => setAmount(event.target.value)}
-                required
-                step="0.01"
-                type="number"
-                value={amount}
-              />
-            </label>
-            <label className="form-field">
-              <span>Партнёр</span>
-              <select onChange={(event) => setPartnerId(event.target.value)} value={partnerId}>
-                <option value="">Не выбран</option>
-                {partners.map((partner) => (
-                  <option key={partner.id} value={partner.id}>
-                    {partner.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="form-field">
-              <span>Продукт</span>
-              <select onChange={(event) => setProductId(event.target.value)} value={productId}>
-                <option value="">Не выбран</option>
-                {products.map((product) => (
-                  <option key={product.id} value={product.id}>
-                    {product.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="form-field">
-              <span>Ожидаемое закрытие</span>
-              <input
-                onChange={(event) => setExpectedCloseAt(event.target.value)}
-                type="date"
-                value={expectedCloseAt}
-              />
-            </label>
-            <div className="form-field form-field--full">
-              <span>Участник (продажа компетенций/«головы»)</span>
-              {selectedPerson ? (
-                <p style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', margin: 0 }}>
-                  <strong>{selectedPerson.canonicalFullName}</strong>
-                  <button
-                    className="button button--secondary button--compact"
-                    onClick={() => {
-                      setSelectedPerson(null);
-                      setPersonQuery('');
-                    }}
-                    type="button"
-                  >
-                    Убрать
-                  </button>
-                </p>
-              ) : (
-                <>
-                  <input
-                    onChange={(event) => setPersonQuery(event.target.value)}
-                    placeholder="Начните вводить ФИО…"
-                    value={personQuery}
-                  />
-                  {personOptions.length > 0 && (
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginTop: '0.35rem' }}>
-                      {personOptions.map((person) => (
-                        <button
-                          className="button button--secondary button--compact"
-                          key={person.id}
-                          onClick={() => {
-                            setSelectedPerson(person);
-                            setPersonOptions([]);
-                          }}
-                          type="button"
-                        >
-                          {person.canonicalFullName}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-            <label className="form-field form-field--full">
-              <span>Комментарий</span>
-              <textarea
-                maxLength={10_000}
-                onChange={(event) => setComment(event.target.value)}
-                rows={3}
-                value={comment}
-              />
-            </label>
-          </div>
-          {error && (
-            <p aria-live="polite" className="form-error">
-              {error}
-            </p>
-          )}
-          <footer className="dialog__footer">
-            <button
-              className="button button--secondary"
-              disabled={saving}
-              onClick={onClose}
-              type="button"
-            >
-              Отмена
-            </button>
-            <button
-              className="button button--primary"
-              disabled={saving || title.trim().length < 2 || amount === ''}
-              type="submit"
-            >
-              {saving ? 'Создаём…' : 'Создать сделку'}
-            </button>
-          </footer>
-        </form>
-      </section>
-    </div>
+    </PageStack>
   );
 }

@@ -1,32 +1,60 @@
 'use client';
 
 import {
-  ArrowRight,
-  CalendarDays,
-  ChevronLeft,
-  ChevronRight,
-  FileCheck2,
-  Plus,
-  RotateCcw,
-  Search,
-  Users,
-  X,
+  ArrowRightIcon,
+  CalendarDaysIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  FileCheck2Icon,
+  PlusIcon,
+  UsersIcon,
 } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { Suspense, type FormEvent, useCallback, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useState } from 'react';
+import { toast } from 'sonner';
 
-import { EmptyState } from '@/components/empty-state';
 import { CreateEventDialog } from '@/components/create-event-dialog';
-import { api, formatDate } from '@/lib/api';
-import type { CurrentUser, EventSummary } from '@/lib/types';
+import { DataToolbar, ToolbarReset, ToolbarSearch, ToolbarSelect } from '@/components/data-toolbar';
+import { EmptyState } from '@/components/empty-state';
+import { KanbanBoard, type KanbanColumn } from '@/components/kanban';
+import { PageHeader, PageStack } from '@/components/page-header';
+import { ViewSwitch, type RegistryView } from '@/components/view-switch';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card, CardFooter } from '@/components/ui/card';
+import { Skeleton } from '@/components/ui/skeleton';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+  TableWrapper,
+} from '@/components/ui/table';
+import { useCurrentUser } from '@/hooks/use-current-user';
+import { api, apiErrorMessage, formatDate } from '@/lib/api';
+import {
+  EVENT_STATUS_LABELS,
+  EVENT_STATUS_ORDER,
+  EVENT_STATUS_VARIANTS,
+} from '@/lib/status-labels';
+import type { EventSummary } from '@/lib/types';
 
 const PAGE_SIZE = 25;
 const FILTER_KEYS = ['q', 'status', 'period', 'participants', 'artifacts'] as const;
 
+const COLUMN_ACCENTS: Record<string, string> = {
+  PLANNED: 'text-info',
+  ACTIVE: 'text-primary',
+  COMPLETED: 'text-success',
+  CANCELLED: 'text-destructive',
+};
+
 export default function EventsPage() {
   return (
-    <Suspense fallback={<div className="page-loading">Загружаем мероприятия…</div>}>
+    <Suspense fallback={<Skeleton className="h-96 rounded-xl" />}>
       <EventsContent />
     </Suspense>
   );
@@ -35,6 +63,8 @@ export default function EventsPage() {
 function EventsContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { can } = useCurrentUser();
+  const canWrite = can('events.write');
   const pageParameter = Number.parseInt(searchParams.get('page') ?? '1', 10);
   const page = Number.isFinite(pageParameter) && pageParameter > 0 ? pageParameter : 1;
   const urlQuery = searchParams.get('q') ?? '';
@@ -45,7 +75,7 @@ function EventsContent() {
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [canCreate, setCanCreate] = useState(false);
+  const [view, setView] = useState<RegistryView>('table');
   const [showCreate, setShowCreate] = useState(false);
 
   const loadEvents = useCallback(async () => {
@@ -56,28 +86,23 @@ function EventsContent() {
       const value = searchParams.get(key);
       if (value) params.set(key, value);
     }
-    params.set('limit', String(PAGE_SIZE));
-    params.set('offset', String((page - 1) * PAGE_SIZE));
+    // Доска показывает все статусы сразу, поэтому постраничность ей не нужна.
+    params.set('limit', String(view === 'board' ? 200 : PAGE_SIZE));
+    params.set('offset', String(view === 'board' ? 0 : (page - 1) * PAGE_SIZE));
     try {
       setData(await api<{ items: EventSummary[]; total: number }>(`/events?${params}`));
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Не удалось загрузить мероприятия');
+      setError(apiErrorMessage(caught, 'Не удалось загрузить мероприятия'));
     } finally {
       setLoading(false);
     }
-  }, [page, searchParams]);
+  }, [page, searchParams, view]);
 
   useEffect(() => {
     void loadEvents();
   }, [loadEvents]);
 
   useEffect(() => setQuery(urlQuery), [urlQuery]);
-
-  useEffect(() => {
-    void api<CurrentUser>('/auth/me')
-      .then((user) => setCanCreate(user.permissions.includes('events.write')))
-      .catch(() => setCanCreate(false));
-  }, []);
 
   function updateParams(next: Record<string, string | null>, resetPage = true) {
     const params = new URLSearchParams(searchParams.toString());
@@ -89,9 +114,24 @@ function EventsContent() {
     router.push(`/events${params.size ? `?${params}` : ''}`);
   }
 
-  function submitSearch(event: FormEvent) {
-    event.preventDefault();
-    updateParams({ q: query.trim() || null });
+  async function changeStatus(eventId: string, status: string) {
+    const event = data.items.find((candidate) => candidate.id === eventId);
+    if (!event || event.status === status) return;
+    const previous = data;
+    setData((current) => ({
+      ...current,
+      items: current.items.map((item) => (item.id === eventId ? { ...item, status } : item)),
+    }));
+    try {
+      await api(`/events/${eventId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ version: event.version, status }),
+      });
+      await loadEvents();
+    } catch (caught) {
+      setData(previous);
+      toast.error(apiErrorMessage(caught, 'Не удалось изменить статус'));
+    }
   }
 
   const hasFilters = FILTER_KEYS.some((key) => searchParams.has(key));
@@ -100,122 +140,129 @@ function EventsContent() {
   const shownTo = data.items.length === 0 ? 0 : Math.min(page * PAGE_SIZE, data.total);
 
   useEffect(() => {
-    if (loading || error || page <= totalPages) return;
+    if (loading || error || view === 'board' || page <= totalPages) return;
     const params = new URLSearchParams(searchParams.toString());
     if (totalPages === 1) params.delete('page');
     else params.set('page', String(totalPages));
     router.replace(`/events${params.size ? `?${params}` : ''}`);
-  }, [error, loading, page, router, searchParams, totalPages]);
+  }, [error, loading, page, router, searchParams, totalPages, view]);
+
+  const columns: KanbanColumn[] = EVENT_STATUS_ORDER.map((status) => ({
+    id: status,
+    title: EVENT_STATUS_LABELS[status] ?? status,
+    accentClassName: COLUMN_ACCENTS[status] ?? 'text-muted-foreground',
+  }));
+
+  function renderCard(event: EventSummary) {
+    return (
+      <div className="space-y-2">
+        <Link
+          href={`/events/${event.id}`}
+          className="block text-[13px] leading-snug font-medium hover:underline"
+        >
+          {event.name}
+        </Link>
+        <p className="text-muted-foreground text-xs">
+          {formatEventPeriod(event.startsAt, event.endsAt)}
+        </p>
+        <div className="text-muted-foreground flex items-center gap-3 text-xs">
+          <span className="inline-flex items-center gap-1 tabular">
+            <UsersIcon className="size-3.5" /> {event.participantCount}
+          </span>
+          <span className="inline-flex items-center gap-1 tabular">
+            <FileCheck2Icon className="size-3.5" /> {event.artifactCount}
+          </span>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="page-stack">
-      <section className="page-heading page-heading--split">
-        <div>
-          <p className="eyebrow">Участники и их история</p>
-          <h1>Мероприятия</h1>
-          <p>
-            {hasFilters ? 'Найдено' : 'В общей базе'} {data.total.toLocaleString('ru-RU')}{' '}
-            {eventCountLabel(data.total)}
-          </p>
-        </div>
-        {canCreate && (
-          <div className="heading-actions">
-            <button className="button button--primary" onClick={() => setShowCreate(true)}>
-              <Plus size={17} /> Новое мероприятие
-            </button>
-          </div>
-        )}
-      </section>
+    <PageStack>
+      <PageHeader
+        eyebrow="Участники и их история"
+        title="Мероприятия"
+        description={`${hasFilters ? 'Найдено' : 'В общей базе'} ${data.total.toLocaleString('ru-RU')} ${eventCountLabel(data.total)}`}
+        actions={
+          canWrite && (
+            <Button onClick={() => setShowCreate(true)}>
+              <PlusIcon />
+              Новое мероприятие
+            </Button>
+          )
+        }
+      />
 
-      <section className="registry-toolbar registry-toolbar--filters">
-        <form className="registry-search" onSubmit={submitSearch}>
-          <button aria-label="Найти" type="submit">
-            <Search size={18} />
-          </button>
-          <input
-            aria-label="Поиск мероприятия"
-            placeholder="Поиск по названию…"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-          {query && (
-            <button
-              aria-label="Очистить поиск"
-              type="button"
-              onClick={() => {
-                setQuery('');
-                updateParams({ q: null });
-              }}
-            >
-              <X size={15} />
-            </button>
-          )}
-        </form>
-        <select
-          aria-label="Статус мероприятия"
-          className="select-control"
+      <DataToolbar>
+        <ToolbarSearch
+          value={query}
+          onChange={(value) => {
+            setQuery(value);
+            if (value === '') updateParams({ q: null });
+          }}
+          placeholder="Поиск по названию…"
+        />
+        <Button variant="outline" size="sm" onClick={() => updateParams({ q: query.trim() || null })}>
+          Найти
+        </Button>
+        <ToolbarSelect
+          label="Статус"
           value={searchParams.get('status') ?? ''}
-          onChange={(event) => updateParams({ status: event.target.value || null })}
-        >
-          <option value="">Любой статус</option>
-          <option value="PLANNED">Запланировано</option>
-          <option value="ACTIVE">Идёт</option>
-          <option value="COMPLETED">Завершено</option>
-          <option value="CANCELLED">Отменено</option>
-          <option value="UNKNOWN">Статус не указан</option>
-        </select>
-        <select
-          aria-label="Период мероприятия"
-          className="select-control"
+          onChange={(value) => updateParams({ status: value || null })}
+          options={[
+            { value: '', label: 'Любой статус' },
+            ...EVENT_STATUS_ORDER.map((status) => ({
+              value: status,
+              label: EVENT_STATUS_LABELS[status] ?? status,
+            })),
+            { value: 'UNKNOWN', label: 'Статус не указан' },
+          ]}
+        />
+        <ToolbarSelect
+          label="Период"
           value={searchParams.get('period') ?? ''}
-          onChange={(event) => updateParams({ period: event.target.value || null })}
-        >
-          <option value="">Любой период</option>
-          <option value="UPCOMING">Текущие и будущие</option>
-          <option value="PAST">Прошедшие</option>
-          <option value="DATED">Дата указана</option>
-          <option value="UNDATED">Без даты</option>
-        </select>
-        <select
-          aria-label="Наличие участников"
-          className="select-control"
-          value={searchParams.get('participants') ?? ''}
-          onChange={(event) => updateParams({ participants: event.target.value || null })}
-        >
-          <option value="">Любое число участников</option>
-          <option value="WITH">Есть участники</option>
-          <option value="WITHOUT">Без участников</option>
-        </select>
-        <select
-          aria-label="Наличие артефактов"
-          className="select-control"
+          onChange={(value) => updateParams({ period: value || null })}
+          options={[
+            { value: '', label: 'Любой период' },
+            { value: 'UPCOMING', label: 'Текущие и будущие' },
+            { value: 'PAST', label: 'Прошедшие' },
+            { value: 'DATED', label: 'Дата указана' },
+            { value: 'UNDATED', label: 'Без даты' },
+          ]}
+        />
+        <ToolbarSelect
+          label="Артефакты"
           value={searchParams.get('artifacts') ?? ''}
-          onChange={(event) => updateParams({ artifacts: event.target.value || null })}
-        >
-          <option value="">Любое число артефактов</option>
-          <option value="WITH">Есть артефакты</option>
-          <option value="WITHOUT">Без артефактов</option>
-        </select>
+          onChange={(value) => updateParams({ artifacts: value || null })}
+          options={[
+            { value: '', label: 'Любое число' },
+            { value: 'WITH', label: 'Есть артефакты' },
+            { value: 'WITHOUT', label: 'Без артефактов' },
+          ]}
+        />
         {hasFilters && (
-          <button
-            className="button button--secondary registry-filter-reset"
-            type="button"
+          <ToolbarReset
             onClick={() => {
               setQuery('');
               router.push('/events');
             }}
-          >
-            <RotateCcw size={15} /> Сбросить
-          </button>
+          />
         )}
-        <span className="registry-result-count">Найдено: {data.total.toLocaleString('ru-RU')}</span>
-      </section>
+        <div className="ml-auto">
+          <ViewSwitch value={view} onChange={setView} />
+        </div>
+      </DataToolbar>
 
-      <section className="table-panel">
-        {error ? (
+      {error ? (
+        <Card>
           <EmptyState title="Ошибка загрузки" text={error} />
-        ) : !loading && data.items.length === 0 ? (
+        </Card>
+      ) : loading ? (
+        <Skeleton className="h-96 rounded-xl" />
+      ) : data.items.length === 0 ? (
+        <Card>
           <EmptyState
+            icon={CalendarDaysIcon}
             title="Мероприятия не найдены"
             text={
               hasFilters
@@ -223,96 +270,96 @@ function EventsContent() {
                 : 'Создайте первое мероприятие или запустите импорт исходной книги.'
             }
           />
-        ) : (
-          <div className="table-scroll">
-            <table className="data-table events-table">
-              <thead>
-                <tr>
-                  <th>Мероприятие</th>
-                  <th>Дата</th>
-                  <th>Статус</th>
-                  <th className="number-cell">Участников</th>
-                  <th className="number-cell">Артефактов</th>
-                  <th>
+        </Card>
+      ) : view === 'board' ? (
+        <KanbanBoard
+          columns={columns}
+          items={data.items.filter((event) => EVENT_STATUS_ORDER.includes(event.status as never))}
+          getId={(event) => event.id}
+          getColumnId={(event) => event.status}
+          renderCard={renderCard}
+          {...(canWrite ? { onMove: changeStatus } : {})}
+          emptyColumnText="Нет мероприятий"
+        />
+      ) : (
+        <Card>
+          <TableWrapper>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Мероприятие</TableHead>
+                  <TableHead>Дата</TableHead>
+                  <TableHead>Статус</TableHead>
+                  <TableHead className="text-right">Участников</TableHead>
+                  <TableHead className="text-right">Артефактов</TableHead>
+                  <TableHead>
                     <span className="sr-only">Открыть</span>
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {loading
-                  ? Array.from({ length: 8 }, (_, index) => (
-                      <tr className="skeleton-row" key={index}>
-                        <td colSpan={6}>
-                          <span />
-                        </td>
-                      </tr>
-                    ))
-                  : data.items.map((event) => (
-                      <tr key={event.id}>
-                        <td>
-                          <Link className="event-name-cell" href={`/events/${event.id}`}>
-                            <span className="table-file-icon">
-                              <CalendarDays size={16} />
-                            </span>
-                            <strong>{event.name}</strong>
-                          </Link>
-                        </td>
-                        <td>{formatEventPeriod(event.startsAt, event.endsAt)}</td>
-                        <td>
-                          <span className="event-status">{eventStatusLabel(event.status)}</span>
-                        </td>
-                        <td className="number-cell">
-                          <span className="inline-count">
-                            <Users size={14} /> {event.participantCount}
-                          </span>
-                        </td>
-                        <td className="number-cell">
-                          <span className="inline-count">
-                            <FileCheck2 size={14} /> {event.artifactCount}
-                          </span>
-                        </td>
-                        <td>
-                          <Link
-                            className="icon-button"
-                            aria-label={`Открыть «${event.name}»`}
-                            href={`/events/${event.id}`}
-                          >
-                            <ArrowRight size={16} />
-                          </Link>
-                        </td>
-                      </tr>
-                    ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-        <footer className="table-footer">
-          <span>
-            Показано {shownFrom}–{shownTo} из {data.total.toLocaleString('ru-RU')}
-          </span>
-          <div className="pagination">
-            <button
-              aria-label="Предыдущая страница"
-              className="icon-button icon-button--bordered"
-              disabled={loading || page <= 1}
-              onClick={() => updateParams({ page: page === 2 ? null : String(page - 1) }, false)}
-            >
-              <ChevronLeft size={17} />
-            </button>
-            <span className="pagination__label">
-              {page} / {totalPages}
+                  </TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {data.items.map((event) => (
+                  <TableRow key={event.id}>
+                    <TableCell>
+                      <Link href={`/events/${event.id}`} className="flex items-center gap-2.5">
+                        <span className="bg-muted text-muted-foreground flex size-8 shrink-0 items-center justify-center rounded-lg">
+                          <CalendarDaysIcon className="size-4" />
+                        </span>
+                        <strong className="font-medium hover:underline">{event.name}</strong>
+                      </Link>
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {formatEventPeriod(event.startsAt, event.endsAt)}
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant={EVENT_STATUS_VARIANTS[event.status] ?? 'soft-muted'}>
+                        {EVENT_STATUS_LABELS[event.status] ?? event.status}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="text-right tabular">{event.participantCount}</TableCell>
+                    <TableCell className="text-right tabular">{event.artifactCount}</TableCell>
+                    <TableCell className="text-right">
+                      <Button variant="ghost" size="icon-sm" asChild>
+                        <Link href={`/events/${event.id}`} aria-label={`Открыть «${event.name}»`}>
+                          <ArrowRightIcon />
+                        </Link>
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableWrapper>
+          <CardFooter className="justify-between">
+            <span className="text-muted-foreground text-[13px]">
+              Показано {shownFrom}–{shownTo} из {data.total.toLocaleString('ru-RU')}
             </span>
-            <button
-              aria-label="Следующая страница"
-              className="icon-button icon-button--bordered"
-              disabled={loading || page >= totalPages}
-              onClick={() => updateParams({ page: String(page + 1) }, false)}
-            >
-              <ChevronRight size={17} />
-            </button>
-          </div>
-        </footer>
-      </section>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="icon-sm"
+                aria-label="Предыдущая страница"
+                disabled={loading || page <= 1}
+                onClick={() => updateParams({ page: page === 2 ? null : String(page - 1) }, false)}
+              >
+                <ChevronLeftIcon />
+              </Button>
+              <span className="text-[13px] tabular">
+                {page} / {totalPages}
+              </span>
+              <Button
+                variant="outline"
+                size="icon-sm"
+                aria-label="Следующая страница"
+                disabled={loading || page >= totalPages}
+                onClick={() => updateParams({ page: String(page + 1) }, false)}
+              >
+                <ChevronRightIcon />
+              </Button>
+            </div>
+          </CardFooter>
+        </Card>
+      )}
 
       {showCreate && (
         <CreateEventDialog
@@ -320,7 +367,7 @@ function EventsContent() {
           onCreated={(id) => router.push(`/events/${id}`)}
         />
       )}
-    </div>
+    </PageStack>
   );
 }
 
@@ -337,16 +384,4 @@ function formatEventPeriod(startsAt?: string | null, endsAt?: string | null): st
   if (!startsAt && !endsAt) return 'Дата не указана';
   if (startsAt && endsAt) return `${formatDate(startsAt)} — ${formatDate(endsAt)}`;
   return formatDate(startsAt ?? endsAt);
-}
-
-function eventStatusLabel(status: string): string {
-  return (
-    {
-      UNKNOWN: 'Не указан',
-      PLANNED: 'Запланировано',
-      ACTIVE: 'Идёт',
-      COMPLETED: 'Завершено',
-      CANCELLED: 'Отменено',
-    }[status] ?? status
-  );
 }

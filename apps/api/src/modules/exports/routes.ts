@@ -1,10 +1,17 @@
+import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { Permissions, normalizeEmail, normalizeFullName, normalizePhone } from '@cpi-crm/domain';
-import { createEventParticipantsWorkbook } from '@cpi-crm/importer';
+import {
+  createEventParticipantsWorkbook,
+  type EventParticipantWorkbookArtifact,
+} from '@cpi-crm/importer';
 import { Type } from '@sinclair/typebox';
+import { ZipArchive } from 'archiver';
 import type { FastifyInstance } from 'fastify';
 import { Readable } from 'node:stream';
 
+import { EVENT_ARTIFACTS_SQL, mapEventArtifactRow } from '../../lib/event-artifacts.js';
 import { createConcurrencyGuard, heavyOperationRateLimit } from '../../lib/heavy-operations.js';
+import { requestLockerDownloadUrl } from '../../lib/locker.js';
 import { getOrganizationContext } from '../../lib/organization.js';
 
 const LIVE_ACTIVITY_SQL = `CASE
@@ -15,6 +22,94 @@ const LIVE_ACTIVITY_SQL = `CASE
 END`;
 
 const EXPORT_BATCH_SIZE = 25;
+
+/** Параллельная выдача подписанных ссылок; сами файлы качаются по очереди. */
+const ARTIFACT_LINK_CONCURRENCY = 4;
+
+interface EventParticipantExportRow {
+  person_id: string;
+  last_name: string;
+  first_name: string;
+  patronymic: string;
+  canonical_full_name: string;
+  email: string | null;
+  phone: string | null;
+  telegram: string | null;
+  telegram_user_id: string | null;
+  attended: boolean | null;
+  decisions: string[];
+}
+
+/** Ожидает $1 = eventId, $2 = organizationId. */
+const EVENT_PARTICIPANTS_EXPORT_SQL = `
+  WITH canonical_participants AS (
+    SELECT DISTINCT COALESCE(member.merged_into_person_id, member.id) AS person_id
+      FROM event_participations participation
+      JOIN persons member ON member.id = participation.person_id
+     WHERE participation.event_id = $1
+       AND participation.archived_at IS NULL AND member.archived_at IS NULL
+  )
+  SELECT person.id AS person_id,
+         person.last_name, person.first_name, person.patronymic,
+         person.canonical_full_name,
+         contacts.email, contacts.phone, contacts.telegram,
+         contacts.telegram_user_id,
+         CASE
+           WHEN participation.attended THEN true
+           WHEN participation.no_show THEN false
+           ELSE NULL
+         END AS attended,
+         participation.decisions
+    FROM canonical_participants canonical
+    JOIN persons person ON person.id = canonical.person_id
+    LEFT JOIN LATERAL (
+      SELECT
+        (SELECT contact.raw_value FROM contact_points contact
+          WHERE contact.person_id IN (
+                  SELECT id FROM persons
+                   WHERE id = person.id OR merged_into_person_id = person.id
+                )
+            AND contact.archived_at IS NULL AND contact.type = 'EMAIL'
+          ORDER BY contact.is_primary DESC, contact.created_at, contact.id LIMIT 1) AS email,
+        (SELECT contact.raw_value FROM contact_points contact
+          WHERE contact.person_id IN (
+                  SELECT id FROM persons
+                   WHERE id = person.id OR merged_into_person_id = person.id
+                )
+            AND contact.archived_at IS NULL AND contact.type = 'PHONE'
+          ORDER BY contact.is_primary DESC, contact.created_at, contact.id LIMIT 1) AS phone,
+        (SELECT contact.raw_value FROM contact_points contact
+          WHERE contact.person_id IN (
+                  SELECT id FROM persons
+                   WHERE id = person.id OR merged_into_person_id = person.id
+                )
+            AND contact.archived_at IS NULL AND contact.type = 'TELEGRAM'
+          ORDER BY (contact.messenger_stable_id IS NOT NULL) DESC,
+                   contact.is_primary DESC, contact.created_at, contact.id LIMIT 1) AS telegram,
+        (SELECT contact.messenger_stable_id FROM contact_points contact
+          WHERE contact.person_id IN (
+                  SELECT id FROM persons
+                   WHERE id = person.id OR merged_into_person_id = person.id
+                )
+            AND contact.archived_at IS NULL AND contact.type = 'TELEGRAM'
+            AND contact.messenger_stable_id IS NOT NULL
+          ORDER BY contact.is_primary DESC, contact.created_at, contact.id LIMIT 1)
+            AS telegram_user_id
+    ) contacts ON true
+    LEFT JOIN LATERAL (
+      SELECT bool_or(item.attendance = 'ATTENDED') AS attended,
+             bool_or(item.attendance = 'NO_SHOW') AS no_show,
+             array_agg(DISTINCT item.decision::text ORDER BY item.decision::text) AS decisions
+        FROM event_participations item
+       WHERE item.event_id = $1 AND item.archived_at IS NULL
+         AND item.person_id IN (
+           SELECT id FROM persons
+            WHERE id = person.id OR merged_into_person_id = person.id
+         )
+    ) participation ON true
+   WHERE person.organization_id = $2 AND person.archived_at IS NULL
+   ORDER BY person.last_name, person.first_name, person.patronymic, person.id
+`;
 
 export async function registerExportRoutes(app: FastifyInstance): Promise<void> {
   const guardExportConcurrency = createConcurrencyGuard({
@@ -381,85 +476,8 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
       const event = eventResult.rows[0];
       if (!event) return reply.code(404).send({ title: 'Мероприятие не найдено', status: 404 });
 
-      const result = await app.pool.query<{
-        last_name: string;
-        first_name: string;
-        patronymic: string;
-        canonical_full_name: string;
-        email: string | null;
-        phone: string | null;
-        telegram: string | null;
-        telegram_user_id: string | null;
-        attended: boolean | null;
-        decisions: string[];
-      }>(
-        `WITH canonical_participants AS (
-           SELECT DISTINCT COALESCE(member.merged_into_person_id, member.id) AS person_id
-             FROM event_participations participation
-             JOIN persons member ON member.id = participation.person_id
-            WHERE participation.event_id = $1
-              AND participation.archived_at IS NULL AND member.archived_at IS NULL
-         )
-         SELECT person.last_name, person.first_name, person.patronymic,
-                person.canonical_full_name,
-                contacts.email, contacts.phone, contacts.telegram,
-                contacts.telegram_user_id,
-                CASE
-                  WHEN participation.attended THEN true
-                  WHEN participation.no_show THEN false
-                  ELSE NULL
-                END AS attended,
-                participation.decisions
-           FROM canonical_participants canonical
-           JOIN persons person ON person.id = canonical.person_id
-           LEFT JOIN LATERAL (
-             SELECT
-               (SELECT contact.raw_value FROM contact_points contact
-                 WHERE contact.person_id IN (
-                         SELECT id FROM persons
-                          WHERE id = person.id OR merged_into_person_id = person.id
-                       )
-                   AND contact.archived_at IS NULL AND contact.type = 'EMAIL'
-                 ORDER BY contact.is_primary DESC, contact.created_at, contact.id LIMIT 1) AS email,
-               (SELECT contact.raw_value FROM contact_points contact
-                 WHERE contact.person_id IN (
-                         SELECT id FROM persons
-                          WHERE id = person.id OR merged_into_person_id = person.id
-                       )
-                   AND contact.archived_at IS NULL AND contact.type = 'PHONE'
-                 ORDER BY contact.is_primary DESC, contact.created_at, contact.id LIMIT 1) AS phone,
-               (SELECT contact.raw_value FROM contact_points contact
-                 WHERE contact.person_id IN (
-                         SELECT id FROM persons
-                          WHERE id = person.id OR merged_into_person_id = person.id
-                       )
-                   AND contact.archived_at IS NULL AND contact.type = 'TELEGRAM'
-                 ORDER BY (contact.messenger_stable_id IS NOT NULL) DESC,
-                          contact.is_primary DESC, contact.created_at, contact.id LIMIT 1) AS telegram,
-               (SELECT contact.messenger_stable_id FROM contact_points contact
-                 WHERE contact.person_id IN (
-                         SELECT id FROM persons
-                          WHERE id = person.id OR merged_into_person_id = person.id
-                       )
-                   AND contact.archived_at IS NULL AND contact.type = 'TELEGRAM'
-                   AND contact.messenger_stable_id IS NOT NULL
-                 ORDER BY contact.is_primary DESC, contact.created_at, contact.id LIMIT 1)
-                   AS telegram_user_id
-           ) contacts ON true
-           LEFT JOIN LATERAL (
-             SELECT bool_or(item.attendance = 'ATTENDED') AS attended,
-                    bool_or(item.attendance = 'NO_SHOW') AS no_show,
-                    array_agg(DISTINCT item.decision::text ORDER BY item.decision::text)
-                      AS decisions
-               FROM event_participations item
-              WHERE item.event_id = $1 AND item.archived_at IS NULL
-                AND item.person_id IN (
-                  SELECT id FROM persons
-                   WHERE id = person.id OR merged_into_person_id = person.id
-                )
-           ) participation ON true
-          WHERE person.organization_id = $2 AND person.archived_at IS NULL
-          ORDER BY person.last_name, person.first_name, person.patronymic, person.id`,
+      const result = await app.pool.query<EventParticipantExportRow>(
+        EVENT_PARTICIPANTS_EXPORT_SQL,
         [eventId, organization.id],
       );
       const bytes = await createEventParticipantsWorkbook({
@@ -503,6 +521,382 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
         .send(Buffer.from(bytes));
     },
   );
+
+  // Клиент создаётся при первой ZIP-выгрузке: остальные экспорты в объектное
+  // хранилище не ходят и не должны падать без его конфигурации.
+  let s3Client: S3Client | null = null;
+  const getS3 = (): S3Client => {
+    s3Client ??= new S3Client({
+      endpoint: app.config.storage.endpoint,
+      region: app.config.storage.region,
+      forcePathStyle: true,
+      credentials: {
+        accessKeyId: app.config.storage.accessKey,
+        secretAccessKey: app.config.storage.secretKey,
+      },
+    });
+    return s3Client;
+  };
+
+  app.get(
+    '/exports/events/:id/package.zip',
+    {
+      config: { rateLimit: heavyOperationRateLimit(2, '1 minute') },
+      preHandler: [app.requirePermission(Permissions.EXPORTS_BULK), guardExportConcurrency],
+      schema: {
+        tags: ['Экспорт'],
+        summary: 'ZIP-пакет мероприятия: таблица участников и файлы артефактов',
+        params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
+      },
+    },
+    async (request, reply) => {
+      const eventId = (request.params as { id: string }).id;
+      const organization = await getOrganizationContext(app.pool);
+      const eventResult = await app.pool.query<{ id: string; name: string }>(
+        `SELECT id, name FROM events
+          WHERE id = $1 AND organization_id = $2 AND archived_at IS NULL`,
+        [eventId, organization.id],
+      );
+      const event = eventResult.rows[0];
+      if (!event) return reply.code(404).send({ title: 'Мероприятие не найдено', status: 404 });
+
+      const [participantsResult, artifactsResult] = await Promise.all([
+        app.pool.query<EventParticipantExportRow>(EVENT_PARTICIPANTS_EXPORT_SQL, [
+          eventId,
+          organization.id,
+        ]),
+        app.pool.query(EVENT_ARTIFACTS_SQL, [eventId]),
+      ]);
+      const artifacts = artifactsResult.rows.map(mapEventArtifactRow);
+
+      // Раскладка архива: папка на автора, внутри — файлы его артефактов.
+      const usedPaths = new Set<string>();
+      const downloads: {
+        archivePath: string;
+        fileId: string;
+        storageProvider: 'CRM' | 'LOCKER';
+      }[] = [];
+      const skipped: { artifact: string; file: string; reason: string }[] = [];
+      const byAuthor = new Map<string, EventParticipantWorkbookArtifact[]>();
+      const orphanArtifacts: EventParticipantWorkbookArtifact[] = [];
+
+      for (const artifact of artifacts) {
+        const author = artifact.authors[0];
+        const folder = sanitizeArchiveSegment(author?.name ?? 'Без автора');
+        const entries: EventParticipantWorkbookArtifact[] = [];
+
+        if (artifact.files.length === 0) {
+          entries.push({
+            title: artifact.title,
+            typeName: artifact.typeName,
+            score: artifact.score,
+            decision: artifact.decision,
+            submittedAt: artifact.submittedAt,
+            externalUrl: artifact.externalUrls[0] ?? null,
+          });
+        }
+
+        for (const file of artifact.files) {
+          if (file.status !== 'AVAILABLE') {
+            skipped.push({
+              artifact: artifact.title,
+              file: file.fileName,
+              reason: `Файл в статусе ${file.status}`,
+            });
+            entries.push({
+              title: artifact.title,
+              typeName: artifact.typeName,
+              score: artifact.score,
+              decision: artifact.decision,
+              submittedAt: artifact.submittedAt,
+              fileName: file.fileName,
+            });
+            continue;
+          }
+          const archivePath = uniqueArchivePath(
+            usedPaths,
+            `artifacts/${folder}/${sanitizeArchiveSegment(file.fileName)}`,
+          );
+          downloads.push({
+            archivePath,
+            fileId: file.id,
+            storageProvider: file.storageProvider,
+          });
+          entries.push({
+            title: artifact.title,
+            typeName: artifact.typeName,
+            score: artifact.score,
+            decision: artifact.decision,
+            submittedAt: artifact.submittedAt,
+            fileName: file.fileName,
+            archivePath,
+            externalUrl: artifact.externalUrls[0] ?? null,
+          });
+        }
+
+        if (author) {
+          const bucket = byAuthor.get(author.id);
+          if (bucket) bucket.push(...entries);
+          else byAuthor.set(author.id, [...entries]);
+        } else {
+          orphanArtifacts.push(...entries);
+        }
+      }
+
+      const sources = await resolveDownloadSources(app, getS3(), downloads);
+      for (const failure of sources.failures) skipped.push(failure);
+
+      const workbookRows = participantsResult.rows.map((row, index) => ({
+        number: index + 1,
+        lastName: row.last_name,
+        firstName: row.first_name,
+        patronymic: row.patronymic,
+        canonicalFullName: row.canonical_full_name,
+        email: row.email,
+        phone: row.phone,
+        telegram: row.telegram,
+        telegramUserId: row.telegram_user_id,
+        attended: row.attended,
+        decision: exportDecisionLabel(row.decisions),
+        eventName: event.name,
+        artifacts: byAuthor.get(row.person_id) ?? [],
+      }));
+      // Авторы артефактов, не записанные в участники, не должны потеряться в таблице.
+      const participantIds = new Set(participantsResult.rows.map((row) => row.person_id));
+      let extraNumber = workbookRows.length;
+      for (const artifact of artifacts) {
+        const author = artifact.authors[0];
+        if (!author || participantIds.has(author.id)) continue;
+        participantIds.add(author.id);
+        extraNumber += 1;
+        workbookRows.push({
+          number: extraNumber,
+          lastName: '',
+          firstName: '',
+          patronymic: '',
+          canonicalFullName: author.name,
+          email: null,
+          phone: null,
+          telegram: null,
+          telegramUserId: null,
+          attended: null,
+          decision: 'Не участник мероприятия',
+          eventName: event.name,
+          artifacts: byAuthor.get(author.id) ?? [],
+        });
+      }
+
+      const workbookBytes = await createEventParticipantsWorkbook({
+        eventName: event.name,
+        rows: workbookRows,
+      });
+
+      await app.pool.query(
+        `INSERT INTO audit_log
+           (actor_user_id, actor_subject, request_id, action, entity_type, entity_id, after, reason)
+         VALUES ($1, $2, $3, 'event.package_zip_exported', 'event', $4,
+                 $5::jsonb, 'Выгрузка ZIP-пакета мероприятия')`,
+        [
+          request.authUser!.userId,
+          request.authUser!.sub,
+          request.id,
+          eventId,
+          JSON.stringify({
+            participants: participantsResult.rows.length,
+            artifacts: artifacts.length,
+            files: sources.entries.length,
+            skipped: skipped.length,
+          }),
+        ],
+      );
+
+      const archive = new ZipArchive({ zlib: { level: 6 } });
+      archive.on('warning', (error: Error) => app.log.warn({ err: error }, 'zip export warning'));
+      archive.on('error', (error: Error) => {
+        app.log.error({ err: error }, 'zip export failed');
+        archive.destroy(error);
+      });
+
+      archive.append(Buffer.from(workbookBytes), { name: 'Участники.xlsx' });
+      archive.append(
+        JSON.stringify(
+          {
+            event: { id: event.id, name: event.name },
+            exportedAt: new Date().toISOString(),
+            participants: participantsResult.rows.length,
+            artifacts: artifacts.map((artifact) => ({
+              id: artifact.id,
+              title: artifact.title,
+              typeName: artifact.typeName,
+              authors: artifact.authors.map((author) => author.name),
+              authorOutsideEvent: artifact.authorOutsideEvent,
+              score: artifact.score,
+              decision: artifact.decision,
+              source: artifact.source,
+            })),
+            files: sources.entries.map((entry) => entry.archivePath),
+            skipped,
+          },
+          null,
+          2,
+        ),
+        { name: 'manifest.json' },
+      );
+
+      // Файлы кладутся по очереди: archiver всё равно обрабатывает поток за потоком,
+      // а последовательность не даёт подписанным ссылкам протухнуть в ожидании.
+      void (async () => {
+        for (const entry of sources.entries) {
+          if (request.raw.aborted) break;
+          try {
+            const body = await entry.open();
+            archive.append(body, { name: entry.archivePath });
+          } catch (error) {
+            app.log.warn({ err: error, file: entry.archivePath }, 'zip export skipped file');
+          }
+        }
+        await archive.finalize();
+      })().catch((error: unknown) => {
+        app.log.error({ err: error }, 'zip export stream failed');
+        archive.destroy(error instanceof Error ? error : new Error('zip export failed'));
+      });
+
+      const fileName = `cpi-event-${sanitizeArchiveSegment(event.name).slice(0, 60)}.zip`;
+      return reply
+        .header('Content-Type', 'application/zip')
+        .header(
+          'Content-Disposition',
+          `attachment; filename="cpi-event-${eventId}.zip"; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+        )
+        .header('Cache-Control', 'private, no-store, max-age=0')
+        .header('X-Content-Type-Options', 'nosniff')
+        .send(archive);
+    },
+  );
+}
+
+interface ResolvedDownload {
+  archivePath: string;
+  open: () => Promise<Readable>;
+}
+
+/**
+ * Подписанные ссылки берутся параллельно: у Locker это сетевой round-trip
+ * на каждый файл. Недоступный файл не роняет выгрузку — он уходит в manifest.
+ */
+async function resolveDownloadSources(
+  app: FastifyInstance,
+  s3: S3Client,
+  downloads: readonly { archivePath: string; fileId: string; storageProvider: 'CRM' | 'LOCKER' }[],
+): Promise<{
+  entries: ResolvedDownload[];
+  failures: { artifact: string; file: string; reason: string }[];
+}> {
+  if (downloads.length === 0) return { entries: [], failures: [] };
+
+  const metadata = await app.pool.query<{
+    id: string;
+    bucket: string;
+    object_key: string;
+    original_filename: string;
+    storage_provider: 'CRM' | 'LOCKER';
+    external_id: string | null;
+  }>(
+    `SELECT id, bucket, object_key, original_filename, storage_provider, external_id
+       FROM file_objects WHERE id = ANY($1::uuid[])`,
+    [downloads.map((item) => item.fileId)],
+  );
+  const byId = new Map(metadata.rows.map((row) => [row.id, row]));
+
+  const entries: ResolvedDownload[] = [];
+  const failures: { artifact: string; file: string; reason: string }[] = [];
+  let cursor = 0;
+
+  async function worker(): Promise<void> {
+    while (cursor < downloads.length) {
+      const download = downloads[cursor++]!;
+      const file = byId.get(download.fileId);
+      if (!file) {
+        failures.push({
+          artifact: download.archivePath,
+          file: download.archivePath,
+          reason: 'Метаданные файла не найдены',
+        });
+        continue;
+      }
+      try {
+        if (file.storage_provider === 'LOCKER') {
+          if (!file.external_id) throw new Error('нет внешнего идентификатора');
+          const link = await requestLockerDownloadUrl(app, file.external_id);
+          entries.push({
+            archivePath: download.archivePath,
+            open: async () => {
+              const response = await fetch(link.url, { signal: AbortSignal.timeout(60_000) });
+              if (!response.ok || !response.body)
+                throw new Error(`Locker вернул ${response.status}`);
+              return Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]);
+            },
+          });
+        } else {
+          entries.push({
+            archivePath: download.archivePath,
+            open: async () => {
+              const object = await s3.send(
+                new GetObjectCommand({ Bucket: file.bucket, Key: file.object_key }),
+              );
+              if (!object.Body) throw new Error('пустое тело объекта');
+              return object.Body as Readable;
+            },
+          });
+        }
+      } catch (error) {
+        failures.push({
+          artifact: download.archivePath,
+          file: file.original_filename,
+          reason: error instanceof Error ? error.message : 'Не удалось получить ссылку',
+        });
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(ARTIFACT_LINK_CONCURRENCY, downloads.length) }, worker),
+  );
+  // Параллельные воркеры перемешивают порядок — возвращаем исходный.
+  const order = new Map(downloads.map((item, index) => [item.archivePath, index]));
+  entries.sort((left, right) => (order.get(left.archivePath) ?? 0) - (order.get(right.archivePath) ?? 0));
+  return { entries, failures };
+}
+
+/** Имя папки или файла внутри ZIP: без разделителей пути и управляющих символов. */
+function sanitizeArchiveSegment(value: string): string {
+  const cleaned = value
+    .normalize('NFC')
+    // eslint-disable-next-line no-control-regex
+    .replaceAll(/[\u0000-\u001f\u007f]/gu, '')
+    .replaceAll(/[/\\:*?"<>|]/gu, '_')
+    .replaceAll(/\s+/gu, ' ')
+    .trim()
+    .replace(/^\.+/u, '');
+  return cleaned.slice(0, 120) || 'файл';
+}
+
+function uniqueArchivePath(used: Set<string>, candidate: string): string {
+  if (!used.has(candidate)) {
+    used.add(candidate);
+    return candidate;
+  }
+  const dot = candidate.lastIndexOf('.');
+  const base = dot > candidate.lastIndexOf('/') ? candidate.slice(0, dot) : candidate;
+  const extension = dot > candidate.lastIndexOf('/') ? candidate.slice(dot) : '';
+  let counter = 2;
+  let next = `${base} (${counter})${extension}`;
+  while (used.has(next)) {
+    counter += 1;
+    next = `${base} (${counter})${extension}`;
+  }
+  used.add(next);
+  return next;
 }
 
 function exportDecisionLabel(values: readonly string[]): string {

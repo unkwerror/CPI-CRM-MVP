@@ -65,12 +65,15 @@ export interface ArtifactSummary {
   title: string;
   typeName: string;
   eventId?: string | null;
+  eventName?: string | null;
   status: string;
   latestVersionId?: string | null;
   latestVersionNumber?: number | null;
   latestVersionStatus?: string | null;
   submittedAt?: string | null;
   score?: number | null;
+  decision?: 'ACCEPTED' | 'REJECTED' | 'NEEDS_REVISION' | null;
+  reviewedAt?: string | null;
   authors?: { id: string; name: string }[];
 }
 
@@ -104,8 +107,59 @@ export interface EventSummary {
   status: string;
   startsAt?: string | null;
   endsAt?: string | null;
+  version: number;
   participantCount: number;
   artifactCount: number;
+}
+
+export interface EventArtifactFile {
+  id: string;
+  fileName: string;
+  sizeBytes: number | null;
+  status: string;
+  storageProvider: 'CRM' | 'LOCKER';
+}
+
+export interface EventArtifact {
+  id: string;
+  title: string;
+  typeName: string;
+  status: string;
+  latestVersionId: string | null;
+  latestVersionNumber: number | null;
+  latestVersionStatus: string | null;
+  submittedAt: string | null;
+  score: number | null;
+  decision: 'ACCEPTED' | 'REJECTED' | 'NEEDS_REVISION' | null;
+  reviewedAt: string | null;
+  reviewerName: string | null;
+  source: 'LOCKER' | 'CRM';
+  authors: { id: string; name: string; isParticipant: boolean }[];
+  files: EventArtifactFile[];
+  externalUrls: string[];
+  authorOutsideEvent: boolean;
+}
+
+export interface EventArtifactsResponse {
+  items: EventArtifact[];
+  participants: { id: string; canonicalFullName: string }[];
+}
+
+export interface EventDuplicateSuggestion {
+  id: string;
+  canonicalFullName: string;
+  telegram: string | null;
+  artifactCount: number;
+  createdAt: string | null;
+  /** Карточку спрятала гигиена ФИО — в реестре участников её не найти. */
+  hidden: boolean;
+  suggestions: {
+    id: string;
+    canonicalFullName: string;
+    telegram: string | null;
+    nameOverlap: boolean;
+    openCandidateId: string | null;
+  }[];
 }
 
 export interface EventParticipantSummary {
@@ -130,6 +184,7 @@ export interface EventDetail {
   status: string;
   startsAt?: string | null;
   endsAt?: string | null;
+  version: number;
   participants: EventParticipantSummary[];
 }
 
@@ -180,11 +235,28 @@ export interface ArtifactVersionDetail {
   } | null;
 }
 
+export type TaskStatus = 'OPEN' | 'IN_PROGRESS' | 'DONE' | 'CANCELLED';
+
 export interface TaskSummary {
   id: string;
   title: string;
-  status: 'OPEN' | 'DONE' | 'CANCELLED';
+  status: TaskStatus;
   dueAt?: string | null;
+  version?: number;
+  description?: string | null;
+  isNextStep?: boolean;
+  personId?: string | null;
+  personName?: string | null;
+  projectId?: string | null;
+  completedAt?: string | null;
+  result?: string | null;
+  createdAt?: string | null;
+  assigneeUserId?: string | null;
+  assigneeName?: string | null;
+}
+
+export interface TasksResponse {
+  items: TaskSummary[];
 }
 
 export interface SourceSummary {

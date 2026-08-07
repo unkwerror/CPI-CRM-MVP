@@ -5,17 +5,14 @@ import {
   SubmitArtifactVersionBody,
 } from '@cpi-crm/contracts';
 import {
-  ARTIFACT_QUALITY_CRITERIA,
   Permissions,
   Roles,
   SystemClock,
   assertSubmittedAtIsNotFuture,
-  computeArtifactScore,
   createContentFingerprint,
   hasPermission,
   isQualityArtifact,
   normalizeExternalUrl,
-  parseArtifactCriteria,
   parseQualityScore,
 } from '@cpi-crm/domain';
 import { Type } from '@sinclair/typebox';
@@ -54,12 +51,18 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
         querystring: Type.Object({
           q: Type.Optional(Type.String()),
           review: Type.Optional(Type.String()),
-          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+          eventId: Type.Optional(Type.String({ format: 'uuid' })),
+          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })),
         }),
       },
     },
     async (request) => {
-      const query = request.query as { q?: string; review?: string; limit?: number };
+      const query = request.query as {
+        q?: string;
+        review?: string;
+        eventId?: string;
+        limit?: number;
+      };
       const organization = await getOrganizationContext(app.pool);
       const values: unknown[] = [organization.id];
       const where = ["a.status <> 'VOIDED'", 'a.organization_id = $1'];
@@ -69,19 +72,27 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
           `(a.title ILIKE $${values.length} OR at.name ILIKE $${values.length} OR EXISTS (SELECT 1 FROM artifact_versions sv JOIN artifact_version_contributors sc ON sc.artifact_version_id = sv.id JOIN persons contributor ON contributor.id = sc.person_id JOIN persons sp ON sp.id = COALESCE(contributor.merged_into_person_id, contributor.id) WHERE sv.artifact_id = a.id AND (sp.canonical_full_name ILIKE $${values.length} OR contributor.canonical_full_name ILIKE $${values.length})))`,
         );
       }
+      if (query.eventId) {
+        values.push(query.eventId);
+        where.push(`a.event_id = $${values.length}`);
+      }
+      // Доска приёмки: «на проверке» — отправленная версия без финального решения.
       if (query.review === 'pending')
-        where.push('latest.version_id IS NOT NULL AND latest.score IS NULL');
+        where.push("latest.version_id IS NOT NULL AND latest.decision IS NULL");
+      if (query.review === 'reviewed') where.push('latest.decision IS NOT NULL');
       values.push(query.limit ?? 50);
       const result = await app.pool.query(
         `SELECT a.id, a.title, at.name AS type_name, a.status,
+                a.event_id, e.name AS event_name,
                 latest.version_id, latest.version_number, latest.version_status,
-                latest.submitted_at, latest.score,
+                latest.submitted_at, latest.score, latest.decision, latest.reviewed_at,
                 COALESCE(latest.authors, '[]'::jsonb) AS authors
            FROM artifacts a
            JOIN artifact_types at ON at.id = a.type_id
+           LEFT JOIN events e ON e.id = a.event_id
            LEFT JOIN LATERAL (
              SELECT av.id AS version_id, av.version_number, av.status AS version_status,
-                    av.submitted_at, ar.score,
+                    av.submitted_at, ar.score, ar.decision, ar.reviewed_at,
                     COALESCE(jsonb_agg(DISTINCT jsonb_build_object('id', p.id, 'name', p.canonical_full_name)) FILTER (WHERE avc.contribution_role = 'AUTHOR'), '[]'::jsonb) AS authors
                FROM artifact_versions av
                LEFT JOIN artifact_version_contributors avc ON avc.artifact_version_id = av.id
@@ -90,7 +101,7 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
                LEFT JOIN artifact_review_selections ars ON ars.artifact_version_id = av.id
                LEFT JOIN artifact_reviews ar ON ar.id = ars.current_final_review_id
               WHERE av.artifact_id = a.id AND av.status <> 'VOIDED'
-              GROUP BY av.id, ar.score
+              GROUP BY av.id, ar.score, ar.decision, ar.reviewed_at
               ORDER BY av.version_number DESC
               LIMIT 1
            ) latest ON true
@@ -105,11 +116,15 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
           title: row.title,
           typeName: row.type_name,
           status: row.status,
+          eventId: row.event_id,
+          eventName: row.event_name,
           latestVersionId: row.version_id,
           latestVersionNumber: row.version_number,
           latestVersionStatus: row.version_status,
           submittedAt: row.submitted_at?.toISOString() ?? null,
           score: row.score,
+          decision: row.decision,
+          reviewedAt: row.reviewed_at?.toISOString() ?? null,
           authors: row.authors,
         })),
       };
@@ -562,7 +577,7 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
       preHandler: app.requirePermission(Permissions.ARTIFACTS_REVIEW),
       schema: {
         tags: ['Артефакты'],
-        summary: 'Оценка по рубрикатору ЦПИ (5 критериев 0–2) или итоговый балл',
+        summary: 'Приёмка артефакта: принят или не принят, балл 0–10',
         params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
         body: ReviewArtifactVersionBody,
       },
@@ -570,36 +585,13 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
     async (request, reply) => {
       const versionId = (request.params as { id: string }).id;
       const body = request.body as {
-        score?: number;
-        criteria?: Record<string, number>;
-        decision: 'NEEDS_REVISION' | 'ACCEPTED' | 'REJECTED';
+        score: number;
+        decision: 'ACCEPTED' | 'REJECTED';
         comment?: string;
       };
-      // Рубрикатор ЦПИ: при наличии критериев Q_artifact = их сумма (0–10);
-      // ручной итоговый балл остаётся для совместимости.
-      const criteria = body.criteria === undefined ? null : parseArtifactCriteria(body.criteria);
-      let score: number;
-      if (criteria !== null) {
-        score = computeArtifactScore(criteria);
-      } else if (body.score !== undefined) {
-        score = parseQualityScore(body.score);
-      } else {
-        throw new HttpProblem(400, 'Укажите критерии рубрикатора или итоговый балл');
-      }
-      // Приёмка заблокирована при нуле по релевантности или проверяемости.
-      if (body.decision === 'ACCEPTED' && !isQualityArtifact(score, criteria) && criteria !== null) {
-        const blocked = ARTIFACT_QUALITY_CRITERIA.filter(
-          (criterion) => criterion.blocking && criteria[criterion.code] === 0,
-        );
-        if (blocked.length > 0) {
-          throw new HttpProblem(
-            400,
-            `Нельзя принять артефакт с нулём по критериям: ${blocked
-              .map((criterion) => criterion.label.toLocaleLowerCase('ru'))
-              .join(', ')}`,
-          );
-        }
-      }
+      const score = parseQualityScore(body.score);
+      // Новые ревью пишутся без рубрикатора: колонка criteria остаётся под архив.
+      const criteria = null;
       const created = await transaction(app.pool, async (client) => {
         const version = await client.query(
           'SELECT id FROM artifact_versions WHERE id = $1 AND status = $2 FOR SHARE',
@@ -643,8 +635,7 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
         return {
           id: review.rows[0]!.id,
           score,
-          criteria,
-          isQuality: isQualityArtifact(score, criteria),
+          isQuality: isQualityArtifact(body.decision),
           decision: body.decision,
         };
       });
@@ -686,6 +677,144 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
           reason: body.reason,
         });
         return { id: versionId, status: 'VOIDED' };
+      });
+    },
+  );
+
+  app.post(
+    '/artifacts/:id/reassign-author',
+    {
+      preHandler: app.requirePermission(Permissions.ARTIFACTS_WRITE),
+      schema: {
+        tags: ['Артефакты'],
+        summary: 'Привязать артефакт к участнику: перенести роль автора',
+        params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
+        body: Type.Object(
+          {
+            personId: Type.String({ format: 'uuid' }),
+            /** Оставить прежних авторов соавторами вместо снятия роли. */
+            keepPreviousAsContributor: Type.Optional(Type.Boolean()),
+            reason: Type.Optional(Type.String({ maxLength: 2000 })),
+          },
+          { additionalProperties: false },
+        ),
+      },
+    },
+    async (request) => {
+      const artifactId = (request.params as { id: string }).id;
+      const body = request.body as {
+        personId: string;
+        keepPreviousAsContributor?: boolean;
+        reason?: string;
+      };
+      const organization = await getOrganizationContext(app.pool);
+
+      return transaction(app.pool, async (client) => {
+        const artifact = await client.query<{ id: string; title: string; event_id: string | null }>(
+          `SELECT id, title, event_id
+             FROM artifacts
+            WHERE id = $1 AND organization_id = $2 AND archived_at IS NULL AND status <> 'VOIDED'
+            FOR UPDATE`,
+          [artifactId, organization.id],
+        );
+        if (!artifact.rows[0]) throw new HttpProblem(404, 'Артефакт не найден');
+
+        const person = await client.query<{ canonical_id: string; name: string }>(
+          `SELECT COALESCE(target.merged_into_person_id, target.id) AS canonical_id,
+                  canonical.canonical_full_name AS name
+             FROM persons target
+             JOIN persons canonical
+               ON canonical.id = COALESCE(target.merged_into_person_id, target.id)
+            WHERE target.id = $1 AND target.organization_id = $2 AND target.archived_at IS NULL
+              AND canonical.archived_at IS NULL`,
+          [body.personId, organization.id],
+        );
+        const newAuthor = person.rows[0];
+        if (!newAuthor) throw new HttpProblem(400, 'Участник не найден');
+
+        const versions = await client.query<{ id: string }>(
+          `SELECT id FROM artifact_versions
+            WHERE artifact_id = $1 AND status <> 'VOIDED'
+            ORDER BY version_number
+            FOR UPDATE`,
+          [artifactId],
+        );
+        if (versions.rowCount === 0)
+          throw new HttpProblem(409, 'У артефакта нет действующих версий');
+
+        const previousAuthors = await client.query<{ person_id: string }>(
+          `SELECT DISTINCT contributor.person_id
+             FROM artifact_version_contributors contributor
+             JOIN artifact_versions version ON version.id = contributor.artifact_version_id
+            WHERE version.artifact_id = $1
+              AND version.status <> 'VOIDED'
+              AND contributor.contribution_role = 'AUTHOR'`,
+          [artifactId],
+        );
+        const previousIds = previousAuthors.rows.map((row) => row.person_id);
+        if (previousIds.length === 1 && previousIds[0] === newAuthor.canonical_id) {
+          throw new HttpProblem(409, 'Этот участник уже указан автором артефакта');
+        }
+
+        for (const version of versions.rows) {
+          if (body.keepPreviousAsContributor) {
+            await client.query(
+              `UPDATE artifact_version_contributors
+                  SET contribution_role = 'CONTRIBUTOR'
+                WHERE artifact_version_id = $1
+                  AND contribution_role = 'AUTHOR'
+                  AND person_id <> $2`,
+              [version.id, newAuthor.canonical_id],
+            );
+          } else {
+            await client.query(
+              `DELETE FROM artifact_version_contributors
+                WHERE artifact_version_id = $1
+                  AND contribution_role = 'AUTHOR'
+                  AND person_id <> $2`,
+              [version.id, newAuthor.canonical_id],
+            );
+          }
+          await client.query(
+            `INSERT INTO artifact_version_contributors (artifact_version_id, person_id, contribution_role)
+             VALUES ($1, $2, 'AUTHOR')
+             ON CONFLICT (artifact_version_id, person_id)
+             DO UPDATE SET contribution_role = 'AUTHOR'`,
+            [version.id, newAuthor.canonical_id],
+          );
+        }
+
+        // Инвариант: у артефакта с мероприятием хотя бы один автор — его участник.
+        if (artifact.rows[0].event_id) {
+          await assertArtifactEventHasAuthor(client, artifact.rows[0].event_id, [
+            newAuthor.canonical_id,
+          ]);
+        }
+
+        const affected = new Set([...previousIds, newAuthor.canonical_id]);
+        for (const personId of affected) {
+          await recalculatePersonLifecycle(client, personId, 'RECONCILIATION');
+        }
+
+        await writeAudit(client, {
+          actor: request.authUser!,
+          requestId: request.id,
+          action: 'artifact.author_reassigned',
+          entityType: 'artifact',
+          entityId: artifactId,
+          before: { authorIds: previousIds },
+          after: {
+            authorIds: [newAuthor.canonical_id],
+            keepPreviousAsContributor: body.keepPreviousAsContributor ?? false,
+          },
+          ...(body.reason ? { reason: body.reason } : {}),
+        });
+
+        return {
+          id: artifactId,
+          author: { id: newAuthor.canonical_id, name: newAuthor.name },
+          previousAuthorIds: previousIds,
+        };
       });
     },
   );

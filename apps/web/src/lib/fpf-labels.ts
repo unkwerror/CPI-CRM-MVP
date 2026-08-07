@@ -3,6 +3,7 @@ import type {
   AgreementType,
   DealStatus,
   DealType,
+  ExpenseCategory,
   PartnerKind,
   PartnerStatus,
   ProductStatus,
@@ -58,6 +59,31 @@ export const DEAL_STATUS_LABELS: Record<DealStatus, string> = {
   WON: 'Выиграна',
   LOST: 'Проиграна',
 };
+
+export const EXPENSE_CATEGORY_LABELS: Record<ExpenseCategory, string> = {
+  VARIABLE: 'Переменные',
+  OPEX: 'Операционные',
+  BACK_OFFICE: 'Бэк-офис',
+  ACQUISITION: 'Привлечение',
+  ACTIVATION: 'Активация',
+};
+
+export const EXPENSE_CATEGORY_HINTS: Record<ExpenseCategory, string> = {
+  VARIABLE:
+    'Возникают только из-за конкретной сделки/мероприятия: подрядчик, материалы, призовой фонд',
+  OPEX: 'Содержание системы: команда, регулярные сервисы, административные процессы',
+  BACK_OFFICE: 'Документы, заявки, бюджеты, сопровождение',
+  ACQUISITION: 'Привлечение новых строк в базу: реклама, информационная политика',
+  ACTIVATION: 'Трекинг, эксперты, активационные сессии, инструменты',
+};
+
+export const EXPENSE_CATEGORY_ORDER: ExpenseCategory[] = [
+  'VARIABLE',
+  'OPEX',
+  'BACK_OFFICE',
+  'ACQUISITION',
+  'ACTIVATION',
+];
 
 export const INTERACTION_CHANNEL_LABELS: Record<string, string> = {
   EMAIL: 'Email',

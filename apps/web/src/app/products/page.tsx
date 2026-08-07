@@ -1,17 +1,64 @@
 'use client';
 
-import { Package, Plus, RotateCcw, X } from 'lucide-react';
+import { PackageIcon, PlusIcon } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { Suspense, type FormEvent, useCallback, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useState } from 'react';
+import { toast } from 'sonner';
 
+import { DataToolbar, ToolbarReset, ToolbarSelect, ToolbarSpacer } from '@/components/data-toolbar';
 import { EmptyState } from '@/components/empty-state';
-import { ApiError, api, formatDate, formatMoney } from '@/lib/api';
+import { PageHeader, PageStack } from '@/components/page-header';
+import { CloseProductDialog, ProductDialog } from '@/components/product-dialog';
+import { Badge, type badgeVariants } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Skeleton } from '@/components/ui/skeleton';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+  TableWrapper,
+} from '@/components/ui/table';
+import { useCurrentUser } from '@/hooks/use-current-user';
+import { api, apiErrorMessage, formatDate, formatMoney } from '@/lib/api';
 import { PRODUCT_STATUS_LABELS } from '@/lib/fpf-labels';
-import type { CurrentUser, ProductStatus, ProductSummary } from '@/lib/types';
+import type { ProductStatus, ProductSummary } from '@/lib/types';
+
+type BadgeVariant = NonNullable<Parameters<typeof badgeVariants>[0]>['variant'];
+
+const PRODUCT_STATUS_VARIANTS: Record<ProductStatus, BadgeVariant> = {
+  IDEA: 'soft-info',
+  PACKAGING: 'soft-warning',
+  ON_SALE: 'soft-success',
+  CLOSED: 'soft-muted',
+};
+
+const PRODUCT_STATUS_ORDER: ProductStatus[] = ['IDEA', 'PACKAGING', 'ON_SALE', 'CLOSED'];
+
+/** Radix Select не допускает пустое значение пункта, поэтому «любой статус» — отдельный ключ. */
+const ANY_STATUS = 'ALL';
 
 export default function ProductsPage() {
   return (
-    <Suspense fallback={<div className="page-loading">Загружаем продукты…</div>}>
+    <Suspense
+      fallback={
+        <PageStack>
+          <Skeleton className="h-16 w-full max-w-xl" />
+          <Skeleton className="h-16 w-full" />
+          <Skeleton className="h-72 w-full" />
+        </PageStack>
+      }
+    >
       <ProductsContent />
     </Suspense>
   );
@@ -20,12 +67,14 @@ export default function ProductsPage() {
 function ProductsContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { can } = useCurrentUser();
   const [items, setItems] = useState<ProductSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [canWrite, setCanWrite] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [closing, setClosing] = useState<ProductSummary | null>(null);
+
+  const canWrite = can('products.write');
 
   const loadProducts = useCallback(async () => {
     setLoading(true);
@@ -37,7 +86,7 @@ function ProductsContent() {
       );
       setItems(response.items);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Не удалось загрузить продукты');
+      setError(apiErrorMessage(caught, 'Не удалось загрузить продукты'));
     } finally {
       setLoading(false);
     }
@@ -46,12 +95,6 @@ function ProductsContent() {
   useEffect(() => {
     void loadProducts();
   }, [loadProducts]);
-
-  useEffect(() => {
-    void api<CurrentUser>('/auth/me')
-      .then((user) => setCanWrite(user.permissions.includes('products.write')))
-      .catch(() => setCanWrite(false));
-  }, []);
 
   async function changeStatus(product: ProductSummary, status: ProductStatus) {
     if (status === 'CLOSED') {
@@ -63,109 +106,105 @@ function ProductsContent() {
         method: 'PATCH',
         body: JSON.stringify({ version: product.version, status }),
       });
+      toast.success(`«${product.name}»: ${PRODUCT_STATUS_LABELS[status].toLowerCase()}`);
       await loadProducts();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Не удалось изменить статус');
+      toast.error(apiErrorMessage(caught, 'Не удалось изменить статус'));
     }
   }
 
   const statusFilter = searchParams.get('status') ?? '';
+  const columnCount = canWrite ? 7 : 6;
 
   return (
-    <div className="page-stack">
-      <section className="page-heading page-heading--split">
-        <div>
-          <p className="eyebrow">Упаковка механик в продаваемый продукт</p>
-          <h1>Продукты</h1>
-          <p>Описание, документация и модель реализации. Если продукт не продаётся — закрывается.</p>
-        </div>
-        {canWrite && (
-          <div className="heading-actions">
-            <button className="button button--primary" onClick={() => setShowCreate(true)}>
-              <Plus size={17} /> Новый продукт
-            </button>
-          </div>
-        )}
-      </section>
+    <PageStack>
+      <PageHeader
+        eyebrow="Упаковка механик в продаваемый продукт"
+        title="Продукты"
+        description="Описание, документация и модель реализации. Если продукт не продаётся — закрывается."
+        actions={
+          canWrite ? (
+            <Button onClick={() => setShowCreate(true)}>
+              <PlusIcon /> Новый продукт
+            </Button>
+          ) : undefined
+        }
+      />
 
-      <section className="registry-toolbar registry-toolbar--filters">
-        <select
-          aria-label="Статус продукта"
-          className="select-control"
-          value={statusFilter}
-          onChange={(event) =>
-            router.push(event.target.value ? `/products?status=${event.target.value}` : '/products')
+      <DataToolbar>
+        <ToolbarSelect
+          label="Статус"
+          value={statusFilter || ANY_STATUS}
+          onChange={(value) =>
+            router.push(value === ANY_STATUS ? '/products' : `/products?status=${value}`)
           }
-        >
-          <option value="">Любой статус</option>
-          {Object.entries(PRODUCT_STATUS_LABELS).map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </select>
-        {statusFilter && (
-          <button
-            className="button button--secondary registry-filter-reset"
-            type="button"
-            onClick={() => router.push('/products')}
-          >
-            <RotateCcw size={15} /> Сбросить
-          </button>
-        )}
-        <span className="registry-result-count">Найдено: {items.length}</span>
-      </section>
+          options={[
+            { value: ANY_STATUS, label: 'Любой статус' },
+            ...PRODUCT_STATUS_ORDER.map((value) => ({
+              value,
+              label: PRODUCT_STATUS_LABELS[value],
+            })),
+          ]}
+        />
+        {statusFilter && <ToolbarReset onClick={() => router.push('/products')} />}
+        <ToolbarSpacer />
+        <span className="text-muted-foreground pb-1.5 text-[13px]">
+          Найдено: <span className="text-foreground font-medium tabular">{items.length}</span>
+        </span>
+      </DataToolbar>
 
-      <section className="table-panel">
+      <Card className="overflow-hidden">
         {error ? (
           <EmptyState title="Ошибка загрузки" text={error} />
         ) : !loading && items.length === 0 ? (
           <EmptyState
+            icon={PackageIcon}
             title="Продукты не найдены"
             text="Упакуйте первую механику (ивент, активацию, образование) в продукт."
           />
         ) : (
-          <div className="table-scroll">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Продукт</th>
-                  <th>Модель реализации</th>
-                  <th>Статус</th>
-                  <th className="number-cell">Цена</th>
-                  <th className="number-cell">Сделок</th>
-                  <th className="number-cell">Выручка</th>
+          <TableWrapper>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Продукт</TableHead>
+                  <TableHead>Модель реализации</TableHead>
+                  <TableHead>Статус</TableHead>
+                  <TableHead className="text-right">Цена</TableHead>
+                  <TableHead className="text-right">Сделок</TableHead>
+                  <TableHead className="text-right">Выручка</TableHead>
                   {canWrite && (
-                    <th>
+                    <TableHead>
                       <span className="sr-only">Действия</span>
-                    </th>
+                    </TableHead>
                   )}
-                </tr>
-              </thead>
-              <tbody>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {loading
                   ? Array.from({ length: 6 }, (_, index) => (
-                      <tr className="skeleton-row" key={index}>
-                        <td colSpan={canWrite ? 7 : 6}>
-                          <span />
-                        </td>
-                      </tr>
+                      <TableRow key={index}>
+                        <TableCell colSpan={columnCount}>
+                          <Skeleton className="h-5 w-full" />
+                        </TableCell>
+                      </TableRow>
                     ))
                   : items.map((product) => (
-                      <tr key={product.id}>
-                        <td>
-                          <span className="event-name-cell">
-                            <span className="table-file-icon">
-                              <Package size={16} />
+                      <TableRow key={product.id}>
+                        <TableCell>
+                          <div className="flex items-start gap-2.5">
+                            <span className="bg-muted text-muted-foreground mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md">
+                              <PackageIcon className="size-4" />
                             </span>
-                            <span>
-                              <strong>{product.name}</strong>
+                            <div className="min-w-0">
+                              <span className="font-medium">{product.name}</span>
                               {product.documentationUrl && (
                                 <>
                                   {' '}
                                   <a
+                                    className="text-primary text-[13px] hover:underline"
                                     href={product.documentationUrl}
-                                    rel="noreferrer"
+                                    rel="noopener noreferrer"
                                     target="_blank"
                                   >
                                     документация
@@ -173,54 +212,65 @@ function ProductsContent() {
                                 </>
                               )}
                               {product.status === 'CLOSED' && product.closeReason && (
-                                <small style={{ display: 'block' }}>
+                                <p className="text-muted-foreground text-xs">
                                   Закрыт {formatDate(product.closedAt)}: {product.closeReason}
-                                </small>
+                                </p>
                               )}
-                            </span>
-                          </span>
-                        </td>
-                        <td>{product.deliveryModel ?? '—'}</td>
-                        <td>
-                          <span className="event-status">
+                            </div>
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-muted-foreground max-w-72 truncate">
+                          {product.deliveryModel ?? '—'}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={PRODUCT_STATUS_VARIANTS[product.status]}>
                             {PRODUCT_STATUS_LABELS[product.status]}
-                          </span>
-                        </td>
-                        <td className="number-cell">
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-right tabular">
                           {product.price === null || product.price === undefined
                             ? '—'
                             : formatMoney(product.price)}
-                        </td>
-                        <td className="number-cell">{product.dealCount}</td>
-                        <td className="number-cell">{formatMoney(product.wonAmount)}</td>
+                        </TableCell>
+                        <TableCell className="text-right tabular">{product.dealCount}</TableCell>
+                        <TableCell className="text-right tabular">
+                          {formatMoney(product.wonAmount)}
+                        </TableCell>
                         {canWrite && (
-                          <td>
-                            <select
-                              aria-label={`Статус «${product.name}»`}
-                              className="select-control"
+                          <TableCell className="text-right">
+                            <Select
                               value={product.status}
-                              onChange={(event) =>
-                                void changeStatus(product, event.target.value as ProductStatus)
+                              onValueChange={(value) =>
+                                void changeStatus(product, value as ProductStatus)
                               }
                             >
-                              {Object.entries(PRODUCT_STATUS_LABELS).map(([value, label]) => (
-                                <option key={value} value={value}>
-                                  {label}
-                                </option>
-                              ))}
-                            </select>
-                          </td>
+                              <SelectTrigger
+                                size="sm"
+                                aria-label={`Статус «${product.name}»`}
+                                className="ml-auto w-40"
+                              >
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {PRODUCT_STATUS_ORDER.map((value) => (
+                                  <SelectItem key={value} value={value}>
+                                    {PRODUCT_STATUS_LABELS[value]}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </TableCell>
                         )}
-                      </tr>
+                      </TableRow>
                     ))}
-              </tbody>
-            </table>
-          </div>
+              </TableBody>
+            </Table>
+          </TableWrapper>
         )}
-      </section>
+      </Card>
 
       {showCreate && (
-        <CreateProductDialog
+        <ProductDialog
           onClose={() => setShowCreate(false)}
           onCreated={() => {
             setShowCreate(false);
@@ -238,277 +288,6 @@ function ProductsContent() {
           }}
         />
       )}
-    </div>
-  );
-}
-
-function CreateProductDialog({
-  onClose,
-  onCreated,
-}: {
-  onClose: () => void;
-  onCreated: () => void;
-}) {
-  const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
-  const [deliveryModel, setDeliveryModel] = useState('');
-  const [documentationUrl, setDocumentationUrl] = useState('');
-  const [status, setStatus] = useState<'IDEA' | 'PACKAGING' | 'ON_SALE'>('IDEA');
-  const [price, setPrice] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === 'Escape' && !saving) onClose();
-    }
-    window.addEventListener('keydown', closeOnEscape);
-    return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [onClose, saving]);
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setError(null);
-    setSaving(true);
-    try {
-      await api('/products', {
-        method: 'POST',
-        body: JSON.stringify({
-          name: name.trim(),
-          status,
-          ...(description.trim() ? { description: description.trim() } : {}),
-          ...(deliveryModel.trim() ? { deliveryModel: deliveryModel.trim() } : {}),
-          ...(documentationUrl.trim() ? { documentationUrl: documentationUrl.trim() } : {}),
-          ...(price ? { price: Number(price) } : {}),
-        }),
-      });
-      onCreated();
-    } catch (caught) {
-      setError(
-        caught instanceof ApiError
-          ? (caught.detail ?? caught.message)
-          : 'Не удалось создать продукт',
-      );
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={() => !saving && onClose()}>
-      <section
-        aria-modal="true"
-        className="dialog"
-        onMouseDown={(event) => event.stopPropagation()}
-        role="dialog"
-      >
-        <header className="dialog__header">
-          <div>
-            <p className="eyebrow">База продуктов</p>
-            <h2>Новый продукт</h2>
-          </div>
-          <button
-            aria-label="Закрыть"
-            className="icon-button"
-            disabled={saving}
-            onClick={onClose}
-            type="button"
-          >
-            <X size={18} />
-          </button>
-        </header>
-        <form onSubmit={submit}>
-          <div className="form-grid">
-            <label className="form-field form-field--full">
-              <span>Название *</span>
-              <input
-                autoFocus
-                maxLength={500}
-                minLength={2}
-                onChange={(event) => setName(event.target.value)}
-                placeholder="Например, Хакатон под ключ"
-                required
-                value={name}
-              />
-            </label>
-            <label className="form-field">
-              <span>Статус</span>
-              <select
-                onChange={(event) =>
-                  setStatus(event.target.value as 'IDEA' | 'PACKAGING' | 'ON_SALE')
-                }
-                value={status}
-              >
-                <option value="IDEA">Идея</option>
-                <option value="PACKAGING">Упаковка</option>
-                <option value="ON_SALE">В продаже</option>
-              </select>
-            </label>
-            <label className="form-field">
-              <span>Цена, ₽</span>
-              <input
-                min={0}
-                onChange={(event) => setPrice(event.target.value)}
-                step="0.01"
-                type="number"
-                value={price}
-              />
-            </label>
-            <label className="form-field form-field--full">
-              <span>Модель реализации</span>
-              <input
-                maxLength={2000}
-                onChange={(event) => setDeliveryModel(event.target.value)}
-                placeholder="Кто и как проводит, что входит в поставку"
-                value={deliveryModel}
-              />
-            </label>
-            <label className="form-field form-field--full">
-              <span>Ссылка на документацию</span>
-              <input
-                maxLength={1000}
-                onChange={(event) => setDocumentationUrl(event.target.value)}
-                placeholder="https://…"
-                value={documentationUrl}
-              />
-            </label>
-            <label className="form-field form-field--full">
-              <span>Описание</span>
-              <textarea
-                maxLength={10_000}
-                onChange={(event) => setDescription(event.target.value)}
-                rows={3}
-                value={description}
-              />
-            </label>
-          </div>
-          {error && (
-            <p aria-live="polite" className="form-error">
-              {error}
-            </p>
-          )}
-          <footer className="dialog__footer">
-            <button
-              className="button button--secondary"
-              disabled={saving}
-              onClick={onClose}
-              type="button"
-            >
-              Отмена
-            </button>
-            <button
-              className="button button--primary"
-              disabled={saving || name.trim().length < 2}
-              type="submit"
-            >
-              {saving ? 'Создаём…' : 'Создать продукт'}
-            </button>
-          </footer>
-        </form>
-      </section>
-    </div>
-  );
-}
-
-function CloseProductDialog({
-  product,
-  onClose,
-  onClosed,
-}: {
-  product: ProductSummary;
-  onClose: () => void;
-  onClosed: () => void;
-}) {
-  const [reason, setReason] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setError(null);
-    setSaving(true);
-    try {
-      await api(`/products/${product.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          version: product.version,
-          status: 'CLOSED',
-          closeReason: reason.trim(),
-        }),
-      });
-      onClosed();
-    } catch (caught) {
-      setError(
-        caught instanceof ApiError
-          ? (caught.detail ?? caught.message)
-          : 'Не удалось закрыть продукт',
-      );
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={() => !saving && onClose()}>
-      <section
-        aria-modal="true"
-        className="dialog"
-        onMouseDown={(event) => event.stopPropagation()}
-        role="dialog"
-      >
-        <header className="dialog__header">
-          <div>
-            <p className="eyebrow">Продукт не продаётся</p>
-            <h2>Закрыть «{product.name}»</h2>
-          </div>
-          <button
-            aria-label="Закрыть"
-            className="icon-button"
-            disabled={saving}
-            onClick={onClose}
-            type="button"
-          >
-            <X size={18} />
-          </button>
-        </header>
-        <form onSubmit={submit}>
-          <div className="form-grid">
-            <label className="form-field form-field--full">
-              <span>Причина закрытия *</span>
-              <textarea
-                autoFocus
-                maxLength={2000}
-                minLength={3}
-                onChange={(event) => setReason(event.target.value)}
-                placeholder="Почему продукт не продался и что решили"
-                required
-                rows={3}
-                value={reason}
-              />
-            </label>
-          </div>
-          {error && (
-            <p aria-live="polite" className="form-error">
-              {error}
-            </p>
-          )}
-          <footer className="dialog__footer">
-            <button
-              className="button button--secondary"
-              disabled={saving}
-              onClick={onClose}
-              type="button"
-            >
-              Отмена
-            </button>
-            <button
-              className="button button--primary"
-              disabled={saving || reason.trim().length < 3}
-              type="submit"
-            >
-              {saving ? 'Закрываем…' : 'Закрыть продукт'}
-            </button>
-          </footer>
-        </form>
-      </section>
-    </div>
+    </PageStack>
   );
 }

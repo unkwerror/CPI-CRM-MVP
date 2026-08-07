@@ -560,7 +560,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
           [canonical],
         ),
         app.pool.query(
-          `SELECT id, title, status, due_at FROM tasks WHERE person_id IN ${clusterSql} AND archived_at IS NULL ORDER BY status = 'OPEN' DESC, due_at NULLS LAST`,
+          `SELECT id, title, status, due_at FROM tasks WHERE person_id IN ${clusterSql} AND archived_at IS NULL ORDER BY status NOT IN ('DONE', 'CANCELLED') DESC, due_at NULLS LAST`,
           [canonical],
         ),
         app.pool.query(
@@ -639,7 +639,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
           commercial: boolean;
         }>(
           `WITH reviewed AS (
-               SELECT DISTINCT ar.id, ar.score, ar.criteria, ar.decision, av.submitted_at
+               SELECT DISTINCT ar.id, ar.score, ar.decision, av.submitted_at
                  FROM artifact_version_contributors avc
                  JOIN artifact_versions av ON av.id = avc.artifact_version_id
                  JOIN artifact_review_selections sel ON sel.artifact_version_id = av.id
@@ -651,10 +651,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
                   AND ar.voided_at IS NULL AND ar.status = 'FINAL' AND ar.score IS NOT NULL
              ),
              quality AS (
-               SELECT submitted_at FROM reviewed
-                WHERE decision = 'ACCEPTED' AND score >= 7
-                  AND (criteria IS NULL
-                       OR ((criteria->>'relevance')::int > 0 AND (criteria->>'verifiability')::int > 0))
+               SELECT submitted_at FROM reviewed WHERE decision = 'ACCEPTED'
              )
              SELECT
                (SELECT avg(score)::text FROM reviewed) AS avg_score,

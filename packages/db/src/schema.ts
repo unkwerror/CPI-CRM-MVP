@@ -145,7 +145,12 @@ export const interactionDirectionEnum = pgEnum('interaction_direction', [
   'OUTBOUND',
   'INTERNAL',
 ]);
-export const taskStatusEnum = pgEnum('task_status', ['OPEN', 'DONE', 'CANCELLED']);
+export const taskStatusEnum = pgEnum('task_status', [
+  'OPEN',
+  'IN_PROGRESS',
+  'DONE',
+  'CANCELLED',
+]);
 export const importRunModeEnum = pgEnum('import_run_mode', ['DRY_RUN', 'COMMIT', 'REVERT']);
 export const importRunStatusEnum = pgEnum('import_run_status', [
   'QUEUED',
@@ -1240,8 +1245,11 @@ export const tasks = pgTable(
     uniqueIndex('tasks_one_open_next_step_per_person_uidx')
       .on(table.personId)
       .where(
-        sql`${table.personId} is not null and ${table.isNextStep} and ${table.status} = 'OPEN' and ${table.archivedAt} is null`,
+        sql`${table.personId} is not null and ${table.isNextStep} and ${table.status} <> 'DONE' and ${table.status} <> 'CANCELLED' and ${table.archivedAt} is null`,
       ),
+    index('tasks_board_idx')
+      .on(table.status, table.dueAt)
+      .where(sql`${table.archivedAt} is null`),
     check(
       'tasks_subject_check',
       sql`${table.personId} is not null or ${table.projectId} is not null`,

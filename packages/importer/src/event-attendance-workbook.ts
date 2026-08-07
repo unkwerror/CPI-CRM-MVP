@@ -28,6 +28,23 @@ export interface AttendanceWorkbookResult {
   readonly invalidPeople: readonly InvalidAttendanceWorkbookPerson[];
 }
 
+/**
+ * Артефакт участника в выгрузке.
+ *
+ * `archivePath` — относительный путь внутри ZIP-пакета; по нему в таблице
+ * строится формула HYPERLINK, которая работает после распаковки архива.
+ */
+export interface EventParticipantWorkbookArtifact {
+  readonly title: string;
+  readonly typeName: string;
+  readonly score?: number | null;
+  readonly decision?: string | null;
+  readonly submittedAt?: string | null;
+  readonly fileName?: string | null;
+  readonly archivePath?: string | null;
+  readonly externalUrl?: string | null;
+}
+
 export interface EventParticipantWorkbookRow {
   readonly number: number;
   readonly lastName: string;
@@ -41,6 +58,7 @@ export interface EventParticipantWorkbookRow {
   readonly attended?: boolean | null;
   readonly decision?: string | null;
   readonly eventName: string;
+  readonly artifacts?: readonly EventParticipantWorkbookArtifact[];
 }
 
 function normalizedHeader(value: string): string {
@@ -151,6 +169,65 @@ function safeSpreadsheetText(value: string | null | undefined): string {
   return /^\s*[=+\-@]/u.test(value) ? `'${value}` : value;
 }
 
+const HEADER_FILL: ExcelJS.FillPattern = {
+  type: 'pattern',
+  pattern: 'solid',
+  fgColor: { argb: 'FF335C4A' },
+};
+
+function styleSheet(worksheet: ExcelJS.Worksheet, widths: readonly number[]): void {
+  const lastColumn = String.fromCharCode(64 + widths.length);
+  worksheet.autoFilter = { from: 'A1', to: `${lastColumn}${Math.max(1, worksheet.rowCount)}` };
+  const header = worksheet.getRow(1);
+  header.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  header.fill = HEADER_FILL;
+  header.alignment = { vertical: 'middle', wrapText: true };
+  header.height = 34;
+  worksheet.columns.forEach((column, index) => {
+    column.width = widths[index] ?? 20;
+  });
+  for (let rowNumber = 2; rowNumber <= worksheet.rowCount; rowNumber += 1) {
+    worksheet.getRow(rowNumber).alignment = { vertical: 'top', wrapText: true };
+  }
+}
+
+/**
+ * Относительная ссылка на файл внутри распакованного архива.
+ *
+ * В формате XLSX разделитель аргументов всегда запятая, независимо от того,
+ * что показывает Excel в русской локали.
+ */
+function hyperlinkCell(archivePath: string, label: string): ExcelJS.CellFormulaValue {
+  const escape = (value: string) => value.replaceAll('"', '""');
+  return {
+    formula: `HYPERLINK("${escape(archivePath)}","${escape(label)}")`,
+    result: label,
+  };
+}
+
+function artifactSummary(artifacts: readonly EventParticipantWorkbookArtifact[]): string {
+  return artifacts.map((artifact) => artifact.title).join('\n');
+}
+
+function scoreSummary(artifacts: readonly EventParticipantWorkbookArtifact[]): string {
+  return artifacts
+    .map((artifact) =>
+      artifact.score === null || artifact.score === undefined ? '—' : String(artifact.score),
+    )
+    .join('\n');
+}
+
+function decisionSummary(artifacts: readonly EventParticipantWorkbookArtifact[]): string {
+  return artifacts.map((artifact) => reviewDecisionLabel(artifact.decision)).join('\n');
+}
+
+function reviewDecisionLabel(decision: string | null | undefined): string {
+  if (decision === 'ACCEPTED') return 'Принят';
+  if (decision === 'REJECTED') return 'Не принят';
+  if (decision === 'NEEDS_REVISION') return 'На доработку';
+  return 'Не оценён';
+}
+
 export async function createEventParticipantsWorkbook(input: {
   readonly eventName: string;
   readonly rows: readonly EventParticipantWorkbookRow[];
@@ -174,10 +251,16 @@ export async function createEventParticipantsWorkbook(input: {
     'Посещал мероприятие',
     'Статус заявки',
     'Мероприятия',
+    'Артефакты',
+    'Оценка',
+    'Решение',
+    'Файл',
   ];
   worksheet.addRow(headers);
   for (const row of input.rows) {
-    worksheet.addRow([
+    const artifacts = row.artifacts ?? [];
+    const linkable = artifacts.find((artifact) => artifact.archivePath);
+    const added = worksheet.addRow([
       row.number,
       safeSpreadsheetText(row.canonicalFullName),
       safeSpreadsheetText(row.lastName),
@@ -190,21 +273,58 @@ export async function createEventParticipantsWorkbook(input: {
       row.attended === true ? 'Да' : row.attended === false ? 'Нет' : '',
       safeSpreadsheetText(row.decision),
       safeSpreadsheetText(row.eventName),
+      artifactSummary(artifacts),
+      scoreSummary(artifacts),
+      decisionSummary(artifacts),
+      linkable?.archivePath
+        ? hyperlinkCell(linkable.archivePath, linkable.fileName ?? 'Открыть файл')
+        : '',
     ]);
+    if (linkable?.archivePath) {
+      added.getCell(16).font = { color: { argb: 'FF1F5FBF' }, underline: true };
+    }
   }
-  worksheet.autoFilter = { from: 'A1', to: `L${Math.max(1, worksheet.rowCount)}` };
-  const header = worksheet.getRow(1);
-  header.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-  header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF335C4A' } };
-  header.alignment = { vertical: 'middle', wrapText: true };
-  header.height = 34;
-  const widths = [8, 38, 22, 20, 24, 30, 22, 24, 18, 24, 20, 42];
-  worksheet.columns.forEach((column, index) => {
-    column.width = widths[index] ?? 20;
-  });
-  for (let rowNumber = 2; rowNumber <= worksheet.rowCount; rowNumber += 1) {
-    worksheet.getRow(rowNumber).alignment = { vertical: 'top', wrapText: true };
+  styleSheet(worksheet, [8, 38, 22, 20, 24, 30, 22, 24, 18, 24, 20, 42, 40, 12, 18, 34]);
+
+  const allArtifacts = input.rows.flatMap((row) =>
+    (row.artifacts ?? []).map((artifact) => ({ row, artifact })),
+  );
+  if (allArtifacts.length > 0) {
+    const artifactSheet = workbook.addWorksheet('Артефакты', {
+      views: [{ state: 'frozen', ySplit: 1 }],
+    });
+    artifactSheet.addRow([
+      '№',
+      'Автор',
+      'Артефакт',
+      'Тип',
+      'Отправлен',
+      'Оценка',
+      'Решение',
+      'Файл',
+      'Ссылка',
+    ]);
+    allArtifacts.forEach(({ row, artifact }, index) => {
+      const added = artifactSheet.addRow([
+        index + 1,
+        safeSpreadsheetText(row.canonicalFullName),
+        safeSpreadsheetText(artifact.title),
+        safeSpreadsheetText(artifact.typeName),
+        safeSpreadsheetText(artifact.submittedAt),
+        artifact.score ?? '',
+        reviewDecisionLabel(artifact.decision),
+        artifact.archivePath
+          ? hyperlinkCell(artifact.archivePath, artifact.fileName ?? 'Открыть файл')
+          : safeSpreadsheetText(artifact.fileName),
+        safeSpreadsheetText(artifact.externalUrl),
+      ]);
+      if (artifact.archivePath) {
+        added.getCell(8).font = { color: { argb: 'FF1F5FBF' }, underline: true };
+      }
+    });
+    styleSheet(artifactSheet, [8, 34, 40, 22, 22, 12, 18, 40, 44]);
   }
+
   const buffer = await workbook.xlsx.writeBuffer();
   return new Uint8Array(buffer);
 }

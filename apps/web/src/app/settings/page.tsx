@@ -1,8 +1,12 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 
 import { EmptyState } from '@/components/empty-state';
+import { PageHeader, PageStack } from '@/components/page-header';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Table, TableBody, TableCell, TableRow, TableWrapper } from '@/components/ui/table';
 import { api, formatDate } from '@/lib/api';
 
 interface OrganizationSettings {
@@ -15,6 +19,43 @@ interface OrganizationSettings {
   rule_version: number;
   active_window_hours: number;
   inactive_after_hours: number;
+}
+
+function SettingsCard({
+  eyebrow,
+  title,
+  rows,
+}: {
+  eyebrow?: string;
+  title: string;
+  rows: { label: string; value: ReactNode }[];
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <div>
+          {eyebrow && (
+            <p className="text-muted-foreground text-xs font-semibold tracking-wider uppercase">
+              {eyebrow}
+            </p>
+          )}
+          <CardTitle className={eyebrow ? 'mt-1' : undefined}>{title}</CardTitle>
+        </div>
+      </CardHeader>
+      <TableWrapper>
+        <Table>
+          <TableBody>
+            {rows.map((row) => (
+              <TableRow key={row.label}>
+                <TableCell className="text-muted-foreground w-1/2">{row.label}</TableCell>
+                <TableCell className="text-right font-medium tabular">{row.value}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </TableWrapper>
+    </Card>
+  );
 }
 
 export default function SettingsPage() {
@@ -30,57 +71,55 @@ export default function SettingsPage() {
   }, []);
 
   return (
-    <div className="page-stack">
-      <section className="page-heading">
-        <p className="eyebrow">Система</p>
-        <h1>Настройки организации</h1>
-        <p>Пороговые правила версионируются и применяются единообразно.</p>
-      </section>
+    <PageStack>
+      <PageHeader
+        eyebrow="Система"
+        title="Настройки организации"
+        description="Пороговые правила версионируются и применяются единообразно."
+      />
       {error ? (
-        <section className="panel">
+        <Card>
           <EmptyState title="Настройки недоступны" text={error} />
-        </section>
+        </Card>
       ) : !settings ? (
-        <div className="page-loading">Загружаем настройки…</div>
+        <div className="grid gap-4 xl:grid-cols-2">
+          {[0, 1].map((card) => (
+            <Card key={card}>
+              <CardHeader>
+                <Skeleton className="h-4 w-40" />
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {[0, 1, 2].map((row) => (
+                  <Skeleton className="h-8 w-full" key={row} />
+                ))}
+              </CardContent>
+            </Card>
+          ))}
+        </div>
       ) : (
-        <section className="profile-grid">
-          <article className="panel">
-            <p className="eyebrow">{settings.name}</p>
-            <h2>Текущие правила lifecycle</h2>
-            <div className="settings-values">
-              <div>
-                <span>Активный период</span>
-                <strong>{settings.active_window_hours} часов</strong>
-              </div>
-              <div>
-                <span>До неактивности</span>
-                <strong>{settings.inactive_after_hours} часов</strong>
-              </div>
-              <div>
-                <span>Версия правил</span>
-                <strong>v{settings.rule_version}</strong>
-              </div>
-            </div>
-          </article>
-          <article className="panel">
-            <h2>Локаль и границы</h2>
-            <div className="settings-values">
-              <div>
-                <span>Часовая зона</span>
-                <strong>{settings.timezone}</strong>
-              </div>
-              <div>
-                <span>Baseline артефактов</span>
-                <strong>{formatDate(settings.artifact_baseline_at, true)}</strong>
-              </div>
-              <div>
-                <span>Версия настроек</span>
-                <strong>{settings.version}</strong>
-              </div>
-            </div>
-          </article>
-        </section>
+        <div className="grid items-start gap-4 xl:grid-cols-2">
+          <SettingsCard
+            eyebrow={settings.name}
+            title="Текущие правила lifecycle"
+            rows={[
+              { label: 'Активный период', value: `${settings.active_window_hours} часов` },
+              { label: 'До неактивности', value: `${settings.inactive_after_hours} часов` },
+              { label: 'Версия правил', value: `v${settings.rule_version}` },
+            ]}
+          />
+          <SettingsCard
+            title="Локаль и границы"
+            rows={[
+              { label: 'Часовая зона', value: settings.timezone },
+              {
+                label: 'Baseline артефактов',
+                value: formatDate(settings.artifact_baseline_at, true),
+              },
+              { label: 'Версия настроек', value: settings.version },
+            ]}
+          />
+        </div>
       )}
-    </div>
+    </PageStack>
   );
 }

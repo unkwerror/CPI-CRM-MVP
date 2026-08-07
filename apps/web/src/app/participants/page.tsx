@@ -1,16 +1,43 @@
 'use client';
 
-import { ChevronLeft, ChevronRight, Download, Mail, Phone, Plus, Search, X } from 'lucide-react';
+import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  DownloadIcon,
+  MailIcon,
+  PhoneIcon,
+  PlusIcon,
+  UsersIcon,
+} from 'lucide-react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, type FormEvent, useCallback, useEffect, useState } from 'react';
 
+import { CreatePersonDialog } from '@/components/create-person-dialog';
+import { DataToolbar, ToolbarSearch, ToolbarSelect } from '@/components/data-toolbar';
 import { EmptyState } from '@/components/empty-state';
+import { PageHeader, PageStack } from '@/components/page-header';
 import { StatusBadge } from '@/components/status-badge';
-import { api, formatDate, initials } from '@/lib/api';
-import type { CurrentUser, PeopleResponse } from '@/lib/types';
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card, CardFooter } from '@/components/ui/card';
+import { Skeleton } from '@/components/ui/skeleton';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+  TableWrapper,
+} from '@/components/ui/table';
+import { useCurrentUser } from '@/hooks/use-current-user';
+import { api, apiErrorMessage, formatDate, initials } from '@/lib/api';
+import { scoreVariant } from '@/lib/status-labels';
+import type { PeopleResponse } from '@/lib/types';
 
-const savedViews = [
+const SAVED_VIEWS = [
   { label: 'Все', params: '' },
   { label: 'Не активированы', params: 'activationState=NOT_ACTIVATED' },
   { label: 'Активные', params: 'activityStatus=ACTIVE' },
@@ -20,24 +47,44 @@ const savedViews = [
   { label: 'Ожидают оценки', params: 'awaitingReview=true' },
 ];
 
+const ACTIVITY_OPTIONS = [
+  { value: 'ALL', label: 'Любая активность' },
+  { value: 'ACTIVE', label: 'Активные' },
+  { value: 'MEDIUM', label: 'Средняя активность' },
+  { value: 'INACTIVE', label: 'Неактивные' },
+  { value: 'UNKNOWN', label: 'Неизвестно' },
+];
+
+const COLUMN_COUNT = 8;
+
 export default function ParticipantsPage() {
   return (
-    <Suspense fallback={<div className="page-loading">Загружаем реестр…</div>}>
+    <Suspense fallback={<RegistrySkeleton />}>
       <ParticipantsContent />
     </Suspense>
+  );
+}
+
+function RegistrySkeleton() {
+  return (
+    <PageStack>
+      <Skeleton className="h-16 w-full" />
+      <Skeleton className="h-64 w-full" />
+    </PageStack>
   );
 }
 
 function ParticipantsContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
+  const { can } = useCurrentUser();
   const [data, setData] = useState<PeopleResponse>({ items: [], nextCursor: null, total: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState(searchParams.get('q') ?? '');
   const [showCreate, setShowCreate] = useState(searchParams.get('create') === '1');
   const [history, setHistory] = useState<string[]>([]);
-  const [canExport, setCanExport] = useState(false);
+  const canExport = can('exports.bulk');
 
   const loadPeople = useCallback(async () => {
     setLoading(true);
@@ -48,7 +95,7 @@ function ParticipantsContent() {
     try {
       setData(await api<PeopleResponse>(`/people?${params.toString()}`));
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Не удалось загрузить участников');
+      setError(apiErrorMessage(caught, 'Не удалось загрузить участников'));
     } finally {
       setLoading(false);
     }
@@ -57,12 +104,6 @@ function ParticipantsContent() {
   useEffect(() => {
     void loadPeople();
   }, [loadPeople]);
-
-  useEffect(() => {
-    void api<CurrentUser>('/auth/me')
-      .then((user) => setCanExport(user.permissions.includes('exports.bulk')))
-      .catch(() => setCanExport(false));
-  }, []);
 
   function updateParams(next: Record<string, string | null>) {
     const params = new URLSearchParams(searchParams.toString());
@@ -79,7 +120,7 @@ function ParticipantsContent() {
     updateParams({ q: query.trim() || null });
   }
 
-  const activeView = savedViews.find((view) => {
+  const activeView = SAVED_VIEWS.find((view) => {
     const params = new URLSearchParams(view.params);
     return (
       [...params.entries()].every(([key, value]) => searchParams.get(key) === value) &&
@@ -96,329 +137,216 @@ function ParticipantsContent() {
   const exportHref = `/api/exports/participants.csv${exportParams.size ? `?${exportParams}` : ''}`;
 
   return (
-    <div className="page-stack">
-      <section className="page-heading page-heading--split">
-        <div>
-          <p className="eyebrow">Единый реестр</p>
-          <h1>Участники</h1>
-          <p>{data.total.toLocaleString('ru-RU')} канонических профилей</p>
-        </div>
-        <div className="heading-actions">
-          {canExport && (
-            <a className="button button--secondary" href={exportHref}>
-              <Download size={16} />
-              {exportParams.size ? 'Экспорт по фильтрам' : 'Экспорт всех'}
-            </a>
-          )}
-          <button className="button button--primary" onClick={() => setShowCreate(true)}>
-            <Plus size={17} /> Новый участник
-          </button>
-        </div>
-      </section>
+    <PageStack>
+      <PageHeader
+        eyebrow="Единый реестр"
+        title="Участники"
+        description={`${data.total.toLocaleString('ru-RU')} канонических профилей`}
+        actions={
+          <>
+            {canExport && (
+              <Button asChild variant="outline">
+                <a href={exportHref}>
+                  <DownloadIcon />
+                  {exportParams.size ? 'Экспорт по фильтрам' : 'Экспорт всех'}
+                </a>
+              </Button>
+            )}
+            <Button onClick={() => setShowCreate(true)}>
+              <PlusIcon /> Новый участник
+            </Button>
+          </>
+        }
+      />
 
-      <section className="view-tabs" aria-label="Сохранённые представления">
-        {savedViews.map((view) => (
-          <button
-            className={activeView?.label === view.label ? 'view-tab view-tab--active' : 'view-tab'}
-            key={view.label}
-            onClick={() => router.push(`/participants${view.params ? `?${view.params}` : ''}`)}
-          >
-            {view.label}
-          </button>
-        ))}
-      </section>
+      <nav className="flex flex-wrap gap-1.5" aria-label="Сохранённые представления">
+        {SAVED_VIEWS.map((view) => {
+          const active = activeView?.label === view.label;
+          return (
+            <Button
+              aria-current={active ? 'true' : undefined}
+              key={view.label}
+              onClick={() => router.push(`/participants${view.params ? `?${view.params}` : ''}`)}
+              size="sm"
+              variant={active ? 'secondary' : 'ghost'}
+            >
+              {view.label}
+            </Button>
+          );
+        })}
+      </nav>
 
-      <section className="registry-toolbar">
-        <form className="registry-search" onSubmit={submitSearch}>
-          <Search size={18} />
-          <input
-            onChange={(event) => setQuery(event.target.value)}
+      <DataToolbar>
+        <form className="flex min-w-56 flex-1" onSubmit={submitSearch}>
+          <ToolbarSearch
+            label="Поиск участников"
+            onChange={(next) => {
+              setQuery(next);
+              if (!next) updateParams({ q: null });
+            }}
             placeholder="Поиск по ФИО, контакту, организации…"
             value={query}
           />
-          {query && (
-            <button
-              type="button"
-              onClick={() => {
-                setQuery('');
-                updateParams({ q: null });
-              }}
-            >
-              <X size={15} />
-            </button>
-          )}
         </form>
-        <select
-          aria-label="Статус активности"
-          className="select-control"
-          onChange={(event) => updateParams({ activityStatus: event.target.value || null })}
-          value={searchParams.get('activityStatus') ?? ''}
-        >
-          <option value="">Любая активность</option>
-          <option value="ACTIVE">Активные</option>
-          <option value="MEDIUM">Средняя активность</option>
-          <option value="INACTIVE">Неактивные</option>
-          <option value="UNKNOWN">Неизвестно</option>
-        </select>
-      </section>
+        <ToolbarSelect
+          label="Активность"
+          onChange={(value) => updateParams({ activityStatus: value === 'ALL' ? null : value })}
+          options={ACTIVITY_OPTIONS}
+          value={searchParams.get('activityStatus') ?? 'ALL'}
+          width="w-52"
+        />
+      </DataToolbar>
 
-      <section className="table-panel">
+      <Card>
         {error ? (
           <EmptyState title="Ошибка загрузки" text={error} />
         ) : data.items.length === 0 && !loading ? (
           <EmptyState
+            icon={UsersIcon}
             title="Участники не найдены"
             text="Измените фильтры или запустите импорт книги."
           />
         ) : (
-          <div className="table-scroll">
-            <table className="data-table people-table">
-              <thead>
-                <tr>
-                  <th>Участник</th>
-                  <th>Контакт</th>
-                  <th>Организация / факультет</th>
-                  <th>Активность</th>
-                  <th>Последний артефакт</th>
-                  <th className="number-cell">Артефактов</th>
-                  <th className="number-cell">Оценка</th>
-                  <th>Ответственный</th>
-                </tr>
-              </thead>
-              <tbody>
+          <TableWrapper>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Участник</TableHead>
+                  <TableHead>Контакт</TableHead>
+                  <TableHead>Организация / факультет</TableHead>
+                  <TableHead>Активность</TableHead>
+                  <TableHead>Последний артефакт</TableHead>
+                  <TableHead className="text-right">Артефактов</TableHead>
+                  <TableHead className="text-right">Оценка</TableHead>
+                  <TableHead>Ответственный</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {loading
                   ? Array.from({ length: 8 }, (_, index) => (
-                      <tr className="skeleton-row" key={index}>
-                        <td colSpan={8}>
-                          <span />
-                        </td>
-                      </tr>
+                      <TableRow key={index}>
+                        <TableCell colSpan={COLUMN_COUNT}>
+                          <Skeleton className="h-6 w-full" />
+                        </TableCell>
+                      </TableRow>
                     ))
                   : data.items.map((person) => (
-                      <tr key={person.id}>
-                        <td>
-                          <Link className="person-cell" href={`/participants/${person.id}`}>
-                            <span className="avatar">{initials(person.canonicalFullName)}</span>
-                            <span>
-                              <strong>{person.canonicalFullName}</strong>
-                              <small>ID {person.id.slice(0, 8)}</small>
+                      <TableRow key={person.id}>
+                        <TableCell>
+                          <Link
+                            className="hover:text-primary flex items-center gap-2.5 transition-colors"
+                            href={`/participants/${person.id}`}
+                          >
+                            <Avatar>
+                              <AvatarFallback>{initials(person.canonicalFullName)}</AvatarFallback>
+                            </Avatar>
+                            <span className="leading-tight">
+                              <strong className="block text-[13px] font-medium">
+                                {person.canonicalFullName}
+                              </strong>
+                              <small className="text-muted-foreground block text-xs">
+                                ID {person.id.slice(0, 8)}
+                              </small>
                             </span>
                           </Link>
-                        </td>
-                        <td>
-                          <span className="contact-cell">
+                        </TableCell>
+                        <TableCell>
+                          <span className="text-muted-foreground flex items-center gap-1.5 text-[13px]">
                             {person.primaryContact?.includes('@') ? (
-                              <Mail size={14} />
+                              <MailIcon className="size-3.5 shrink-0" />
                             ) : (
-                              <Phone size={14} />
+                              <PhoneIcon className="size-3.5 shrink-0" />
                             )}
                             {person.primaryContact ?? '—'}
                           </span>
-                        </td>
-                        <td>
-                          <span className="stacked-cell">
-                            <strong>{person.organization ?? '—'}</strong>
-                            <small>{person.faculty ?? ''}</small>
+                        </TableCell>
+                        <TableCell>
+                          <span className="leading-tight">
+                            <strong className="block text-[13px] font-medium">
+                              {person.organization ?? '—'}
+                            </strong>
+                            {person.faculty && (
+                              <small className="text-muted-foreground block text-xs">
+                                {person.faculty}
+                              </small>
+                            )}
                           </span>
-                        </td>
-                        <td>
+                        </TableCell>
+                        <TableCell>
                           <StatusBadge
                             activity={person.activityStatus}
                             activation={person.activationState}
                           />
-                        </td>
-                        <td>{formatDate(person.lastArtifactAt)}</td>
-                        <td className="number-cell">{person.countableArtifactCount}</td>
-                        <td className="number-cell">
+                        </TableCell>
+                        <TableCell className="text-muted-foreground text-[13px] whitespace-nowrap">
+                          {formatDate(person.lastArtifactAt)}
+                        </TableCell>
+                        <TableCell className="tabular text-right">
+                          {person.countableArtifactCount}
+                        </TableCell>
+                        <TableCell className="text-right">
                           {person.latestArtifactScore == null ? (
-                            <span className="muted">Не оценён</span>
+                            <span className="text-muted-foreground text-[13px]">Не оценён</span>
                           ) : (
-                            <span className="score-chip">{person.latestArtifactScore}</span>
+                            <Badge
+                              className="tabular min-w-8 justify-center"
+                              variant={scoreVariant(person.latestArtifactScore)}
+                            >
+                              {person.latestArtifactScore}
+                            </Badge>
                           )}
-                        </td>
-                        <td>{person.ownerName ?? 'Не назначен'}</td>
-                      </tr>
+                        </TableCell>
+                        <TableCell className="text-[13px]">
+                          {person.ownerName ?? (
+                            <span className="text-muted-foreground">Не назначен</span>
+                          )}
+                        </TableCell>
+                      </TableRow>
                     ))}
-              </tbody>
-            </table>
-          </div>
+              </TableBody>
+            </Table>
+          </TableWrapper>
         )}
-        <footer className="table-footer">
-          <span>
+
+        <CardFooter className="justify-between">
+          <span className="text-muted-foreground text-[13px]">
             Показано {data.items.length} из {data.total.toLocaleString('ru-RU')}
           </span>
-          <div className="pagination">
-            <button
-              className="icon-button icon-button--bordered"
+          <div className="flex items-center gap-1.5">
+            <Button
+              aria-label="Предыдущая страница"
               disabled={history.length === 0}
               onClick={() => {
                 const previous = history.at(-1) ?? null;
                 setHistory((items) => items.slice(0, -1));
                 updateParams({ cursor: previous });
               }}
+              size="icon-sm"
+              variant="outline"
             >
-              <ChevronLeft size={17} />
-            </button>
-            <button
-              className="icon-button icon-button--bordered"
+              <ChevronLeftIcon />
+            </Button>
+            <Button
+              aria-label="Следующая страница"
               disabled={!data.nextCursor}
               onClick={() => {
                 setHistory((items) => [...items, searchParams.get('cursor') ?? '']);
                 updateParams({ cursor: data.nextCursor });
               }}
+              size="icon-sm"
+              variant="outline"
             >
-              <ChevronRight size={17} />
-            </button>
+              <ChevronRightIcon />
+            </Button>
           </div>
-        </footer>
-      </section>
+        </CardFooter>
+      </Card>
 
-      {showCreate && (
-        <CreatePersonDialog
-          onClose={() => setShowCreate(false)}
-          onCreated={(id) => router.push(`/participants/${id}`)}
-        />
-      )}
-    </div>
-  );
-}
-
-function CreatePersonDialog({
-  onClose,
-  onCreated,
-}: {
-  onClose: () => void;
-  onCreated: (id: string) => void;
-}) {
-  const [lastName, setLastName] = useState('');
-  const [firstName, setFirstName] = useState('');
-  const [patronymic, setPatronymic] = useState('');
-  const [contactType, setContactType] = useState<'PHONE' | 'EMAIL' | 'TELEGRAM'>('TELEGRAM');
-  const [contact, setContact] = useState('');
-  const [organization, setOrganization] = useState('');
-  const [faculty, setFaculty] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setSaving(true);
-    setError(null);
-    try {
-      const result = await api<{ id: string }>('/people', {
-        method: 'POST',
-        body: JSON.stringify({
-          lastName,
-          firstName,
-          patronymic,
-          lifecycleDataState: 'COMPLETE',
-          contacts: contact ? [{ type: contactType, value: contact, isPrimary: true }] : [],
-          organization: organization || undefined,
-          faculty: faculty || undefined,
-        }),
-      });
-      onCreated(result.id);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Не удалось сохранить участника');
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
-      <section
-        className="dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="create-title"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <header className="dialog__header">
-          <div>
-            <p className="eyebrow">Новая карточка</p>
-            <h2 id="create-title">Добавить участника</h2>
-          </div>
-          <button className="icon-button" onClick={onClose}>
-            <X size={18} />
-          </button>
-        </header>
-        <form onSubmit={submit}>
-          <div className="form-grid">
-            <label className="form-field">
-              <span>Фамилия *</span>
-              <input
-                autoFocus
-                required
-                value={lastName}
-                onChange={(event) => setLastName(event.target.value)}
-                placeholder="Иванов"
-              />
-            </label>
-            <label className="form-field">
-              <span>Имя *</span>
-              <input
-                required
-                value={firstName}
-                onChange={(event) => setFirstName(event.target.value)}
-                placeholder="Иван"
-              />
-            </label>
-            <label className="form-field form-field--full">
-              <span>Отчество *</span>
-              <input
-                required
-                value={patronymic}
-                onChange={(event) => setPatronymic(event.target.value)}
-                placeholder="Иванович"
-              />
-            </label>
-            <label className="form-field">
-              <span>Тип контакта</span>
-              <select
-                value={contactType}
-                onChange={(event) => setContactType(event.target.value as typeof contactType)}
-              >
-                <option value="PHONE">Телефон</option>
-                <option value="EMAIL">Email</option>
-                <option value="TELEGRAM">Telegram</option>
-              </select>
-            </label>
-            <label className="form-field">
-              <span>{contactType === 'TELEGRAM' ? 'Telegram (главный контакт)' : 'Контакт'}</span>
-              <input
-                value={contact}
-                onChange={(event) => setContact(event.target.value)}
-                placeholder={contactType === 'TELEGRAM' ? '@username' : '+7 999 123-45-67'}
-              />
-            </label>
-            <label className="form-field">
-              <span>Организация</span>
-              <input
-                value={organization}
-                onChange={(event) => setOrganization(event.target.value)}
-                placeholder="НГУ"
-              />
-            </label>
-            <label className="form-field">
-              <span>Факультет</span>
-              <input
-                value={faculty}
-                onChange={(event) => setFaculty(event.target.value)}
-                placeholder="ФИТ"
-              />
-            </label>
-          </div>
-          {error && <p className="form-error">{error}</p>}
-          <footer className="dialog__footer">
-            <button className="button button--secondary" type="button" onClick={onClose}>
-              Отмена
-            </button>
-            <button className="button button--primary" disabled={saving}>
-              {saving ? 'Сохраняем…' : 'Создать карточку'}
-            </button>
-          </footer>
-        </form>
-      </section>
-    </div>
+      <CreatePersonDialog
+        open={showCreate}
+        onOpenChange={setShowCreate}
+        onCreated={(id) => router.push(`/participants/${id}`)}
+      />
+    </PageStack>
   );
 }

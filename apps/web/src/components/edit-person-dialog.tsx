@@ -1,8 +1,28 @@
 'use client';
 
-import { Plus, Trash2, X } from 'lucide-react';
-import { type FormEvent, useEffect, useState } from 'react';
+import { PlusIcon, Trash2Icon } from 'lucide-react';
+import { type FormEvent, useState } from 'react';
 
+import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { ApiError, api } from '@/lib/api';
 import type { ContactPoint, PersonDetail } from '@/lib/types';
 
@@ -74,14 +94,6 @@ export function EditPersonDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === 'Escape' && !saving) onClose();
-    }
-    window.addEventListener('keydown', closeOnEscape);
-    return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [onClose, saving]);
-
   function updateContact(key: string, patch: Partial<EditableContact>) {
     setContacts((current) =>
       current.map((contact) => (contact.key === key ? { ...contact, ...patch } : contact)),
@@ -111,6 +123,16 @@ export function EditPersonDialog({
         isPrimary: current.length === 0,
       },
     ]);
+  }
+
+  function togglePrimary(contact: EditableContact, checked: boolean) {
+    setContacts((current) =>
+      current.map((item) => {
+        if (item.key === contact.key) return { ...item, isPrimary: checked };
+        if (checked && item.type === contact.type) return { ...item, isPrimary: false };
+        return item;
+      }),
+    );
   }
 
   async function submit(event: FormEvent) {
@@ -179,123 +201,120 @@ export function EditPersonDialog({
   }
 
   return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={() => !saving && onClose()}>
-      <section
-        aria-labelledby="edit-person-title"
-        aria-modal="true"
-        className="dialog edit-person-dialog"
-        onMouseDown={(event) => event.stopPropagation()}
-        role="dialog"
-      >
-        <header className="dialog__header">
-          <div>
-            <p className="eyebrow">Карточка участника</p>
-            <h2 id="edit-person-title">Редактировать участника</h2>
-          </div>
-          <button
-            aria-label="Закрыть"
-            className="icon-button"
-            disabled={saving}
-            onClick={onClose}
-            type="button"
-          >
-            <X size={18} />
-          </button>
-        </header>
+    <Dialog open onOpenChange={(open) => !open && !saving && onClose()}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogDescription>Карточка участника</DialogDescription>
+          <DialogTitle>Редактировать участника</DialogTitle>
+        </DialogHeader>
 
-        <form onSubmit={(event) => void submit(event)}>
-          <div className="form-grid">
-            <label className="form-field">
-              <span>Фамилия *</span>
-              <input
-                autoFocus
-                maxLength={200}
-                onChange={(event) => setLastName(event.target.value)}
-                required
-                value={lastName}
-              />
-            </label>
-            <label className="form-field">
-              <span>Имя *</span>
-              <input
-                maxLength={200}
-                onChange={(event) => setFirstName(event.target.value)}
-                required
-                value={firstName}
-              />
-            </label>
-            <label className="form-field form-field--full">
-              <span>Отчество *</span>
-              <input
-                maxLength={200}
-                onChange={(event) => setPatronymic(event.target.value)}
-                required
-                value={patronymic}
-              />
-            </label>
+        <form onSubmit={(event) => void submit(event)} className="contents">
+          <DialogBody className="space-y-5">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="edit-person-last-name">Фамилия *</Label>
+                <Input
+                  autoFocus
+                  id="edit-person-last-name"
+                  maxLength={200}
+                  onChange={(event) => setLastName(event.target.value)}
+                  required
+                  value={lastName}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="edit-person-first-name">Имя *</Label>
+                <Input
+                  id="edit-person-first-name"
+                  maxLength={200}
+                  onChange={(event) => setFirstName(event.target.value)}
+                  required
+                  value={firstName}
+                />
+              </div>
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label htmlFor="edit-person-patronymic">Отчество *</Label>
+                <Input
+                  id="edit-person-patronymic"
+                  maxLength={200}
+                  onChange={(event) => setPatronymic(event.target.value)}
+                  required
+                  value={patronymic}
+                />
+              </div>
 
-            <label className="form-field">
-              <span>Организация</span>
-              <input
-                maxLength={500}
-                onChange={(event) => setOrganization(event.target.value)}
-                placeholder="ВУЗ, компания или студия"
-                value={organization}
-              />
-            </label>
-
-            <label className="form-field">
-              <span>Факультет / подразделение</span>
-              <input
-                maxLength={500}
-                onChange={(event) => setFaculty(event.target.value)}
-                placeholder="Необязательно"
-                value={faculty}
-              />
-            </label>
-
-            <label className="form-field form-field--full">
-              <span>Роль / должность</span>
-              <input
-                maxLength={500}
-                onChange={(event) => setRoleTitle(event.target.value)}
-                placeholder="Например, участник акселератора"
-                value={roleTitle}
-              />
-            </label>
+              <div className="space-y-1.5">
+                <Label htmlFor="edit-person-organization">Организация</Label>
+                <Input
+                  id="edit-person-organization"
+                  maxLength={500}
+                  onChange={(event) => setOrganization(event.target.value)}
+                  placeholder="ВУЗ, компания или студия"
+                  value={organization}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="edit-person-faculty">Факультет / подразделение</Label>
+                <Input
+                  id="edit-person-faculty"
+                  maxLength={500}
+                  onChange={(event) => setFaculty(event.target.value)}
+                  placeholder="Необязательно"
+                  value={faculty}
+                />
+              </div>
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label htmlFor="edit-person-role">Роль / должность</Label>
+                <Input
+                  id="edit-person-role"
+                  maxLength={500}
+                  onChange={(event) => setRoleTitle(event.target.value)}
+                  placeholder="Например, участник акселератора"
+                  value={roleTitle}
+                />
+              </div>
+            </div>
 
             {canEditContacts && (
-              <div className="form-field form-field--full">
-                <div className="edit-person-contacts__header">
-                  <span>Контакты</span>
-                  <button className="text-link" onClick={addContact} type="button">
-                    <Plus size={14} /> Добавить
-                  </button>
+              <section className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label asChild>
+                    <h3>Контакты</h3>
+                  </Label>
+                  <Button onClick={addContact} size="xs" type="button" variant="ghost">
+                    <PlusIcon /> Добавить
+                  </Button>
                 </div>
-                <div className="edit-person-contacts">
+
+                <div className="space-y-2">
                   {contacts.map((contact) => (
-                    <div className="edit-person-contact-row" key={contact.key}>
-                      <label className="form-field">
-                        <span className="sr-only">Тип контакта</span>
-                        <select
-                          disabled={contact.isIdentity}
-                          onChange={(event) =>
-                            updateContact(contact.key, {
-                              type: event.target.value as ContactType,
-                            })
-                          }
-                          value={contact.type}
-                        >
+                    <div
+                      className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 sm:grid-cols-[9rem_minmax(0,1fr)_auto_auto]"
+                      key={contact.key}
+                    >
+                      <Select
+                        disabled={Boolean(contact.isIdentity)}
+                        onValueChange={(next) =>
+                          updateContact(contact.key, { type: next as ContactType })
+                        }
+                        value={contact.type}
+                      >
+                        <SelectTrigger aria-label="Тип контакта" size="sm">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
                           {CONTACT_TYPES.map((item) => (
-                            <option key={item.value} value={item.value}>
+                            <SelectItem key={item.value} value={item.value}>
                               {item.label}
-                            </option>
+                            </SelectItem>
                           ))}
-                        </select>
-                      </label>
-                      <label className="form-field">
-                        <span className="sr-only">Значение контакта</span>
-                        <input
+                        </SelectContent>
+                      </Select>
+
+                      <div className="col-span-2 space-y-1 sm:col-span-1">
+                        <Input
+                          aria-label="Значение контакта"
+                          className="h-8"
                           onChange={(event) =>
                             updateContact(contact.key, { value: event.target.value })
                           }
@@ -304,78 +323,62 @@ export function EditPersonDialog({
                           value={contact.value}
                         />
                         {contact.isIdentity && contact.telegramUserId && (
-                          <small className="form-field__hint">
+                          <p className="text-muted-foreground text-xs">
                             Главный идентификатор Telegram ID: {contact.telegramUserId}
-                          </small>
+                          </p>
                         )}
-                      </label>
-                      <label className="edit-person-contact-row__primary">
-                        <input
+                      </div>
+
+                      <label className="flex items-center gap-2 text-[13px] whitespace-nowrap">
+                        <Checkbox
                           checked={contact.isPrimary}
                           disabled={contact.isIdentity}
-                          onChange={(event) => {
-                            const checked = event.target.checked;
-                            setContacts((current) =>
-                              current.map((item) => {
-                                if (item.key === contact.key) {
-                                  return { ...item, isPrimary: checked };
-                                }
-                                if (checked && item.type === contact.type) {
-                                  return { ...item, isPrimary: false };
-                                }
-                                return item;
-                              }),
-                            );
-                          }}
-                          type="checkbox"
+                          onCheckedChange={(checked) => togglePrimary(contact, checked === true)}
                         />
                         Основной
                       </label>
-                      <button
+
+                      <Button
                         aria-label="Удалить контакт"
-                        className="icon-button"
                         disabled={contact.isIdentity}
                         onClick={() => removeContact(contact.key)}
+                        size="icon-sm"
                         type="button"
+                        variant="ghost"
                       >
-                        <Trash2 size={16} />
-                      </button>
+                        <Trash2Icon />
+                      </Button>
                     </div>
                   ))}
                 </div>
-                <small className="form-field__hint">
+
+                <p className="text-muted-foreground text-xs">
                   Telegram ID — главный идентификатор и меняется только синхронизацией с ботом.
                   Остальные пустые строки не сохраняются, убранные контакты архивируются.
-                </small>
-              </div>
+                </p>
+              </section>
             )}
-          </div>
 
-          {error && (
-            <p aria-live="polite" className="form-error">
-              {error}
-            </p>
-          )}
+            {error && (
+              <p aria-live="polite" className="text-destructive text-[13px]">
+                {error}
+              </p>
+            )}
+          </DialogBody>
 
-          <footer className="dialog__footer">
-            <button
-              className="button button--secondary"
-              disabled={saving}
-              onClick={onClose}
-              type="button"
-            >
+          <DialogFooter>
+            <Button disabled={saving} onClick={onClose} type="button" variant="outline">
               Отмена
-            </button>
-            <button
-              className="button button--primary"
+            </Button>
+            <Button
               disabled={saving || !lastName.trim() || !firstName.trim() || !patronymic.trim()}
               type="submit"
             >
               {saving ? 'Сохраняем…' : 'Сохранить'}
-            </button>
-          </footer>
+            </Button>
+          </DialogFooter>
         </form>
-      </section>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

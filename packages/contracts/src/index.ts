@@ -128,7 +128,11 @@ export const SubmitArtifactVersionBody = Type.Object({
   backdateReason: Type.Optional(Type.String({ minLength: 3, maxLength: 2_000 })),
 });
 
-/** Рубрикатор ЦПИ: пять критериев по 0–2, Q_artifact = сумма. */
+/**
+ * Исторический рубрикатор ЦПИ: пять критериев по 0–2.
+ *
+ * @deprecated Новые ревью его не заполняют; схема осталась для чтения архива.
+ */
 export const ArtifactReviewCriteria = Type.Object(
   {
     relevance: Type.Integer({ minimum: 0, maximum: 2 }),
@@ -140,17 +144,15 @@ export const ArtifactReviewCriteria = Type.Object(
   { additionalProperties: false },
 );
 
-export const ReviewArtifactVersionBody = Type.Object({
-  /** Итоговый балл; при наличии criteria вычисляется сервером как сумма. */
-  score: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })),
-  criteria: Type.Optional(ArtifactReviewCriteria),
-  decision: Type.Union([
-    Type.Literal('NEEDS_REVISION'),
-    Type.Literal('ACCEPTED'),
-    Type.Literal('REJECTED'),
-  ]),
-  comment: Type.Optional(Type.String({ maxLength: 10_000 })),
-});
+/** Приёмка артефакта: принят или не принят, плюс балл 0–10. */
+export const ReviewArtifactVersionBody = Type.Object(
+  {
+    score: Type.Integer({ minimum: 0, maximum: 10 }),
+    decision: Type.Union([Type.Literal('ACCEPTED'), Type.Literal('REJECTED')]),
+    comment: Type.Optional(Type.String({ maxLength: 10_000 })),
+  },
+  { additionalProperties: false },
+);
 
 export const PartnerKind = Type.Union([
   Type.Literal('COMMERCIAL'),

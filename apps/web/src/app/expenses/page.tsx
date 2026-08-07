@@ -1,34 +1,47 @@
 'use client';
 
-import { ChevronLeft, ChevronRight, Plus, Trash2, Wallet, X } from 'lucide-react';
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { ChevronLeftIcon, ChevronRightIcon, PlusIcon, Trash2Icon, WalletIcon } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { toast } from 'sonner';
 
+import { DataToolbar, ToolbarReset, ToolbarSelect, ToolbarSpacer } from '@/components/data-toolbar';
 import { EmptyState } from '@/components/empty-state';
-import { ApiError, api, formatDate, formatMoney } from '@/lib/api';
-import type {
-  CurrentUser,
-  DealSummary,
-  EventSummary,
-  ExpenseCategory,
-  ExpenseSummary,
-  ProductSummary,
-} from '@/lib/types';
+import { ExpenseDialog } from '@/components/expense-dialog';
+import { PageHeader, PageStack } from '@/components/page-header';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Skeleton } from '@/components/ui/skeleton';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+  TableWrapper,
+} from '@/components/ui/table';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { useCurrentUser } from '@/hooks/use-current-user';
+import { api, apiErrorMessage, formatDate, formatMoney } from '@/lib/api';
+import {
+  EXPENSE_CATEGORY_HINTS,
+  EXPENSE_CATEGORY_LABELS,
+  EXPENSE_CATEGORY_ORDER,
+} from '@/lib/fpf-labels';
+import type { ExpenseSummary } from '@/lib/types';
 
-export const EXPENSE_CATEGORY_LABELS: Record<ExpenseCategory, string> = {
-  VARIABLE: 'Переменные',
-  OPEX: 'Операционные',
-  BACK_OFFICE: 'Бэк-офис',
-  ACQUISITION: 'Привлечение',
-  ACTIVATION: 'Активация',
-};
-
-const EXPENSE_CATEGORY_HINTS: Record<ExpenseCategory, string> = {
-  VARIABLE: 'Возникают только из-за конкретной сделки/мероприятия: подрядчик, материалы, призовой фонд',
-  OPEX: 'Содержание системы: команда, регулярные сервисы, административные процессы',
-  BACK_OFFICE: 'Документы, заявки, бюджеты, сопровождение',
-  ACQUISITION: 'Привлечение новых строк в базу: реклама, информационная политика',
-  ACTIVATION: 'Трекинг, эксперты, активационные сессии, инструменты',
-};
+/** Radix Select не допускает пустое значение пункта, поэтому «все категории» — отдельный ключ. */
+const ALL_CATEGORIES = 'ALL';
 
 function monthKey(date: Date): string {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
@@ -48,22 +61,26 @@ function shiftMonth(key: string, delta: number): string {
 }
 
 export default function ExpensesPage() {
-  const [month, setMonth] = useState(() => monthKey(new Date()));
-  const [category, setCategory] = useState('');
+  const defaultMonth = useMemo(() => monthKey(new Date()), []);
+  const { can } = useCurrentUser();
+  const [month, setMonth] = useState(defaultMonth);
+  const [category, setCategory] = useState(ALL_CATEGORIES);
   const [items, setItems] = useState<ExpenseSummary[]>([]);
   const [totals, setTotals] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [canWrite, setCanWrite] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
+  const [archiving, setArchiving] = useState<ExpenseSummary | null>(null);
+  const [archivePending, setArchivePending] = useState(false);
 
+  const canWrite = can('expenses.write');
   const bounds = useMemo(() => monthBounds(month), [month]);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     const params = new URLSearchParams({ from: bounds.from, to: bounds.to });
-    if (category) params.set('category', category);
+    if (category !== ALL_CATEGORIES) params.set('category', category);
     try {
       const response = await api<{
         items: ExpenseSummary[];
@@ -72,7 +89,7 @@ export default function ExpensesPage() {
       setItems(response.items);
       setTotals(response.totalsByCategory);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Не удалось загрузить расходы');
+      setError(apiErrorMessage(caught, 'Не удалось загрузить расходы'));
     } finally {
       setLoading(false);
     }
@@ -82,149 +99,181 @@ export default function ExpensesPage() {
     void load();
   }, [load]);
 
-  useEffect(() => {
-    void api<CurrentUser>('/auth/me')
-      .then((user) => setCanWrite(user.permissions.includes('expenses.write')))
-      .catch(() => setCanWrite(false));
-  }, []);
-
   async function archiveExpense(expense: ExpenseSummary) {
-    if (!window.confirm(`Удалить расход «${expense.description}»?`)) return;
+    setArchivePending(true);
     try {
       await api(`/expenses/${expense.id}`, {
         method: 'PATCH',
         body: JSON.stringify({ version: expense.version, archive: true }),
       });
+      setArchiving(null);
+      toast.success('Расход удалён');
       await load();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Не удалось удалить расход');
+      toast.error(apiErrorMessage(caught, 'Не удалось удалить расход'));
+    } finally {
+      setArchivePending(false);
     }
   }
 
   const totalAmount = Object.values(totals).reduce((sum, value) => sum + value, 0);
+  const filtersTouched = category !== ALL_CATEGORIES || month !== defaultMonth;
+  const columnCount = canWrite ? 6 : 5;
 
   return (
-    <div className="page-stack">
-      <section className="page-heading page-heading--split">
-        <div>
-          <p className="eyebrow">Переменные, операционные, привлечение и активация</p>
-          <h1>Расходы</h1>
-          <p>
-            Каждый расход привязан хотя бы к одному уровню: период, мероприятие, продукт, сделка
-            или проект. На этих данных считаются поток, OpEx % и стоимости.
-          </p>
+    <PageStack>
+      <PageHeader
+        eyebrow="Переменные, операционные, привлечение и активация"
+        title="Расходы"
+        description="Каждый расход привязан хотя бы к одному уровню: период, мероприятие, продукт, сделка или проект. На этих данных считаются поток, OpEx % и стоимости."
+        actions={
+          canWrite ? (
+            <Button onClick={() => setShowCreate(true)}>
+              <PlusIcon /> Новый расход
+            </Button>
+          ) : undefined
+        }
+      />
+
+      <DataToolbar>
+        <div className="flex flex-col gap-1">
+          <span className="text-muted-foreground text-[11px] font-semibold tracking-wide uppercase">
+            Период
+          </span>
+          <div className="flex items-center gap-1.5">
+            <Button
+              aria-label="Предыдущий месяц"
+              onClick={() => setMonth((current) => shiftMonth(current, -1))}
+              size="icon-sm"
+              type="button"
+              variant="outline"
+            >
+              <ChevronLeftIcon />
+            </Button>
+            <Input
+              aria-label="Период"
+              className="h-8 w-40 tabular"
+              onChange={(event) => event.target.value && setMonth(event.target.value)}
+              type="month"
+              value={month}
+            />
+            <Button
+              aria-label="Следующий месяц"
+              onClick={() => setMonth((current) => shiftMonth(current, 1))}
+              size="icon-sm"
+              type="button"
+              variant="outline"
+            >
+              <ChevronRightIcon />
+            </Button>
+          </div>
         </div>
-        {canWrite && (
-          <div className="heading-actions">
-            <button className="button button--primary" onClick={() => setShowCreate(true)}>
-              <Plus size={17} /> Новый расход
-            </button>
-          </div>
-        )}
-      </section>
 
-      <section className="registry-toolbar registry-toolbar--filters">
-        <button
-          aria-label="Предыдущий месяц"
-          className="button button--secondary button--compact"
-          onClick={() => setMonth((current) => shiftMonth(current, -1))}
-          type="button"
-        >
-          <ChevronLeft size={16} />
-        </button>
-        <input
-          aria-label="Период"
-          className="select-control"
-          onChange={(event) => event.target.value && setMonth(event.target.value)}
-          type="month"
-          value={month}
-        />
-        <button
-          aria-label="Следующий месяц"
-          className="button button--secondary button--compact"
-          onClick={() => setMonth((current) => shiftMonth(current, 1))}
-          type="button"
-        >
-          <ChevronRight size={16} />
-        </button>
-        <select
-          aria-label="Категория"
-          className="select-control"
-          onChange={(event) => setCategory(event.target.value)}
+        <ToolbarSelect
+          label="Категория"
           value={category}
-        >
-          <option value="">Все категории</option>
-          {Object.entries(EXPENSE_CATEGORY_LABELS).map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </select>
-        <span className="registry-result-count">
-          Итого за период: {formatMoney(totalAmount)}
+          onChange={setCategory}
+          options={[
+            { value: ALL_CATEGORIES, label: 'Все категории' },
+            ...EXPENSE_CATEGORY_ORDER.map((value) => ({
+              value,
+              label: EXPENSE_CATEGORY_LABELS[value],
+            })),
+          ]}
+        />
+
+        {filtersTouched && (
+          <ToolbarReset
+            onClick={() => {
+              setCategory(ALL_CATEGORIES);
+              setMonth(defaultMonth);
+            }}
+          />
+        )}
+
+        <ToolbarSpacer />
+        <span className="text-muted-foreground pb-1.5 text-[13px]">
+          Итого за период:{' '}
+          <span className="text-foreground font-semibold tabular">{formatMoney(totalAmount)}</span>
         </span>
-      </section>
+      </DataToolbar>
 
-      <section className="metric-grid">
-        {Object.entries(EXPENSE_CATEGORY_LABELS).map(([value, label]) => (
-          <div className="metric-card" key={value} title={EXPENSE_CATEGORY_HINTS[value as ExpenseCategory]}>
-            <span className="metric-card__label">{label}</span>
-            <strong>{formatMoney(totals[value] ?? 0)}</strong>
-          </div>
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+        {EXPENSE_CATEGORY_ORDER.map((value) => (
+          <Tooltip key={value}>
+            <TooltipTrigger asChild>
+              <Card className="gap-1 px-4 py-3">
+                <span className="text-muted-foreground text-[11px] font-semibold tracking-wide uppercase">
+                  {EXPENSE_CATEGORY_LABELS[value]}
+                </span>
+                {loading ? (
+                  <Skeleton className="h-6 w-24" />
+                ) : (
+                  <strong className="text-lg leading-tight font-semibold tabular">
+                    {formatMoney(totals[value] ?? 0)}
+                  </strong>
+                )}
+              </Card>
+            </TooltipTrigger>
+            <TooltipContent>{EXPENSE_CATEGORY_HINTS[value]}</TooltipContent>
+          </Tooltip>
         ))}
-      </section>
+      </div>
 
-      <section className="table-panel">
+      <Card className="overflow-hidden">
         {error ? (
           <EmptyState title="Ошибка загрузки" text={error} />
         ) : !loading && items.length === 0 ? (
           <EmptyState
+            icon={WalletIcon}
             title="Расходов за период нет"
             text="Добавьте расходы, чтобы панель метрик считала поток, OpEx % и стоимости."
           />
         ) : (
-          <div className="table-scroll">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Дата</th>
-                  <th>Категория</th>
-                  <th>Описание</th>
-                  <th>Привязка</th>
-                  <th className="number-cell">Сумма</th>
+          <TableWrapper>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Дата</TableHead>
+                  <TableHead>Категория</TableHead>
+                  <TableHead>Описание</TableHead>
+                  <TableHead>Привязка</TableHead>
+                  <TableHead className="text-right">Сумма</TableHead>
                   {canWrite && (
-                    <th>
+                    <TableHead>
                       <span className="sr-only">Действия</span>
-                    </th>
+                    </TableHead>
                   )}
-                </tr>
-              </thead>
-              <tbody>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {loading
                   ? Array.from({ length: 5 }, (_, index) => (
-                      <tr className="skeleton-row" key={index}>
-                        <td colSpan={canWrite ? 6 : 5}>
-                          <span />
-                        </td>
-                      </tr>
+                      <TableRow key={index}>
+                        <TableCell colSpan={columnCount}>
+                          <Skeleton className="h-5 w-full" />
+                        </TableCell>
+                      </TableRow>
                     ))
                   : items.map((expense) => (
-                      <tr key={expense.id}>
-                        <td>{expense.occurredAt ? formatDate(expense.occurredAt) : '—'}</td>
-                        <td>
-                          <span className="event-status">
+                      <TableRow key={expense.id}>
+                        <TableCell className="text-muted-foreground whitespace-nowrap tabular">
+                          {expense.occurredAt ? formatDate(expense.occurredAt) : '—'}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="soft-muted">
                             {EXPENSE_CATEGORY_LABELS[expense.category]}
-                          </span>
-                        </td>
-                        <td>
-                          <span className="event-name-cell">
-                            <span className="table-file-icon">
-                              <Wallet size={16} />
+                          </Badge>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-2.5">
+                            <span className="bg-muted text-muted-foreground flex size-7 shrink-0 items-center justify-center rounded-md">
+                              <WalletIcon className="size-4" />
                             </span>
-                            <span>{expense.description}</span>
-                          </span>
-                        </td>
-                        <td>
+                            <span className="font-medium">{expense.description}</span>
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">
                           {[
                             expense.eventName,
                             expense.productName,
@@ -233,32 +282,34 @@ export default function ExpensesPage() {
                           ]
                             .filter(Boolean)
                             .join(' · ') || 'период'}
-                        </td>
-                        <td className="number-cell">
+                        </TableCell>
+                        <TableCell className="text-right font-medium whitespace-nowrap tabular">
                           {formatMoney(expense.amount, expense.currency)}
-                        </td>
+                        </TableCell>
                         {canWrite && (
-                          <td>
-                            <button
+                          <TableCell className="text-right">
+                            <Button
                               aria-label={`Удалить «${expense.description}»`}
-                              className="icon-button"
-                              onClick={() => void archiveExpense(expense)}
+                              className="text-muted-foreground hover:text-destructive"
+                              onClick={() => setArchiving(expense)}
+                              size="icon-sm"
                               type="button"
+                              variant="ghost"
                             >
-                              <Trash2 size={16} />
-                            </button>
-                          </td>
+                              <Trash2Icon />
+                            </Button>
+                          </TableCell>
                         )}
-                      </tr>
+                      </TableRow>
                     ))}
-              </tbody>
-            </table>
-          </div>
+              </TableBody>
+            </Table>
+          </TableWrapper>
         )}
-      </section>
+      </Card>
 
       {showCreate && (
-        <CreateExpenseDialog
+        <ExpenseDialog
           onClose={() => setShowCreate(false)}
           onCreated={() => {
             setShowCreate(false);
@@ -266,206 +317,38 @@ export default function ExpensesPage() {
           }}
         />
       )}
-    </div>
-  );
-}
 
-function CreateExpenseDialog({
-  onClose,
-  onCreated,
-}: {
-  onClose: () => void;
-  onCreated: () => void;
-}) {
-  const [category, setCategory] = useState<ExpenseCategory>('VARIABLE');
-  const [amount, setAmount] = useState('');
-  const [occurredAt, setOccurredAt] = useState(() => new Date().toISOString().slice(0, 10));
-  const [description, setDescription] = useState('');
-  const [eventId, setEventId] = useState('');
-  const [productId, setProductId] = useState('');
-  const [dealId, setDealId] = useState('');
-  const [events, setEvents] = useState<EventSummary[]>([]);
-  const [products, setProducts] = useState<ProductSummary[]>([]);
-  const [deals, setDeals] = useState<DealSummary[]>([]);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === 'Escape' && !saving) onClose();
-    }
-    window.addEventListener('keydown', closeOnEscape);
-    return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [onClose, saving]);
-
-  useEffect(() => {
-    void api<{ items: EventSummary[] }>('/events')
-      .then((response) => setEvents(response.items))
-      .catch(() => setEvents([]));
-    void api<{ items: ProductSummary[] }>('/products')
-      .then((response) => setProducts(response.items))
-      .catch(() => setProducts([]));
-    void api<{ items: DealSummary[] }>('/deals')
-      .then((response) => setDeals(response.items))
-      .catch(() => setDeals([]));
-  }, []);
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setError(null);
-    setSaving(true);
-    try {
-      await api('/expenses', {
-        method: 'POST',
-        body: JSON.stringify({
-          category,
-          amount: Number(amount || 0),
-          occurredAt: new Date(`${occurredAt}T12:00:00`).toISOString(),
-          description: description.trim(),
-          ...(eventId ? { eventId } : {}),
-          ...(productId ? { productId } : {}),
-          ...(dealId ? { dealId } : {}),
-        }),
-      });
-      onCreated();
-    } catch (caught) {
-      setError(
-        caught instanceof ApiError
-          ? (caught.detail ?? caught.message)
-          : 'Не удалось создать расход',
-      );
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={() => !saving && onClose()}>
-      <section
-        aria-modal="true"
-        className="dialog"
-        onMouseDown={(event) => event.stopPropagation()}
-        role="dialog"
-      >
-        <header className="dialog__header">
-          <div>
-            <p className="eyebrow">Учёт затрат</p>
-            <h2>Новый расход</h2>
-          </div>
-          <button
-            aria-label="Закрыть"
-            className="icon-button"
-            disabled={saving}
-            onClick={onClose}
-            type="button"
-          >
-            <X size={18} />
-          </button>
-        </header>
-        <form onSubmit={submit}>
-          <div className="form-grid">
-            <label className="form-field">
-              <span>Категория *</span>
-              <select
-                onChange={(event) => setCategory(event.target.value as ExpenseCategory)}
-                title={EXPENSE_CATEGORY_HINTS[category]}
-                value={category}
+      {archiving && (
+        <Dialog open onOpenChange={(open) => !open && !archivePending && setArchiving(null)}>
+          <DialogContent className="sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle>Удалить расход?</DialogTitle>
+            </DialogHeader>
+            <DialogBody className="text-[13px]">
+              «{archiving.description}» на сумму {formatMoney(archiving.amount, archiving.currency)}{' '}
+              перестанет учитываться в метриках периода.
+            </DialogBody>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                type="button"
+                disabled={archivePending}
+                onClick={() => setArchiving(null)}
               >
-                {Object.entries(EXPENSE_CATEGORY_LABELS).map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="form-field">
-              <span>Сумма, ₽ *</span>
-              <input
-                min={0.01}
-                onChange={(event) => setAmount(event.target.value)}
-                required
-                step="0.01"
-                type="number"
-                value={amount}
-              />
-            </label>
-            <label className="form-field">
-              <span>Дата *</span>
-              <input
-                onChange={(event) => setOccurredAt(event.target.value)}
-                required
-                type="date"
-                value={occurredAt}
-              />
-            </label>
-            <label className="form-field form-field--full">
-              <span>Описание *</span>
-              <input
-                maxLength={2000}
-                minLength={2}
-                onChange={(event) => setDescription(event.target.value)}
-                placeholder="Например, призовой фонд хакатона"
-                required
-                value={description}
-              />
-            </label>
-            <label className="form-field">
-              <span>Мероприятие</span>
-              <select onChange={(event) => setEventId(event.target.value)} value={eventId}>
-                <option value="">Не привязан</option>
-                {events.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="form-field">
-              <span>Продукт</span>
-              <select onChange={(event) => setProductId(event.target.value)} value={productId}>
-                <option value="">Не привязан</option>
-                {products.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="form-field">
-              <span>Сделка</span>
-              <select onChange={(event) => setDealId(event.target.value)} value={dealId}>
-                <option value="">Не привязан</option>
-                {deals.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.title}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          {error && (
-            <p aria-live="polite" className="form-error">
-              {error}
-            </p>
-          )}
-          <footer className="dialog__footer">
-            <button
-              className="button button--secondary"
-              disabled={saving}
-              onClick={onClose}
-              type="button"
-            >
-              Отмена
-            </button>
-            <button
-              className="button button--primary"
-              disabled={saving || description.trim().length < 2 || amount === ''}
-              type="submit"
-            >
-              {saving ? 'Создаём…' : 'Добавить расход'}
-            </button>
-          </footer>
-        </form>
-      </section>
-    </div>
+                Отмена
+              </Button>
+              <Button
+                variant="destructive"
+                type="button"
+                disabled={archivePending}
+                onClick={() => void archiveExpense(archiving)}
+              >
+                {archivePending ? 'Удаляем…' : 'Удалить'}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+    </PageStack>
   );
 }

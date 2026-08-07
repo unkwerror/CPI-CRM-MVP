@@ -136,14 +136,14 @@ export async function revertMergeOperation(
        JOIN tasks current_task
          ON current_task.person_id = restored_task.person_id
         AND current_task.id <> restored_task.id
-        AND current_task.status = 'OPEN'
+        AND current_task.status NOT IN ('DONE', 'CANCELLED')
         AND current_task.is_next_step
         AND current_task.archived_at IS NULL
       WHERE item.merge_operation_id = $1
         AND item.entity_type = 'task'
         AND item.field_name = 'is_next_step'
         AND item.reverted_at IS NULL
-        AND restored_task.status = 'OPEN'
+        AND restored_task.status NOT IN ('DONE', 'CANCELLED')
         AND restored_task.archived_at IS NULL
       FOR UPDATE OF restored_task, current_task`,
     [input.operationId],
@@ -219,7 +219,7 @@ export async function revertMergeOperation(
                  AND field_name = 'is_next_step'
                  AND reverted_at IS NULL
             )
-        AND status = 'OPEN' AND archived_at IS NULL`,
+        AND status NOT IN ('DONE', 'CANCELLED') AND archived_at IS NULL`,
     [input.operationId],
   );
 

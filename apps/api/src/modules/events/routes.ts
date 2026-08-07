@@ -1,10 +1,17 @@
-import { Permissions, hasPermission } from '@cpi-crm/domain';
+import { Permissions, hasPermission, normalizeFullName, normalizeUnicode } from '@cpi-crm/domain';
 import { EventAttendanceImportError, importEventAttendanceWorkbook } from '@cpi-crm/importer';
 import { Type } from '@sinclair/typebox';
 import type { FastifyInstance } from 'fastify';
 
+import { writeAudit } from '../../lib/audit.js';
+import { EVENT_ARTIFACTS_SQL, mapEventArtifactRow } from '../../lib/event-artifacts.js';
+import {
+  EVENT_DUPLICATE_SUGGESTIONS_SQL,
+  mapEventDuplicateRow,
+} from '../../lib/event-duplicates.js';
 import { getOrganizationContext } from '../../lib/organization.js';
 import { HttpProblem } from '../../lib/problem.js';
+import { transaction } from '../../lib/sql.js';
 
 const LIVE_ACTIVITY_SQL = `CASE
   WHEN p.activation_state <> 'ACTIVATED' OR p.last_artifact_at IS NULL THEN 'UNKNOWN'
@@ -88,7 +95,7 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
       const offsetParameter = values.length;
       const result = await app.pool.query(
         `WITH event_registry AS (
-         SELECT e.id, e.name, e.normalized_name, e.status, e.starts_at, e.ends_at,
+         SELECT e.id, e.name, e.normalized_name, e.status, e.starts_at, e.ends_at, e.version,
                 count(DISTINCT COALESCE(participant.merged_into_person_id, participant.id))
                   FILTER (WHERE participant.id IS NOT NULL AND participant.archived_at IS NULL)
                   AS participant_count,
@@ -108,7 +115,7 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
            ORDER BY starts_at DESC NULLS LAST, normalized_name, id
            LIMIT $${limitParameter} OFFSET $${offsetParameter}
         )
-        SELECT page.id, page.name, page.status, page.starts_at, page.ends_at,
+        SELECT page.id, page.name, page.status, page.starts_at, page.ends_at, page.version,
                page.participant_count::text AS participant_count,
                page.artifact_count::text AS artifact_count,
                totals.total_count::text AS total_count
@@ -126,6 +133,7 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
             status: row.status,
             startsAt: row.starts_at?.toISOString() ?? null,
             endsAt: row.ends_at?.toISOString() ?? null,
+            version: Number(row.version),
             participantCount: Number(row.participant_count),
             artifactCount: Number(row.artifact_count),
           })),
@@ -173,6 +181,215 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  app.patch(
+    '/events/:id',
+    {
+      preHandler: app.requirePermission(Permissions.EVENTS_WRITE),
+      schema: {
+        tags: ['Мероприятия'],
+        summary: 'Изменить мероприятие',
+        params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
+        body: Type.Object(
+          {
+            version: Type.Integer({ minimum: 1 }),
+            name: Type.Optional(Type.String({ minLength: 2, maxLength: 500 })),
+            status: Type.Optional(
+              Type.Union([
+                Type.Literal('PLANNED'),
+                Type.Literal('ACTIVE'),
+                Type.Literal('COMPLETED'),
+                Type.Literal('CANCELLED'),
+              ]),
+            ),
+            startsAt: Type.Optional(Type.Union([Type.String({ format: 'date-time' }), Type.Null()])),
+            endsAt: Type.Optional(Type.Union([Type.String({ format: 'date-time' }), Type.Null()])),
+          },
+          { additionalProperties: false },
+        ),
+      },
+    },
+    async (request) => {
+      const eventId = (request.params as { id: string }).id;
+      const body = request.body as {
+        version: number;
+        name?: string;
+        status?: 'PLANNED' | 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
+        startsAt?: string | null;
+        endsAt?: string | null;
+      };
+      const organization = await getOrganizationContext(app.pool);
+
+      return transaction(app.pool, async (client) => {
+        const current = await client.query<{
+          id: string;
+          name: string;
+          normalized_name: string;
+          status: string;
+          starts_at: Date | null;
+          ends_at: Date | null;
+          version: number;
+        }>(
+          `SELECT id, name, normalized_name, status, starts_at, ends_at, version
+             FROM events
+            WHERE id = $1 AND organization_id = $2 AND archived_at IS NULL
+            FOR UPDATE`,
+          [eventId, organization.id],
+        );
+        const event = current.rows[0];
+        if (!event) throw new HttpProblem(404, 'Мероприятие не найдено');
+        if (event.version !== body.version)
+          throw new HttpProblem(409, 'Мероприятие уже изменено другим пользователем');
+
+        const name = body.name
+          ? normalizeUnicode(body.name).replace(/\s+/gu, ' ').trim()
+          : event.name;
+        if (!name) throw new HttpProblem(400, 'Название не может быть пустым');
+        const normalizedName = normalizeFullName(name);
+        if (normalizedName !== event.normalized_name) {
+          const duplicate = await client.query(
+            `SELECT 1 FROM events
+              WHERE organization_id = $1 AND normalized_name = $2 AND id <> $3
+                AND archived_at IS NULL
+              LIMIT 1`,
+            [organization.id, normalizedName, eventId],
+          );
+          if (duplicate.rows[0])
+            throw new HttpProblem(409, 'Мероприятие с таким названием уже существует');
+        }
+
+        const startsAt =
+          body.startsAt === undefined
+            ? event.starts_at
+            : body.startsAt === null
+              ? null
+              : new Date(body.startsAt);
+        const endsAt =
+          body.endsAt === undefined
+            ? event.ends_at
+            : body.endsAt === null
+              ? null
+              : new Date(body.endsAt);
+        if (endsAt && !startsAt) throw new HttpProblem(400, 'Дата окончания требует даты начала');
+        if (startsAt && endsAt && endsAt <= startsAt)
+          throw new HttpProblem(400, 'Дата окончания должна быть позже начала');
+
+        const updated = await client.query<{
+          id: string;
+          name: string;
+          status: string;
+          starts_at: Date | null;
+          ends_at: Date | null;
+          version: number;
+        }>(
+          `UPDATE events
+              SET name = $2, normalized_name = $3, status = $4,
+                  starts_at = $5, ends_at = $6,
+                  version = version + 1, updated_at = now()
+            WHERE id = $1
+            RETURNING id, name, status, starts_at, ends_at, version`,
+          [eventId, name, normalizedName, body.status ?? event.status, startsAt, endsAt],
+        );
+
+        await writeAudit(client, {
+          actor: request.authUser!,
+          requestId: request.id,
+          action: 'event.updated',
+          entityType: 'event',
+          entityId: eventId,
+          before: {
+            name: event.name,
+            status: event.status,
+            startsAt: event.starts_at?.toISOString() ?? null,
+            endsAt: event.ends_at?.toISOString() ?? null,
+          },
+          after: {
+            name,
+            status: body.status ?? event.status,
+            startsAt: startsAt?.toISOString() ?? null,
+            endsAt: endsAt?.toISOString() ?? null,
+          },
+        });
+
+        const row = updated.rows[0]!;
+        return {
+          id: row.id,
+          name: row.name,
+          status: row.status,
+          startsAt: row.starts_at?.toISOString() ?? null,
+          endsAt: row.ends_at?.toISOString() ?? null,
+          version: row.version,
+        };
+      });
+    },
+  );
+
+  app.get(
+    '/events/:id/artifacts',
+    {
+      preHandler: app.requirePermission(Permissions.ARTIFACTS_READ),
+      schema: {
+        tags: ['Мероприятия'],
+        summary: 'Артефакты мероприятия с авторами и файлами',
+        params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
+      },
+    },
+    async (request) => {
+      const eventId = (request.params as { id: string }).id;
+      const organization = await getOrganizationContext(app.pool);
+      const event = await app.pool.query(
+        'SELECT id FROM events WHERE id = $1 AND organization_id = $2 AND archived_at IS NULL',
+        [eventId, organization.id],
+      );
+      if (!event.rows[0]) throw new HttpProblem(404, 'Мероприятие не найдено');
+
+      const [artifacts, participants] = await Promise.all([
+        app.pool.query(EVENT_ARTIFACTS_SQL, [eventId]),
+        app.pool.query<{ id: string; canonical_full_name: string }>(
+          `SELECT DISTINCT p.id, p.canonical_full_name
+             FROM event_participations participation
+             JOIN persons observed ON observed.id = participation.person_id
+             JOIN persons p ON p.id = COALESCE(observed.merged_into_person_id, observed.id)
+            WHERE participation.event_id = $1
+              AND participation.archived_at IS NULL
+              AND p.archived_at IS NULL
+            ORDER BY p.canonical_full_name`,
+          [eventId],
+        ),
+      ]);
+
+      return {
+        items: artifacts.rows.map(mapEventArtifactRow),
+        participants: participants.rows.map((row) => ({
+          id: row.id,
+          canonicalFullName: row.canonical_full_name,
+        })),
+      };
+    },
+  );
+
+  app.get(
+    '/events/:id/duplicate-suggestions',
+    {
+      preHandler: app.requirePermission(Permissions.PEOPLE_READ),
+      schema: {
+        tags: ['Мероприятия'],
+        summary: 'Возможные дубли участников мероприятия',
+        params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
+      },
+    },
+    async (request) => {
+      const eventId = (request.params as { id: string }).id;
+      const organization = await getOrganizationContext(app.pool);
+      const event = await app.pool.query(
+        'SELECT id FROM events WHERE id = $1 AND organization_id = $2 AND archived_at IS NULL',
+        [eventId, organization.id],
+      );
+      if (!event.rows[0]) throw new HttpProblem(404, 'Мероприятие не найдено');
+      const result = await app.pool.query(EVENT_DUPLICATE_SUGGESTIONS_SQL, [eventId]);
+      return { items: result.rows.map(mapEventDuplicateRow) };
+    },
+  );
+
   app.get(
     '/events/:id',
     {
@@ -187,7 +404,7 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
       const eventId = (request.params as { id: string }).id;
       const organization = await getOrganizationContext(app.pool);
       const eventResult = await app.pool.query(
-        `SELECT id, name, status, starts_at, ends_at
+        `SELECT id, name, status, starts_at, ends_at, version
            FROM events
           WHERE id = $1 AND organization_id = $2 AND archived_at IS NULL`,
         [eventId, organization.id],
@@ -325,6 +542,7 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
         status: event.status,
         startsAt: event.starts_at?.toISOString() ?? null,
         endsAt: event.ends_at?.toISOString() ?? null,
+        version: Number(event.version),
         participants: participants.rows.map((row) => ({
           id: row.id,
           canonicalFullName: row.canonical_full_name,

@@ -1,156 +1,107 @@
 'use client';
 
 import {
-  ArrowLeft,
-  CalendarDays,
-  Clock3,
-  ExternalLink,
-  FilePlus2,
-  Mail,
-  MapPin,
-  MessageCircle,
-  Pencil,
-  Phone,
-  Plus,
-  RotateCcw,
-  Search,
-  Tag,
+  CalendarDaysIcon,
+  Clock3Icon,
+  ExternalLinkIcon,
+  FileIcon,
+  FilePlus2Icon,
+  MailIcon,
+  MapPinIcon,
+  MessageCircleIcon,
+  PencilIcon,
+  PhoneIcon,
+  PlusIcon,
+  TagIcon,
 } from 'lucide-react';
-import Link from 'next/link';
-import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  type ComponentProps,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
+import { toast } from 'sonner';
 
 import { ArtifactReviewDialog } from '@/components/artifact-review-dialog';
+import { ArtifactSubmitDialog } from '@/components/artifact-submit-dialog';
+import {
+  DataToolbar,
+  ToolbarSearch,
+  ToolbarSelect,
+  ToolbarSpacer,
+} from '@/components/data-toolbar';
 import { EditPersonDialog } from '@/components/edit-person-dialog';
 import { EmptyState } from '@/components/empty-state';
+import { PageHeader, PageStack } from '@/components/page-header';
+import { PersonContactDialog } from '@/components/person-contact-dialog';
+import { PersonInteractionDialog } from '@/components/person-interaction-dialog';
 import { StatusBadge } from '@/components/status-badge';
-import { ApiError, api, formatDate, initials } from '@/lib/api';
-import type { CurrentUser, PersonDetail } from '@/lib/types';
+import { TaskDialog } from '@/components/task-dialog';
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Textarea } from '@/components/ui/textarea';
+import { useCurrentUser } from '@/hooks/use-current-user';
+import { api, apiErrorMessage, formatDate, initials } from '@/lib/api';
+import {
+  ARTIFACT_VERSION_STATUS_LABELS,
+  ATTENDANCE_LABELS,
+  EVENT_STATUS_LABELS,
+  EVENT_STATUS_VARIANTS,
+  PARTICIPATION_DECISION_LABELS,
+  TASK_STATUS_LABELS,
+  TASK_STATUS_VARIANTS,
+  scoreVariant,
+} from '@/lib/status-labels';
+import type { ArtifactSummary, PersonDetail } from '@/lib/types';
 
+type BadgeVariant = ComponentProps<typeof Badge>['variant'];
 type Tab = 'overview' | 'events' | 'artifacts' | 'history';
-
-const ARTIFACT_TYPES = [
-  {
-    code: 'PITCH_DECK',
-    label: 'Презентация / pitch deck',
-    description: 'Слайды для защиты проекта или встречи с партнёрами',
-  },
-  {
-    code: 'CODE_REPOSITORY',
-    label: 'Код или репозиторий',
-    description: 'Ссылка на исходный код и техническую реализацию',
-  },
-  {
-    code: 'APPLICATION',
-    label: 'Заявка',
-    description: 'Заявка на конкурс, грант, акселератор или программу',
-  },
-  {
-    code: 'INTERVIEW',
-    label: 'Интервью',
-    description: 'Кастдев, интервью с клиентом или экспертом',
-  },
-  {
-    code: 'FINANCIAL_MODEL',
-    label: 'Финансовая модель',
-    description: 'Экономика проекта, бюджет или финансовый прогноз',
-  },
-  {
-    code: 'HOMEWORK',
-    label: 'Домашнее задание',
-    description: 'Результат задания по программе мероприятия',
-  },
-  {
-    code: 'REPORT_RESEARCH',
-    label: 'Отчёт / исследование',
-    description: 'Аналитический отчёт, исследование или результаты проверки гипотез',
-  },
-  {
-    code: 'PROTOTYPE_MVP',
-    label: 'Прототип / MVP',
-    description: 'Демонстрация продукта, макет или работающий прототип',
-  },
-  {
-    code: 'OTHER',
-    label: 'Другое',
-    description: 'Другой подтверждённый результат участника',
-  },
-] as const;
-
 type ArtifactFilterStatus = 'ALL' | 'DRAFT' | 'SUBMITTED' | 'PENDING_REVIEW' | 'REVIEWED';
+
+const ARTIFACT_STATUS_OPTIONS = [
+  { value: 'ALL', label: 'Все статусы' },
+  { value: 'SUBMITTED', label: 'Отправленные' },
+  { value: 'PENDING_REVIEW', label: 'Ожидают оценки' },
+  { value: 'REVIEWED', label: 'Оценённые' },
+  { value: 'DRAFT', label: 'Черновики' },
+];
 
 export function PersonPageClient({ id }: { id: string }) {
   const [person, setPerson] = useState<PersonDetail | null>(null);
   const [tab, setTab] = useState<Tab>('overview');
   const [showArtifact, setShowArtifact] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
+  const [showContact, setShowContact] = useState(false);
+  const [showInteraction, setShowInteraction] = useState(false);
+  const [showTask, setShowTask] = useState(false);
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
-  const [permissions, setPermissions] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [notesDraft, setNotesDraft] = useState<string | null>(null);
   const [savingNotes, setSavingNotes] = useState(false);
-  const canEditPerson = permissions.includes('people.write');
-  const canEditContacts = permissions.includes('contacts.write');
+  const { can } = useCurrentUser();
+  const canEditPerson = can('people.write');
+  const canEditContacts = can('contacts.write');
+  const canManageTasks = can('tasks.manage');
+  const canAddArtifact = can('artifacts.write');
 
-  async function reload() {
+  const reload = useCallback(async () => {
     try {
       setPerson(await api<PersonDetail>(`/people/${id}`));
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Карточка недоступна');
+      setError(apiErrorMessage(caught, 'Карточка недоступна'));
     }
-  }
+  }, [id]);
 
   useEffect(() => {
     void reload();
-    void api<CurrentUser>('/auth/me')
-      .then((user) => setPermissions(user.permissions))
-      .catch(() => setPermissions([]));
-  }, [id]);
-
-  async function addContact() {
-    const selected = window.prompt('Тип контакта: PHONE, EMAIL, TELEGRAM, MAX или OTHER', 'PHONE');
-    if (selected === null) return;
-    const type = selected.trim().toUpperCase();
-    if (!['PHONE', 'EMAIL', 'TELEGRAM', 'MAX', 'OTHER'].includes(type)) {
-      window.alert('Неизвестный тип контакта.');
-      return;
-    }
-    const value = window.prompt('Значение контакта:')?.trim();
-    if (!value) return;
-    try {
-      await api(`/people/${person?.id ?? id}/contacts`, {
-        method: 'POST',
-        body: JSON.stringify({ type, value, isPrimary: true }),
-      });
-      await reload();
-    } catch (caught) {
-      window.alert(apiErrorMessage(caught, 'Не удалось добавить контакт'));
-    }
-  }
-
-  async function createTask() {
-    const title = window.prompt('Что нужно сделать?')?.trim();
-    if (!title) return;
-    const due = window.prompt('Срок в формате ГГГГ-ММ-ДД ЧЧ:ММ (необязательно):', '')?.trim();
-    const dueDate = due ? new Date(due.replace(' ', 'T')) : null;
-    if (dueDate && !Number.isFinite(dueDate.getTime())) {
-      window.alert('Некорректный срок задачи.');
-      return;
-    }
-    try {
-      await api('/tasks', {
-        method: 'POST',
-        body: JSON.stringify({
-          personId: person?.id ?? id,
-          title,
-          dueAt: dueDate?.toISOString(),
-          isNextStep: true,
-        }),
-      });
-      await reload();
-    } catch (caught) {
-      window.alert(apiErrorMessage(caught, 'Не удалось создать задачу'));
-    }
-  }
+  }, [reload]);
 
   async function saveNotes() {
     if (!person || notesDraft === null) return;
@@ -161,9 +112,10 @@ export function PersonPageClient({ id }: { id: string }) {
         body: JSON.stringify({ version: person.version, notes: notesDraft.trim() || null }),
       });
       setNotesDraft(null);
+      toast.success('Заметки сохранены');
       await reload();
     } catch (caught) {
-      window.alert(apiErrorMessage(caught, 'Не удалось сохранить заметки'));
+      toast.error(apiErrorMessage(caught, 'Не удалось сохранить заметки'));
     } finally {
       setSavingNotes(false);
     }
@@ -172,46 +124,15 @@ export function PersonPageClient({ id }: { id: string }) {
   async function completeTask(taskId: string) {
     try {
       await api(`/tasks/${taskId}/complete`, { method: 'POST', body: JSON.stringify({}) });
+      toast.success('Задача завершена');
       await reload();
     } catch (caught) {
-      window.alert(apiErrorMessage(caught, 'Не удалось завершить задачу'));
-    }
-  }
-
-  async function addInteraction() {
-    const selected = window.prompt(
-      'Канал: EMAIL, PHONE, TELEGRAM, MAX, IN_PERSON или OTHER',
-      'PHONE',
-    );
-    if (selected === null) return;
-    const channel = selected.trim().toUpperCase();
-    if (!['EMAIL', 'PHONE', 'TELEGRAM', 'MAX', 'IN_PERSON', 'OTHER'].includes(channel)) {
-      window.alert('Неизвестный канал взаимодействия.');
-      return;
-    }
-    const outcome = window.prompt('Результат взаимодействия:')?.trim();
-    if (outcome === undefined) return;
-    const comment = window.prompt('Комментарий (необязательно):', '')?.trim();
-    try {
-      await api('/interactions', {
-        method: 'POST',
-        body: JSON.stringify({
-          personId: person?.id ?? id,
-          channel,
-          direction: 'OUTBOUND',
-          occurredAt: new Date().toISOString(),
-          outcome: outcome || undefined,
-          comment: comment || undefined,
-        }),
-      });
-      window.alert('Взаимодействие сохранено.');
-    } catch (caught) {
-      window.alert(apiErrorMessage(caught, 'Не удалось сохранить взаимодействие'));
+      toast.error(apiErrorMessage(caught, 'Не удалось завершить задачу'));
     }
   }
 
   if (error) return <EmptyState title="Не удалось открыть карточку" text={error} />;
-  if (!person) return <div className="page-loading">Загружаем карточку…</div>;
+  if (!person) return <PersonSkeleton />;
 
   const statusExplanation =
     person.activationState === 'UNKNOWN_LEGACY'
@@ -223,325 +144,391 @@ export function PersonPageClient({ id }: { id: string }) {
           : `Статус рассчитан по последнему артефакту от ${formatDate(person.lastArtifactAt, true)}.`;
 
   return (
-    <div className="page-stack">
-      <Link className="back-link" href="/participants">
-        <ArrowLeft size={16} /> К списку участников
-      </Link>
-      <section className="profile-hero">
-        <div className="profile-hero__identity">
-          <span className="avatar avatar--profile">{initials(person.canonicalFullName)}</span>
-          <div>
-            <div className="profile-hero__title-line">
-              <h1>{person.canonicalFullName}</h1>
-            </div>
-            <p>
+    <PageStack>
+      <PageHeader
+        backHref="/participants"
+        backLabel="К списку участников"
+        eyebrow="Карточка участника"
+        title={
+          <span className="flex items-center gap-3">
+            <Avatar className="size-10">
+              <AvatarFallback className="text-sm">
+                {initials(person.canonicalFullName)}
+              </AvatarFallback>
+            </Avatar>
+            {person.canonicalFullName}
+          </span>
+        }
+        description={
+          <span className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+            <span>
               {person.organization ?? 'Организация не указана'}
               {person.faculty ? ` · ${person.faculty}` : ''}
-            </p>
-            <div className="profile-hero__tags">
-              {person.tags?.map((tag) => (
-                <span className="tag-chip" key={tag}>
-                  <Tag size={12} />
-                  {tag}
-                </span>
-              ))}
-            </div>
-          </div>
-        </div>
-        <div className="profile-hero__actions">
-          {canEditPerson && (
-            <button className="button button--secondary" onClick={() => setShowEdit(true)}>
-              <Pencil size={16} /> Редактировать
-            </button>
-          )}
-          {permissions.includes('tasks.manage') && (
-            <button className="button button--secondary" onClick={() => void addInteraction()}>
-              <MessageCircle size={16} /> Взаимодействие
-            </button>
-          )}
-          {permissions.includes('artifacts.write') && (
-            <button className="button button--primary" onClick={() => setShowArtifact(true)}>
-              <FilePlus2 size={16} /> Добавить артефакт
-            </button>
-          )}
-        </div>
-        <div className="profile-lifecycle">
-          <div>
-            <span>Активация</span>
-            <strong>
+            </span>
+            {person.tags?.map((tag) => (
+              <Badge key={tag} variant="soft-muted">
+                <TagIcon /> {tag}
+              </Badge>
+            ))}
+          </span>
+        }
+        actions={
+          <>
+            {canEditPerson && (
+              <Button onClick={() => setShowEdit(true)} variant="outline">
+                <PencilIcon /> Редактировать
+              </Button>
+            )}
+            {canManageTasks && (
+              <Button onClick={() => setShowInteraction(true)} variant="outline">
+                <MessageCircleIcon /> Взаимодействие
+              </Button>
+            )}
+            {canAddArtifact && (
+              <Button onClick={() => setShowArtifact(true)}>
+                <FilePlus2Icon /> Добавить артефакт
+              </Button>
+            )}
+          </>
+        }
+      />
+
+      <Card>
+        <CardContent className="grid gap-5 sm:grid-cols-2 xl:grid-cols-4">
+          <Fact
+            label="Активация"
+            hint={
+              person.activatedAt ? `с ${formatDate(person.activatedAt)}` : 'нет подтверждённой даты'
+            }
+          >
+            <strong className="text-[15px] font-semibold">
               {person.activationState === 'ACTIVATED'
                 ? 'Активирован'
                 : person.activationState === 'NOT_ACTIVATED'
                   ? 'Не активирован'
                   : 'Неизвестно'}
             </strong>
-            <small>
-              {person.activatedAt
-                ? `с ${formatDate(person.activatedAt)}`
-                : 'нет подтверждённой даты'}
-            </small>
-          </div>
-          <div>
-            <span>Текущая активность</span>
+          </Fact>
+          <Fact label="Текущая активность" hint={statusExplanation}>
             <StatusBadge activity={person.activityStatus} activation={person.activationState} />
-            <small>{statusExplanation}</small>
-          </div>
-          <div>
-            <span>Следующая граница</span>
-            <strong>{formatDate(person.nextStatusTransitionAt, true)}</strong>
-            <small>252 / 504 часа по версии правил</small>
-          </div>
-          <div>
-            <span>Ответственный</span>
-            <strong>{person.ownerName ?? 'Не назначен'}</strong>
-            <small>комьюнити-менеджер</small>
-          </div>
-        </div>
-      </section>
+          </Fact>
+          <Fact label="Следующая граница" hint="252 / 504 часа по версии правил">
+            <strong className="text-[15px] font-semibold">
+              {formatDate(person.nextStatusTransitionAt, true)}
+            </strong>
+          </Fact>
+          <Fact label="Ответственный" hint="комьюнити-менеджер">
+            <strong className="text-[15px] font-semibold">
+              {person.ownerName ?? 'Не назначен'}
+            </strong>
+          </Fact>
+        </CardContent>
+      </Card>
 
-      <nav className="profile-tabs">
-        {(
-          [
-            ['overview', 'Обзор'],
-            ['events', `Мероприятия · ${person.events.length}`],
-            ['artifacts', `Артефакты · ${person.artifacts.length}`],
-            ['history', 'История'],
-          ] as const
-        ).map(([value, label]) => (
-          <button
-            key={value}
-            className={tab === value ? 'profile-tab profile-tab--active' : 'profile-tab'}
-            onClick={() => setTab(value)}
-          >
-            {label}
-          </button>
-        ))}
-      </nav>
+      <Tabs value={tab} onValueChange={(value) => setTab(value as Tab)}>
+        <TabsList>
+          <TabsTrigger value="overview">Обзор</TabsTrigger>
+          <TabsTrigger value="events">Мероприятия · {person.events.length}</TabsTrigger>
+          <TabsTrigger value="artifacts">Артефакты · {person.artifacts.length}</TabsTrigger>
+          <TabsTrigger value="history">История</TabsTrigger>
+        </TabsList>
 
-      {tab === 'overview' && (
-        <section className="profile-grid">
-          {person.headQuality && (
-            <article className="panel panel--wide">
-              <header className="panel__header">
-                <div>
-                  <p className="eyebrow">Индекс качества головы (0–100)</p>
-                  <h2>
-                    Q_head: {person.headQuality.score} — {person.headQuality.bandLabel}
-                  </h2>
-                </div>
-              </header>
-              <div className="artifact-activity">
-                <div>
-                  <strong>{person.headQuality.components.artifactQuality}</strong>
-                  <span>качество артефактов за 90 дней (вес 35 %)</span>
-                </div>
-                <div>
-                  <strong>{person.headQuality.components.regularity}</strong>
-                  <span>регулярность качественных артефактов (вес 25 %)</span>
-                </div>
-                <div>
-                  <strong>{person.headQuality.components.projectInvolvement}</strong>
-                  <span>проектная включённость (вес 20 %)</span>
-                </div>
-                <div>
-                  <strong>{person.headQuality.components.commercialApplicability}</strong>
-                  <span>коммерческая применимость (вес 20 %)</span>
-                </div>
-              </div>
-            </article>
-          )}
-          <article className="panel">
-            <header className="panel__header">
-              <h2>Контакты</h2>
-              {canEditPerson ? (
-                <button className="text-link" onClick={() => setShowEdit(true)}>
-                  <Pencil size={14} /> Изменить
-                </button>
-              ) : permissions.includes('contacts.write') ? (
-                <button className="text-link" onClick={() => void addContact()}>
-                  <Plus size={14} /> Добавить
-                </button>
-              ) : null}
-            </header>
-            <div className="detail-list">
-              {person.contacts.map((contact) => (
-                <div className="detail-row" key={contact.id}>
-                  <span className="detail-row__icon">
-                    {contact.type === 'EMAIL' ? (
-                      <Mail size={16} />
-                    ) : contact.type === 'PHONE' ? (
-                      <Phone size={16} />
-                    ) : (
-                      <MessageCircle size={16} />
-                    )}
-                  </span>
-                  <span>
-                    <small>
-                      {contact.type}
-                      {contact.isIdentity
-                        ? ' · главный идентификатор'
-                        : contact.isPrimary
-                          ? ' · основной'
-                          : ''}
-                    </small>
-                    <strong>{contact.rawValue}</strong>
-                    {contact.isIdentity && contact.telegramUserId && (
-                      <em>Telegram ID: {contact.telegramUserId}</em>
-                    )}
-                  </span>
-                </div>
-              ))}
-              {person.contacts.length === 0 && <p className="muted">Контакты ещё не указаны.</p>}
-            </div>
-          </article>
-          <article className="panel">
-            <header className="panel__header">
-              <h2>Принадлежность</h2>
-              {canEditPerson && (
-                <button className="text-link" onClick={() => setShowEdit(true)}>
-                  <Pencil size={14} /> Изменить
-                </button>
-              )}
-            </header>
-            <div className="detail-list">
-              {person.affiliations.map((item) => (
-                <div className="detail-row" key={item.id}>
-                  <span className="detail-row__icon">
-                    <MapPin size={16} />
-                  </span>
-                  <span>
-                    <small>{item.role ?? 'Участник'}</small>
-                    <strong>{item.organization}</strong>
-                    <em>{item.faculty}</em>
-                  </span>
-                </div>
-              ))}
-              {person.affiliations.length === 0 && <p className="muted">Организация не связана.</p>}
-            </div>
-          </article>
-          <article className="panel panel--wide">
-            <header className="panel__header">
-              <div>
-                <p className="eyebrow">Данные из источников и ручные записи</p>
-                <h2>Заметки</h2>
-              </div>
-              {canEditPerson && notesDraft === null && (
-                <button className="text-link" onClick={() => setNotesDraft(person.notes ?? '')}>
-                  <Pencil size={14} /> Редактировать
-                </button>
-              )}
-            </header>
-            {notesDraft !== null ? (
-              <div>
-                <textarea
-                  className="notes-textarea"
-                  value={notesDraft}
-                  onChange={(event) => setNotesDraft(event.target.value)}
-                  rows={14}
-                  style={{ width: '100%', resize: 'vertical' }}
-                  disabled={savingNotes}
-                />
-                <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
-                  <button
-                    className="button button--primary button--compact"
-                    onClick={() => void saveNotes()}
-                    disabled={savingNotes}
-                  >
-                    {savingNotes ? 'Сохраняем…' : 'Сохранить'}
-                  </button>
-                  <button
-                    className="button button--secondary button--compact"
-                    onClick={() => setNotesDraft(null)}
-                    disabled={savingNotes}
-                  >
-                    Отмена
-                  </button>
-                </div>
-              </div>
-            ) : person.notes ? (
-              <pre
-                style={{
-                  whiteSpace: 'pre-wrap',
-                  wordBreak: 'break-word',
-                  font: 'inherit',
-                  margin: 0,
-                }}
-              >
-                {person.notes}
-              </pre>
-            ) : (
-              <p className="muted">Заметок пока нет.</p>
+        <TabsContent value="overview">
+          <div className="grid gap-4 lg:grid-cols-2">
+            {person.headQuality && (
+              <Card className="lg:col-span-2">
+                <CardHeader>
+                  <div>
+                    <p className="text-muted-foreground text-xs font-semibold tracking-wider uppercase">
+                      Индекс качества головы (0–100)
+                    </p>
+                    <CardTitle className="mt-1.5">
+                      Q_head: {person.headQuality.score} — {person.headQuality.bandLabel}
+                    </CardTitle>
+                  </div>
+                </CardHeader>
+                <CardContent className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                  {(
+                    [
+                      [
+                        person.headQuality.components.artifactQuality,
+                        'качество артефактов за 90 дней (вес 35 %)',
+                      ],
+                      [
+                        person.headQuality.components.regularity,
+                        'регулярность качественных артефактов (вес 25 %)',
+                      ],
+                      [
+                        person.headQuality.components.projectInvolvement,
+                        'проектная включённость (вес 20 %)',
+                      ],
+                      [
+                        person.headQuality.components.commercialApplicability,
+                        'коммерческая применимость (вес 20 %)',
+                      ],
+                    ] as const
+                  ).map(([value, caption]) => (
+                    <div key={caption} className="space-y-1">
+                      <strong className="tabular block text-xl font-semibold">{value}</strong>
+                      <span className="text-muted-foreground block text-xs leading-snug">
+                        {caption}
+                      </span>
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
             )}
-          </article>
-          <article className="panel panel--wide">
-            <header className="panel__header">
-              <div>
-                <p className="eyebrow">Следующий шаг</p>
-                <h2>Задачи</h2>
-              </div>
-              {permissions.includes('tasks.manage') && (
-                <button className="text-link" onClick={() => void createTask()}>
-                  <Plus size={14} /> Создать задачу
-                </button>
-              )}
-            </header>
-            {person.tasks.length ? (
-              <div className="task-list">
-                {person.tasks.map((task) => (
-                  <div className="task-row" key={task.id}>
-                    <button
-                      className={`task-check task-check--${task.status.toLowerCase()}`}
-                      aria-label={`Завершить задачу «${task.title}»`}
-                      disabled={task.status !== 'OPEN' || !permissions.includes('tasks.manage')}
-                      onClick={() => void completeTask(task.id)}
-                    />
-                    <span>
-                      <strong>{task.title}</strong>
-                      <small>
-                        <CalendarDays size={13} /> {formatDate(task.dueAt)}
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Контакты</CardTitle>
+                {canEditPerson ? (
+                  <CardAction>
+                    <Button onClick={() => setShowEdit(true)} size="xs" variant="ghost">
+                      <PencilIcon /> Изменить
+                    </Button>
+                  </CardAction>
+                ) : canEditContacts ? (
+                  <CardAction>
+                    <Button onClick={() => setShowContact(true)} size="xs" variant="ghost">
+                      <PlusIcon /> Добавить
+                    </Button>
+                  </CardAction>
+                ) : null}
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {person.contacts.map((contact) => (
+                  <div className="flex items-start gap-2.5" key={contact.id}>
+                    <span className="bg-muted text-muted-foreground mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md">
+                      {contact.type === 'EMAIL' ? (
+                        <MailIcon className="size-4" />
+                      ) : contact.type === 'PHONE' ? (
+                        <PhoneIcon className="size-4" />
+                      ) : (
+                        <MessageCircleIcon className="size-4" />
+                      )}
+                    </span>
+                    <span className="min-w-0 leading-snug">
+                      <small className="text-muted-foreground block text-xs">
+                        {contact.type}
+                        {contact.isIdentity
+                          ? ' · главный идентификатор'
+                          : contact.isPrimary
+                            ? ' · основной'
+                            : ''}
                       </small>
+                      <strong className="block text-[13px] font-medium break-words">
+                        {contact.rawValue}
+                      </strong>
+                      {contact.isIdentity && contact.telegramUserId && (
+                        <em className="text-muted-foreground block text-xs not-italic">
+                          Telegram ID: {contact.telegramUserId}
+                        </em>
+                      )}
                     </span>
                   </div>
                 ))}
-              </div>
-            ) : (
-              <EmptyState title="Нет открытых задач" text="Добавьте следующий шаг для участника." />
-            )}
-          </article>
-          <article className="panel artifact-stat-panel">
-            <header className="panel__header">
-              <h2>Артефакты</h2>
-            </header>
-            <div className="artifact-stat">
-              <strong>{person.countableArtifactCount}</strong>
-              <span>уникальных учитываемых</span>
-            </div>
-            <div className="mini-stat">
-              <Clock3 size={15} />
-              <span>Последний</span>
-              <strong>{formatDate(person.lastArtifactAt)}</strong>
-            </div>
-            <div className="mini-stat">
-              <span className="score-chip">{person.latestArtifactScore ?? '—'}</span>
-              <span>Последняя оценка</span>
-            </div>
-          </article>
-        </section>
-      )}
+                {person.contacts.length === 0 && (
+                  <p className="text-muted-foreground text-[13px]">Контакты ещё не указаны.</p>
+                )}
+              </CardContent>
+            </Card>
 
-      {tab === 'events' && <EventsTab person={person} onOpenArtifact={setSelectedVersionId} />}
-      {tab === 'artifacts' && (
-        <ArtifactsTab
-          person={person}
-          canAdd={permissions.includes('artifacts.write')}
-          onAdd={() => setShowArtifact(true)}
-          onOpen={setSelectedVersionId}
-        />
-      )}
-      {tab === 'history' && <TimelineTab person={person} />}
+            <Card>
+              <CardHeader>
+                <CardTitle>Принадлежность</CardTitle>
+                {canEditPerson && (
+                  <CardAction>
+                    <Button onClick={() => setShowEdit(true)} size="xs" variant="ghost">
+                      <PencilIcon /> Изменить
+                    </Button>
+                  </CardAction>
+                )}
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {person.affiliations.map((item) => (
+                  <div className="flex items-start gap-2.5" key={item.id}>
+                    <span className="bg-muted text-muted-foreground mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md">
+                      <MapPinIcon className="size-4" />
+                    </span>
+                    <span className="min-w-0 leading-snug">
+                      <small className="text-muted-foreground block text-xs">
+                        {item.role ?? 'Участник'}
+                      </small>
+                      <strong className="block text-[13px] font-medium">{item.organization}</strong>
+                      {item.faculty && (
+                        <em className="text-muted-foreground block text-xs not-italic">
+                          {item.faculty}
+                        </em>
+                      )}
+                    </span>
+                  </div>
+                ))}
+                {person.affiliations.length === 0 && (
+                  <p className="text-muted-foreground text-[13px]">Организация не связана.</p>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card className="lg:col-span-2">
+              <CardHeader>
+                <div>
+                  <p className="text-muted-foreground text-xs font-semibold tracking-wider uppercase">
+                    Данные из источников и ручные записи
+                  </p>
+                  <CardTitle className="mt-1.5">Заметки</CardTitle>
+                </div>
+                {canEditPerson && notesDraft === null && (
+                  <CardAction>
+                    <Button
+                      onClick={() => setNotesDraft(person.notes ?? '')}
+                      size="xs"
+                      variant="ghost"
+                    >
+                      <PencilIcon /> Редактировать
+                    </Button>
+                  </CardAction>
+                )}
+              </CardHeader>
+              <CardContent>
+                {notesDraft !== null ? (
+                  <div className="space-y-2">
+                    <Textarea
+                      aria-label="Заметки по участнику"
+                      className="resize-y"
+                      disabled={savingNotes}
+                      onChange={(event) => setNotesDraft(event.target.value)}
+                      rows={14}
+                      value={notesDraft}
+                    />
+                    <div className="flex gap-2">
+                      <Button disabled={savingNotes} onClick={() => void saveNotes()} size="sm">
+                        {savingNotes ? 'Сохраняем…' : 'Сохранить'}
+                      </Button>
+                      <Button
+                        disabled={savingNotes}
+                        onClick={() => setNotesDraft(null)}
+                        size="sm"
+                        variant="outline"
+                      >
+                        Отмена
+                      </Button>
+                    </div>
+                  </div>
+                ) : person.notes ? (
+                  <pre className="font-sans text-[13px] leading-relaxed break-words whitespace-pre-wrap">
+                    {person.notes}
+                  </pre>
+                ) : (
+                  <p className="text-muted-foreground text-[13px]">Заметок пока нет.</p>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card className="lg:col-span-2">
+              <CardHeader>
+                <div>
+                  <p className="text-muted-foreground text-xs font-semibold tracking-wider uppercase">
+                    Следующий шаг
+                  </p>
+                  <CardTitle className="mt-1.5">Задачи</CardTitle>
+                </div>
+                {canManageTasks && (
+                  <CardAction>
+                    <Button onClick={() => setShowTask(true)} size="xs" variant="ghost">
+                      <PlusIcon /> Создать задачу
+                    </Button>
+                  </CardAction>
+                )}
+              </CardHeader>
+              <CardContent className={person.tasks.length ? 'space-y-2' : 'p-0'}>
+                {person.tasks.length ? (
+                  person.tasks.map((task) => {
+                    const open = task.status === 'OPEN' || task.status === 'IN_PROGRESS';
+                    return (
+                      <div
+                        className="flex items-center gap-3 rounded-lg border px-3 py-2.5"
+                        key={task.id}
+                      >
+                        <Checkbox
+                          aria-label={`Завершить задачу «${task.title}»`}
+                          checked={task.status === 'DONE'}
+                          disabled={!open || !canManageTasks}
+                          onCheckedChange={() => void completeTask(task.id)}
+                        />
+                        <span className="min-w-0 flex-1 leading-snug">
+                          <strong className="block text-[13px] font-medium">{task.title}</strong>
+                          <small className="text-muted-foreground flex items-center gap-1 text-xs">
+                            <CalendarDaysIcon className="size-3.5" /> {formatDate(task.dueAt)}
+                          </small>
+                        </span>
+                        <Badge variant={TASK_STATUS_VARIANTS[task.status]}>
+                          {TASK_STATUS_LABELS[task.status]}
+                        </Badge>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <EmptyState
+                    title="Нет открытых задач"
+                    text="Добавьте следующий шаг для участника."
+                  />
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Артефакты</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div>
+                  <strong className="tabular block text-2xl font-semibold">
+                    {person.countableArtifactCount}
+                  </strong>
+                  <span className="text-muted-foreground text-xs">уникальных учитываемых</span>
+                </div>
+                <div className="text-muted-foreground flex items-center gap-2 text-[13px]">
+                  <Clock3Icon className="size-4" />
+                  <span>Последний</span>
+                  <strong className="text-foreground font-medium">
+                    {formatDate(person.lastArtifactAt)}
+                  </strong>
+                </div>
+                <div className="text-muted-foreground flex items-center gap-2 text-[13px]">
+                  <Badge
+                    className="tabular min-w-8 justify-center"
+                    variant={scoreVariant(person.latestArtifactScore)}
+                  >
+                    {person.latestArtifactScore ?? '—'}
+                  </Badge>
+                  <span>Последняя оценка</span>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="events">
+          <EventsTab person={person} onOpenArtifact={setSelectedVersionId} />
+        </TabsContent>
+
+        <TabsContent value="artifacts">
+          <ArtifactsTab
+            canAdd={canAddArtifact}
+            onAdd={() => setShowArtifact(true)}
+            onOpen={setSelectedVersionId}
+            person={person}
+          />
+        </TabsContent>
+
+        <TabsContent value="history">
+          <TimelineTab person={person} />
+        </TabsContent>
+      </Tabs>
+
       {showArtifact && (
-        <ArtifactDialog
-          personId={person.id}
+        <ArtifactSubmitDialog
           events={person.events}
           onClose={() => setShowArtifact(false)}
           onCreated={async () => {
@@ -549,28 +536,77 @@ export function PersonPageClient({ id }: { id: string }) {
             await reload();
             setTab('artifacts');
           }}
+          personId={person.id}
         />
       )}
       {showEdit && (
         <EditPersonDialog
-          person={person}
           canEditContacts={canEditContacts}
           onClose={() => setShowEdit(false)}
           onSaved={async () => {
             setShowEdit(false);
             await reload();
           }}
+          person={person}
         />
       )}
+      {showContact && (
+        <PersonContactDialog
+          onClose={() => setShowContact(false)}
+          onSaved={reload}
+          personId={person.id}
+        />
+      )}
+      {showInteraction && (
+        <PersonInteractionDialog onClose={() => setShowInteraction(false)} personId={person.id} />
+      )}
+      <TaskDialog
+        onOpenChange={setShowTask}
+        onSaved={() => void reload()}
+        open={showTask}
+        person={{ id: person.id, canonicalFullName: person.canonicalFullName }}
+      />
       {selectedVersionId && (
         <ArtifactReviewDialog
-          versionId={selectedVersionId}
           onClose={() => setSelectedVersionId(null)}
           onReviewed={reload}
+          versionId={selectedVersionId}
         />
       )}
+    </PageStack>
+  );
+}
+
+function Fact({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+  return (
+    <div className="space-y-1.5">
+      <p className="text-muted-foreground text-[11px] font-semibold tracking-wide uppercase">
+        {label}
+      </p>
+      {children}
+      {hint && <p className="text-muted-foreground text-xs leading-snug">{hint}</p>}
     </div>
   );
+}
+
+function PersonSkeleton() {
+  return (
+    <PageStack>
+      <Skeleton className="h-20 w-full" />
+      <Skeleton className="h-28 w-full" />
+      <Skeleton className="h-9 w-80" />
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Skeleton className="h-52 w-full" />
+        <Skeleton className="h-52 w-full" />
+      </div>
+    </PageStack>
+  );
+}
+
+function formatEventPeriod(startsAt?: string | null, endsAt?: string | null): string {
+  if (!startsAt && !endsAt) return 'Дата не указана';
+  if (startsAt && endsAt) return `${formatDate(startsAt, true)} — ${formatDate(endsAt, true)}`;
+  return formatDate(startsAt ?? endsAt, true);
 }
 
 function EventsTab({
@@ -582,58 +618,75 @@ function EventsTab({
 }) {
   if (!person.events.length) {
     return (
-      <section className="panel">
+      <Card>
         <EmptyState
+          icon={CalendarDaysIcon}
           title="Мероприятия не найдены"
           text="В импортных и текущих данных пока нет подтверждённых записей участия."
         />
-      </section>
+      </Card>
     );
   }
 
   return (
-    <section className="event-list">
+    <div className="space-y-4">
       {person.events.map((event) => (
-        <article className="event-card" key={event.id}>
-          <header className="event-card__header">
+        <Card key={event.id}>
+          <CardHeader>
             <div>
-              <p className="eyebrow">Мероприятие</p>
-              <h2>{event.name}</h2>
-              <p className="event-card__period">
-                <CalendarDays size={14} /> {formatEventPeriod(event.startsAt, event.endsAt)}
+              <p className="text-muted-foreground text-xs font-semibold tracking-wider uppercase">
+                Мероприятие
+              </p>
+              <CardTitle className="mt-1.5">{event.name}</CardTitle>
+              <p className="text-muted-foreground mt-1.5 flex items-center gap-1.5 text-[13px]">
+                <CalendarDaysIcon className="size-3.5" />
+                {formatEventPeriod(event.startsAt, event.endsAt)}
               </p>
             </div>
-            <span className="event-status">{eventStatusLabel(event.status)}</span>
-          </header>
+            <CardAction>
+              <Badge variant={EVENT_STATUS_VARIANTS[event.status] ?? 'soft-muted'}>
+                {EVENT_STATUS_LABELS[event.status] ?? event.status}
+              </Badge>
+            </CardAction>
+          </CardHeader>
 
-          <div className="event-participation-list">
+          <CardContent className="space-y-4">
             {event.participations.map((participation, index) => (
-              <section className="event-participation" key={participation.id}>
+              <section
+                className="bg-muted/40 space-y-3 rounded-lg border p-3"
+                key={participation.id}
+              >
                 {event.participations.length > 1 && (
-                  <p className="eyebrow">Запись участия {index + 1}</p>
+                  <p className="text-muted-foreground text-[11px] font-semibold tracking-wide uppercase">
+                    Запись участия {index + 1}
+                  </p>
                 )}
-                <div className="event-participation__facts">
-                  <span>
-                    <small>Роль</small>
-                    <strong>{participation.role ?? 'Не указана в источнике'}</strong>
-                  </span>
-                  <span>
-                    <small>Решение</small>
-                    <strong>{decisionLabel(participation.decision)}</strong>
-                  </span>
-                  <span>
-                    <small>Участие</small>
-                    <strong>{attendanceLabel(participation.attendance)}</strong>
-                  </span>
-                  <span>
-                    <small>Источник данных</small>
-                    <strong>
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  <Fact label="Роль">
+                    <strong className="block text-[13px] font-medium">
+                      {participation.role ?? 'Не указана в источнике'}
+                    </strong>
+                  </Fact>
+                  <Fact label="Решение">
+                    <strong className="block text-[13px] font-medium">
+                      {PARTICIPATION_DECISION_LABELS[participation.decision] ??
+                        participation.decision}
+                    </strong>
+                  </Fact>
+                  <Fact label="Участие">
+                    <strong className="block text-[13px] font-medium">
+                      {ATTENDANCE_LABELS[participation.attendance] ?? participation.attendance}
+                    </strong>
+                  </Fact>
+                  <Fact label="Источник данных">
+                    <strong className="block text-[13px] font-medium">
                       {participation.dataOrigin === 'LEGACY_IMPORT' ? 'Импорт из таблицы' : 'CRM'}
                     </strong>
-                  </span>
+                  </Fact>
                 </div>
+
                 {(participation.registeredAt || participation.attendedAt) && (
-                  <p className="event-participation__dates">
+                  <p className="text-muted-foreground text-xs">
                     {participation.registeredAt &&
                       `Регистрация: ${formatDate(participation.registeredAt, true)}`}
                     {participation.registeredAt && participation.attendedAt && ' · '}
@@ -641,101 +694,85 @@ function EventsTab({
                       `Участие: ${formatDate(participation.attendedAt, true)}`}
                   </p>
                 )}
+
                 {participation.comments.length > 0 && (
-                  <div className="event-comments">
-                    <strong>Комментарии из таблицы</strong>
+                  <div className="space-y-1">
+                    <p className="text-[13px] font-medium">Комментарии из таблицы</p>
                     {participation.comments.map((comment) => (
-                      <p key={comment}>{comment}</p>
+                      <p className="text-muted-foreground text-[13px]" key={comment}>
+                        {comment}
+                      </p>
                     ))}
                   </div>
                 )}
+
                 {participation.sources.length > 0 && (
-                  <div className="event-sources">
+                  <div className="flex flex-wrap gap-1.5">
                     {participation.sources.map((source) => (
-                      <span key={source.id}>
+                      <Badge key={source.id} variant="soft-muted">
                         {source.sheetName} · строка {source.rowNumber} · {source.fileName}
-                      </span>
+                      </Badge>
                     ))}
                   </div>
                 )}
               </section>
             ))}
-          </div>
 
-          <section className="event-artifacts">
-            <h3>Артефакты участника с мероприятия</h3>
-            {event.artifacts.length ? (
-              <div className="event-artifacts__list">
-                {event.artifacts.map((artifact) => (
-                  <button
-                    className="event-artifact"
-                    type="button"
-                    key={artifact.id}
-                    disabled={!artifact.latestVersionId}
-                    onClick={() =>
-                      artifact.latestVersionId && onOpenArtifact(artifact.latestVersionId)
-                    }
-                  >
-                    <FilePlus2 size={16} />
-                    <span>
-                      <strong>{artifact.title}</strong>
-                      <small>
-                        {artifact.typeName} · {formatDate(artifact.submittedAt)}
-                      </small>
-                    </span>
-                    <ExternalLink size={15} />
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <p className="muted">Связанных артефактов пока нет.</p>
-            )}
-          </section>
-        </article>
+            <section className="space-y-2">
+              <h3 className="text-[13px] font-medium">Артефакты участника с мероприятия</h3>
+              {event.artifacts.length ? (
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {event.artifacts.map((artifact) => (
+                    <button
+                      className="hover:bg-accent/50 flex items-center gap-2.5 rounded-lg border px-3 py-2.5 text-left transition-colors disabled:pointer-events-none disabled:opacity-60"
+                      disabled={!artifact.latestVersionId}
+                      key={artifact.id}
+                      onClick={() =>
+                        artifact.latestVersionId && onOpenArtifact(artifact.latestVersionId)
+                      }
+                      type="button"
+                    >
+                      <FileIcon className="text-muted-foreground size-4 shrink-0" />
+                      <span className="min-w-0 flex-1 leading-snug">
+                        <strong className="block truncate text-[13px] font-medium">
+                          {artifact.title}
+                        </strong>
+                        <small className="text-muted-foreground block text-xs">
+                          {artifact.typeName} · {formatDate(artifact.submittedAt)}
+                        </small>
+                      </span>
+                      <ExternalLinkIcon className="text-muted-foreground size-4 shrink-0" />
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-muted-foreground text-[13px]">Связанных артефактов пока нет.</p>
+              )}
+            </section>
+          </CardContent>
+        </Card>
       ))}
-    </section>
+    </div>
   );
 }
 
-function formatEventPeriod(startsAt?: string | null, endsAt?: string | null): string {
-  if (!startsAt && !endsAt) return 'Дата не указана';
-  if (startsAt && endsAt) return `${formatDate(startsAt, true)} — ${formatDate(endsAt, true)}`;
-  return formatDate(startsAt ?? endsAt, true);
+function normalizeSearchValue(value: string): string {
+  return value.trim().toLocaleLowerCase('ru-RU').replace(/\s+/g, ' ');
 }
 
-function eventStatusLabel(status: string): string {
-  return (
-    {
-      UNKNOWN: 'Статус не указан',
-      PLANNED: 'Запланировано',
-      ACTIVE: 'Идёт',
-      COMPLETED: 'Завершено',
-      CANCELLED: 'Отменено',
-    }[status] ?? status
-  );
-}
-
-function decisionLabel(decision: string): string {
-  return (
-    {
-      UNKNOWN: 'Не указано',
-      PENDING: 'На рассмотрении',
-      ACCEPTED: 'Принят',
-      REJECTED: 'Отклонён',
-      WAITLISTED: 'Лист ожидания',
-    }[decision] ?? decision
-  );
-}
-
-function attendanceLabel(attendance: string): string {
-  return (
-    {
-      UNKNOWN: 'Не указано',
-      ATTENDED: 'Участвовал',
-      NO_SHOW: 'Не пришёл',
-      PARTIAL: 'Частичное участие',
-    }[attendance] ?? attendance
-  );
+/** Статус последней версии артефакта: черновик, ожидание приёмки или готовое решение. */
+function artifactStatusBadge(artifact: ArtifactSummary): { label: string; variant: BadgeVariant } {
+  if (!artifact.latestVersionStatus) return { label: 'Нет версии', variant: 'soft-muted' };
+  if (artifact.latestVersionStatus === 'SUBMITTED') {
+    return artifact.score == null
+      ? { label: 'Ожидает оценки', variant: 'soft-warning' }
+      : { label: 'Оценён', variant: 'soft-success' };
+  }
+  return {
+    label:
+      ARTIFACT_VERSION_STATUS_LABELS[artifact.latestVersionStatus] ?? artifact.latestVersionStatus,
+    variant: 'soft-muted',
+  };
 }
 
 function ArtifactsTab({
@@ -817,499 +854,190 @@ function ArtifactsTab({
     setStatusFilter('ALL');
   }
 
-  if (!person.artifacts.length)
+  if (!person.artifacts.length) {
     return (
-      <section className="panel">
+      <Card>
         <EmptyState
+          icon={FilePlus2Icon}
           title="Артефактов пока нет"
           text="Первый отправленный результат активирует участника."
+          {...(canAdd
+            ? {
+                action: (
+                  <Button onClick={onAdd} type="button">
+                    <PlusIcon /> Добавить артефакт
+                  </Button>
+                ),
+              }
+            : {})}
         />
-        {canAdd && (
-          <div className="empty-action">
-            <button className="button button--primary" type="button" onClick={onAdd}>
-              Добавить артефакт
-            </button>
-          </div>
-        )}
-      </section>
+      </Card>
     );
+  }
 
   return (
-    <section className="artifact-section">
-      <div className="artifact-filter-panel">
-        <div className="artifact-filter-panel__topline">
-          <div>
-            <strong>Артефакты участника</strong>
-            <small>
-              Показано {filteredArtifacts.length} из {person.artifacts.length}
-            </small>
-          </div>
-          <div className="artifact-filter-panel__actions">
-            {hasFilters && (
-              <button
-                className="button button--secondary button--compact"
-                type="button"
-                onClick={resetFilters}
-              >
-                <RotateCcw size={14} /> Сбросить
-              </button>
-            )}
-            {canAdd && (
-              <button
-                className="button button--primary button--compact"
-                type="button"
-                onClick={onAdd}
-              >
-                <Plus size={14} /> Добавить
-              </button>
-            )}
-          </div>
-        </div>
-        <div className="artifact-filters">
-          <label className="artifact-filter-search">
-            <span className="sr-only">Поиск артефактов</span>
-            <Search size={16} aria-hidden="true" />
-            <input
-              type="search"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Название, тип, автор или мероприятие"
-            />
-          </label>
-          <label className="artifact-filter-control">
-            <span>Тип</span>
-            <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}>
-              <option value="ALL">Все типы</option>
-              {typeOptions.map((typeName) => (
-                <option value={typeName} key={typeName}>
-                  {typeName}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="artifact-filter-control">
-            <span>Мероприятие</span>
-            <select value={eventFilter} onChange={(event) => setEventFilter(event.target.value)}>
-              <option value="ALL">Все мероприятия</option>
-              <option value="NONE">Без мероприятия</option>
-              {eventOptions.map((event) => (
-                <option value={event.id} key={event.id}>
-                  {event.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="artifact-filter-control">
-            <span>Статус</span>
-            <select
-              value={statusFilter}
-              onChange={(event) => setStatusFilter(event.target.value as ArtifactFilterStatus)}
-            >
-              <option value="ALL">Все статусы</option>
-              <option value="SUBMITTED">Отправленные</option>
-              <option value="PENDING_REVIEW">Ожидают оценки</option>
-              <option value="REVIEWED">Оценённые</option>
-              <option value="DRAFT">Черновики</option>
-            </select>
-          </label>
-        </div>
-      </div>
+    <div className="space-y-4">
+      <DataToolbar>
+        <ToolbarSearch
+          label="Поиск артефактов"
+          onChange={setQuery}
+          placeholder="Название, тип, автор или мероприятие"
+          value={query}
+        />
+        <ToolbarSelect
+          label="Тип"
+          onChange={setTypeFilter}
+          options={[
+            { value: 'ALL', label: 'Все типы' },
+            ...typeOptions.map((typeName) => ({ value: typeName, label: typeName })),
+          ]}
+          value={typeFilter}
+        />
+        <ToolbarSelect
+          label="Мероприятие"
+          onChange={setEventFilter}
+          options={[
+            { value: 'ALL', label: 'Все мероприятия' },
+            { value: 'NONE', label: 'Без мероприятия' },
+            ...eventOptions.map((event) => ({ value: event.id, label: event.name })),
+          ]}
+          value={eventFilter}
+          width="w-56"
+        />
+        <ToolbarSelect
+          label="Статус"
+          onChange={(value) => setStatusFilter(value as ArtifactFilterStatus)}
+          options={ARTIFACT_STATUS_OPTIONS}
+          value={statusFilter}
+        />
+        <ToolbarSpacer />
+        {hasFilters && (
+          <Button onClick={resetFilters} size="sm" type="button" variant="ghost">
+            Сбросить
+          </Button>
+        )}
+        {canAdd && (
+          <Button onClick={onAdd} size="sm" type="button">
+            <PlusIcon /> Добавить
+          </Button>
+        )}
+      </DataToolbar>
+
+      <p className="text-muted-foreground text-[13px]">
+        Показано {filteredArtifacts.length} из {person.artifacts.length}
+      </p>
 
       {filteredArtifacts.length ? (
-        <div className="artifact-list">
+        <div className="space-y-2">
           {filteredArtifacts.map((artifact) => {
             const eventName = artifact.eventId ? eventNames.get(artifact.eventId) : undefined;
+            const status = artifactStatusBadge(artifact);
             return (
-              <article className="artifact-card" key={artifact.id}>
-                <div className="artifact-card__icon">
-                  <FilePlus2 size={20} />
-                </div>
-                <div className="artifact-card__main">
-                  <small>
+              <Card className="flex-row items-center gap-3 px-4 py-3" key={artifact.id}>
+                <span className="bg-muted text-muted-foreground flex size-9 shrink-0 items-center justify-center rounded-lg">
+                  <FileIcon className="size-4" />
+                </span>
+
+                <div className="min-w-0 flex-1 space-y-1">
+                  <small className="text-muted-foreground block text-xs">
                     {artifact.typeName} · версия {artifact.latestVersionNumber ?? '—'}
                   </small>
-                  <h3>{artifact.title}</h3>
-                  <div className="artifact-card__meta">
-                    <span>{artifactVersionStatusLabel(artifact)}</span>
+                  <h3 className="truncate text-[14px] font-medium">{artifact.title}</h3>
+                  <div className="text-muted-foreground flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs">
+                    <Badge variant={status.variant}>{status.label}</Badge>
                     <span>{formatDate(artifact.submittedAt, true)}</span>
                     {eventName && (
-                      <span className="artifact-card__event">
-                        <CalendarDays size={12} /> {eventName}
+                      <span className="flex items-center gap-1">
+                        <CalendarDaysIcon className="size-3" /> {eventName}
                       </span>
                     )}
-                    <span>{artifact.authors?.map((author) => author.name).join(', ')}</span>
+                    {artifact.authors?.length ? (
+                      <span className="truncate">
+                        {artifact.authors.map((author) => author.name).join(', ')}
+                      </span>
+                    ) : null}
                   </div>
                 </div>
-                <div className="artifact-card__review">
-                  <small>Оценка</small>
+
+                <div className="shrink-0 text-right">
+                  <small className="text-muted-foreground block text-xs">Оценка</small>
                   {artifact.score == null ? (
-                    <strong className="muted">Не оценён</strong>
+                    <span className="text-muted-foreground text-[13px]">Не оценён</span>
                   ) : (
-                    <strong className="score-large">
-                      {artifact.score}
-                      <small>/10</small>
-                    </strong>
+                    <Badge
+                      className="tabular mt-0.5 min-w-11 justify-center text-sm"
+                      variant={scoreVariant(artifact.score)}
+                    >
+                      {artifact.score}/10
+                    </Badge>
                   )}
                 </div>
-                <button
-                  className="icon-button"
-                  type="button"
+
+                <Button
                   aria-label={`Открыть последнюю версию «${artifact.title}»`}
                   disabled={!artifact.latestVersionId}
                   onClick={() => artifact.latestVersionId && onOpen(artifact.latestVersionId)}
+                  size="icon-sm"
+                  type="button"
+                  variant="ghost"
                 >
-                  <ExternalLink size={17} />
-                </button>
-              </article>
+                  <ExternalLinkIcon />
+                </Button>
+              </Card>
             );
           })}
         </div>
       ) : (
-        <div className="panel artifact-filter-empty">
+        <Card>
           <EmptyState
             title="По этим условиям ничего не найдено"
             text="Измените строку поиска или один из фильтров."
+            action={
+              <Button onClick={resetFilters} type="button" variant="outline">
+                Сбросить фильтры
+              </Button>
+            }
           />
-          <div className="empty-action">
-            <button className="button button--secondary" type="button" onClick={resetFilters}>
-              <RotateCcw size={14} /> Сбросить фильтры
-            </button>
-          </div>
-        </div>
+        </Card>
       )}
-    </section>
-  );
-}
-
-function normalizeSearchValue(value: string): string {
-  return value.trim().toLocaleLowerCase('ru-RU').replace(/\s+/g, ' ');
-}
-
-function artifactVersionStatusLabel(artifact: PersonDetail['artifacts'][number]): string {
-  if (artifact.latestVersionStatus === 'DRAFT') return 'Черновик';
-  if (artifact.latestVersionStatus === 'SUBMITTED')
-    return artifact.score == null ? 'Ожидает оценки' : 'Оценён';
-  if (!artifact.latestVersionStatus) return 'Нет версии';
-  return artifact.latestVersionStatus;
-}
-
-function TimelineTab({ person }: { person: PersonDetail }) {
-  return (
-    <section className="panel">
-      <div className="timeline">
-        <div className="timeline-item">
-          <span className="timeline-item__dot" />
-          <div>
-            <small>{formatDate(person.activatedAt, true)}</small>
-            <strong>
-              {person.activationState === 'ACTIVATED'
-                ? 'Участник активирован'
-                : 'Карточка участника создана'}
-            </strong>
-            <p>Событие рассчитано из первичных данных и сохранено в истории статусов.</p>
-          </div>
-        </div>
-        {person.artifacts.map((artifact) => (
-          <div className="timeline-item" key={artifact.id}>
-            <span className="timeline-item__dot timeline-item__dot--violet" />
-            <div>
-              <small>{formatDate(artifact.submittedAt, true)}</small>
-              <strong>Артефакт: {artifact.title}</strong>
-              <p>
-                {artifact.typeName} ·{' '}
-                {artifact.score == null ? 'не оценён' : `оценка ${artifact.score}/10`}
-              </p>
-            </div>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function ArtifactDialog({
-  personId,
-  events,
-  onClose,
-  onCreated,
-}: {
-  personId: string;
-  events: PersonDetail['events'];
-  onClose: () => void;
-  onCreated: () => void;
-}) {
-  const [title, setTitle] = useState('');
-  const [type, setType] = useState('');
-  const [eventId, setEventId] = useState('');
-  const [eventQuery, setEventQuery] = useState('');
-  const [contentType, setContentType] = useState<'TEXT' | 'EXTERNAL_URL'>('TEXT');
-  const [content, setContent] = useState('');
-  const [submittedAt, setSubmittedAt] = useState(toLocalDateTimeValue(new Date()));
-  const [backdateReason, setBackdateReason] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const artifactIdRef = useRef<string | null>(null);
-  const versionIdRef = useRef<string | null>(null);
-  const parsedSubmittedAt = new Date(submittedAt);
-  const isBackdated =
-    Number.isFinite(parsedSubmittedAt.getTime()) &&
-    Date.now() - parsedSubmittedAt.getTime() > 5 * 60 * 1000;
-  const matchingEvents = useMemo(() => {
-    const normalizedQuery = normalizeSearchValue(eventQuery);
-    return events
-      .filter((event) => {
-        if (!normalizedQuery) return true;
-        return normalizeSearchValue(
-          [event.name, eventStatusLabel(event.status), event.startsAt, event.endsAt].join(' '),
-        ).includes(normalizedQuery);
-      })
-      .sort((left, right) => {
-        const leftTime = left.startsAt ? new Date(left.startsAt).getTime() : 0;
-        const rightTime = right.startsAt ? new Date(right.startsAt).getTime() : 0;
-        return rightTime - leftTime || left.name.localeCompare(right.name, 'ru');
-      });
-  }, [eventQuery, events]);
-  const visibleEvents = useMemo(() => {
-    if (!eventId || matchingEvents.some((event) => event.id === eventId)) return matchingEvents;
-    const selectedEvent = events.find((event) => event.id === eventId);
-    return selectedEvent ? [selectedEvent, ...matchingEvents] : matchingEvents;
-  }, [eventId, events, matchingEvents]);
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    const submittedDate = new Date(submittedAt);
-    if (!Number.isFinite(submittedDate.getTime())) {
-      setError('Укажите корректную дату отправки.');
-      return;
-    }
-    const backdated = Date.now() - submittedDate.getTime() > 5 * 60 * 1000;
-    if (backdated && backdateReason.trim().length < 3) {
-      setError('Для даты задним числом укажите причину не короче трёх символов.');
-      return;
-    }
-    setSaving(true);
-    setError(null);
-    try {
-      let artifactId = artifactIdRef.current;
-      if (!artifactId) {
-        const artifact = await api<{ id: string }>('/artifacts', {
-          method: 'POST',
-          body: JSON.stringify({
-            title,
-            typeCode: type,
-            eventId: eventId || undefined,
-          }),
-        });
-        artifactId = artifact.id;
-        artifactIdRef.current = artifact.id;
-      }
-
-      let versionId = versionIdRef.current;
-      if (!versionId) {
-        const version = await api<{ id: string }>(`/artifacts/${artifactId}/versions`, {
-          method: 'POST',
-          body: JSON.stringify({
-            contentType,
-            textContent: contentType === 'TEXT' ? content : undefined,
-            externalUrls: contentType === 'EXTERNAL_URL' ? [content] : [],
-            contributors: [{ personId, role: 'AUTHOR' }],
-          }),
-        });
-        versionId = version.id;
-        versionIdRef.current = version.id;
-      }
-
-      await api(`/artifact-versions/${versionId}/submit`, {
-        method: 'POST',
-        headers: { 'Idempotency-Key': crypto.randomUUID() },
-        body: JSON.stringify({
-          submittedAt: submittedDate.toISOString(),
-          backdateReason: backdated ? backdateReason.trim() : undefined,
-        }),
-      });
-      onCreated();
-    } catch (caught) {
-      setError(apiErrorMessage(caught, 'Не удалось отправить артефакт'));
-    } finally {
-      setSaving(false);
-    }
-  }
-  return (
-    <div className="dialog-backdrop" onMouseDown={onClose}>
-      <section
-        className="dialog"
-        role="dialog"
-        aria-modal="true"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <header className="dialog__header">
-          <div>
-            <p className="eyebrow">Новый результат</p>
-            <h2>Добавить артефакт</h2>
-          </div>
-          <button className="icon-button" onClick={onClose}>
-            ×
-          </button>
-        </header>
-        <form onSubmit={submit}>
-          <div className="form-grid">
-            <label className="form-field form-field--full">
-              <span>Название *</span>
-              <input
-                required
-                disabled={Boolean(artifactIdRef.current)}
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-              />
-            </label>
-            <fieldset
-              className="form-field form-field--full artifact-type-fieldset"
-              disabled={Boolean(artifactIdRef.current)}
-            >
-              <legend>Тип артефакта *</legend>
-              <div className="artifact-type-options">
-                {ARTIFACT_TYPES.map((artifactType) => (
-                  <label
-                    className={
-                      type === artifactType.code
-                        ? 'artifact-type-option artifact-type-option--selected'
-                        : 'artifact-type-option'
-                    }
-                    key={artifactType.code}
-                  >
-                    <input
-                      type="radio"
-                      name="artifact-type"
-                      required
-                      value={artifactType.code}
-                      checked={type === artifactType.code}
-                      onChange={(event) => setType(event.target.value)}
-                    />
-                    <span>
-                      <strong>{artifactType.label}</strong>
-                      <small>{artifactType.description}</small>
-                    </span>
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-            <div className="form-field form-field--full">
-              <span>Мероприятие (необязательно)</span>
-              {events.length ? (
-                <div className="artifact-event-picker">
-                  <label className="artifact-event-picker__search">
-                    <span className="sr-only">Найти мероприятие</span>
-                    <Search size={15} aria-hidden="true" />
-                    <input
-                      type="search"
-                      disabled={Boolean(artifactIdRef.current)}
-                      value={eventQuery}
-                      onChange={(event) => setEventQuery(event.target.value)}
-                      placeholder="Введите название мероприятия"
-                    />
-                  </label>
-                  <select
-                    aria-label="Выбрать мероприятие"
-                    disabled={Boolean(artifactIdRef.current)}
-                    value={eventId}
-                    onChange={(event) => setEventId(event.target.value)}
-                  >
-                    <option value="">Без привязки к мероприятию</option>
-                    {visibleEvents.map((event) => (
-                      <option value={event.id} key={event.id}>
-                        {event.name}
-                        {event.startsAt ? ` · ${formatDate(event.startsAt)}` : ''}
-                      </option>
-                    ))}
-                  </select>
-                  <small className="artifact-event-picker__count">
-                    {eventQuery.trim()
-                      ? `Найдено мероприятий: ${matchingEvents.length}`
-                      : `Доступно мероприятий участника: ${events.length}`}
-                  </small>
-                </div>
-              ) : (
-                <small className="form-field__hint">
-                  У участника пока нет мероприятий, поэтому артефакт будет создан без привязки.
-                </small>
-              )}
-            </div>
-            <label className="form-field">
-              <span>Формат</span>
-              <select
-                value={contentType}
-                disabled={Boolean(versionIdRef.current)}
-                onChange={(e) => setContentType(e.target.value as typeof contentType)}
-              >
-                <option value="TEXT">Текст</option>
-                <option value="EXTERNAL_URL">Внешняя ссылка</option>
-              </select>
-            </label>
-            <label className="form-field form-field--full">
-              <span>{contentType === 'TEXT' ? 'Содержание' : 'Ссылка'} *</span>
-              <textarea
-                required
-                disabled={Boolean(versionIdRef.current)}
-                value={content}
-                onChange={(e) => setContent(e.target.value)}
-                rows={5}
-              />
-            </label>
-            <label className="form-field form-field--full">
-              <span>Фактическая дата отправки *</span>
-              <input
-                type="datetime-local"
-                required
-                max={toLocalDateTimeValue(new Date(Date.now() + 5 * 60 * 1000))}
-                value={submittedAt}
-                onChange={(e) => setSubmittedAt(e.target.value)}
-              />
-            </label>
-            {isBackdated && (
-              <label className="form-field form-field--full">
-                <span>Причина даты задним числом *</span>
-                <textarea
-                  required
-                  minLength={3}
-                  rows={2}
-                  value={backdateReason}
-                  onChange={(event) => setBackdateReason(event.target.value)}
-                  placeholder="Например: перенос подтверждённого результата из прежней системы"
-                />
-              </label>
-            )}
-          </div>
-          {versionIdRef.current && (
-            <p className="form-note">
-              Черновик версии уже сохранён. Повторная отправка не создаст копию.
-            </p>
-          )}
-          {error && <p className="form-error">{error}</p>}
-          <footer className="dialog__footer">
-            <button type="button" className="button button--secondary" onClick={onClose}>
-              Отмена
-            </button>
-            <button className="button button--primary" disabled={saving}>
-              {saving
-                ? 'Отправляем…'
-                : versionIdRef.current
-                  ? 'Повторить отправку'
-                  : 'Создать и отправить'}
-            </button>
-          </footer>
-        </form>
-      </section>
     </div>
   );
 }
 
-function toLocalDateTimeValue(date: Date): string {
-  const pad = (value: number) => String(value).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
-function apiErrorMessage(caught: unknown, fallback: string): string {
-  if (caught instanceof ApiError)
-    return caught.detail ? `${caught.message}: ${caught.detail}` : caught.message;
-  return caught instanceof Error ? caught.message : fallback;
+function TimelineTab({ person }: { person: PersonDetail }) {
+  return (
+    <Card>
+      <CardContent>
+        <ol className="space-y-5 border-l pl-6">
+          <li className="relative">
+            <span className="bg-success ring-card absolute top-1.5 -left-7 size-2 rounded-full ring-4" />
+            <small className="text-muted-foreground block text-xs">
+              {formatDate(person.activatedAt, true)}
+            </small>
+            <strong className="block text-[13px] font-medium">
+              {person.activationState === 'ACTIVATED'
+                ? 'Участник активирован'
+                : 'Карточка участника создана'}
+            </strong>
+            <p className="text-muted-foreground text-[13px]">
+              Событие рассчитано из первичных данных и сохранено в истории статусов.
+            </p>
+          </li>
+          {person.artifacts.map((artifact) => (
+            <li className="relative" key={artifact.id}>
+              <span className="bg-primary ring-card absolute top-1.5 -left-7 size-2 rounded-full ring-4" />
+              <small className="text-muted-foreground block text-xs">
+                {formatDate(artifact.submittedAt, true)}
+              </small>
+              <strong className="block text-[13px] font-medium">Артефакт: {artifact.title}</strong>
+              <p className="text-muted-foreground text-[13px]">
+                {artifact.typeName} ·{' '}
+                {artifact.score == null ? 'не оценён' : `оценка ${artifact.score}/10`}
+              </p>
+            </li>
+          ))}
+        </ol>
+      </CardContent>
+    </Card>
+  );
 }

@@ -1,9 +1,20 @@
 'use client';
 
-import { ShieldCheck } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 import { EmptyState } from '@/components/empty-state';
+import { PageHeader, PageStack } from '@/components/page-header';
+import { Card, CardContent } from '@/components/ui/card';
+import { Skeleton } from '@/components/ui/skeleton';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+  TableWrapper,
+} from '@/components/ui/table';
 import { api, formatDate } from '@/lib/api';
 
 interface AuditEntry {
@@ -15,6 +26,23 @@ interface AuditEntry {
   occurred_at: string;
   actor_name?: string | null;
 }
+
+const ACTION_LABELS: Record<string, string> = {
+  'person.created': 'Участник создан',
+  'person.updated': 'Участник изменён',
+  'contact.created': 'Контакт добавлен',
+  'artifact.created': 'Артефакт создан',
+  'artifact.version_created': 'Версия создана',
+  'artifact.version_submitted': 'Версия отправлена',
+  'artifact.reviewed': 'Оценка сохранена',
+  'task.created': 'Задача создана',
+  'task.completed': 'Задача завершена',
+  'interaction.created': 'Взаимодействие записано',
+  'person.merge': 'Карточки объединены',
+  'person.unmerge': 'Объединение отменено',
+  'import.commit_completed': 'Импорт зафиксирован',
+  'audit.read': 'Журнал просмотрен',
+};
 
 export default function AuditPage() {
   const [items, setItems] = useState<AuditEntry[]>([]);
@@ -29,74 +57,57 @@ export default function AuditPage() {
   }, []);
 
   return (
-    <div className="page-stack">
-      <section className="page-heading">
-        <p className="eyebrow">Контроль</p>
-        <h1>Журнал действий</h1>
-        <p>Мутации, изменения статусов и доступ к защищённым данным.</p>
-      </section>
-      <section className="table-panel">
+    <PageStack>
+      <PageHeader
+        eyebrow="Контроль"
+        title="Журнал действий"
+        description="Мутации, изменения статусов и доступ к защищённым данным."
+      />
+      <Card>
         {error ? (
           <EmptyState title="Журнал недоступен" text={error} />
-        ) : items.length ? (
-          <div className="table-scroll">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Время</th>
-                  <th>Действие</th>
-                  <th>Объект</th>
-                  <th>Инициатор</th>
-                  <th>Причина</th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((item) => (
-                  <tr key={item.id}>
-                    <td>{formatDate(item.occurred_at, true)}</td>
-                    <td>{actionLabel(item.action)}</td>
-                    <td>
-                      {item.entity_type}
-                      {item.entity_id ? ` · ${item.entity_id.slice(0, 8)}` : ''}
-                    </td>
-                    <td>{item.actor_name ?? 'Система'}</td>
-                    <td>{item.reason ?? '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : !loading ? (
+        ) : loading ? (
+          <CardContent className="space-y-3">
+            {[0, 1, 2, 3, 4].map((row) => (
+              <Skeleton className="h-9 w-full" key={row} />
+            ))}
+          </CardContent>
+        ) : items.length === 0 ? (
           <EmptyState title="Журнал включён" text="Записи появятся после первых действий в CRM." />
         ) : (
-          <div className="empty-state">
-            <span className="empty-state__icon">
-              <ShieldCheck size={22} />
-            </span>
-            <strong>Загружаем журнал…</strong>
-          </div>
+          <TableWrapper>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Время</TableHead>
+                  <TableHead>Действие</TableHead>
+                  <TableHead>Объект</TableHead>
+                  <TableHead>Инициатор</TableHead>
+                  <TableHead>Причина</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {items.map((item) => (
+                  <TableRow key={item.id}>
+                    <TableCell className="text-muted-foreground whitespace-nowrap tabular">
+                      {formatDate(item.occurred_at, true)}
+                    </TableCell>
+                    <TableCell className="font-medium">
+                      {ACTION_LABELS[item.action] ?? item.action}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {item.entity_type}
+                      {item.entity_id ? ` · ${item.entity_id.slice(0, 8)}` : ''}
+                    </TableCell>
+                    <TableCell>{item.actor_name ?? 'Система'}</TableCell>
+                    <TableCell className="text-muted-foreground">{item.reason ?? '—'}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableWrapper>
         )}
-      </section>
-    </div>
+      </Card>
+    </PageStack>
   );
-}
-
-function actionLabel(action: string): string {
-  const labels: Record<string, string> = {
-    'person.created': 'Участник создан',
-    'person.updated': 'Участник изменён',
-    'contact.created': 'Контакт добавлен',
-    'artifact.created': 'Артефакт создан',
-    'artifact.version_created': 'Версия создана',
-    'artifact.version_submitted': 'Версия отправлена',
-    'artifact.reviewed': 'Оценка сохранена',
-    'task.created': 'Задача создана',
-    'task.completed': 'Задача завершена',
-    'interaction.created': 'Взаимодействие записано',
-    'person.merge': 'Карточки объединены',
-    'person.unmerge': 'Объединение отменено',
-    'import.commit_completed': 'Импорт зафиксирован',
-    'audit.read': 'Журнал просмотрен',
-  };
-  return labels[action] ?? action;
 }

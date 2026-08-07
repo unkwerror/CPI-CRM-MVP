@@ -1,11 +1,25 @@
 /**
- * Рубрикатор качества ЦПИ («ЦПИ: метрики и рабочие определения», июль 2026).
+ * Оценка артефакта ЦПИ.
  *
- * Артефакт оценивается по пяти критериям 0–2; Q_artifact — их сумма (0–10).
- * Качественный артефакт: Q_artifact >= 7 и нет нуля по блокирующим критериям
- * «релевантность» и «проверяемость».
+ * Ревьюер принимает одно решение — «принят» или «не принят» — и ставит
+ * балл Q_artifact от 0 до 10. Качественным считается принятый артефакт;
+ * балл используется как метрика уровня, а не как порог приёмки.
+ *
+ * Рубрикатор из пяти критериев по 0–2 больше не заполняется, но остаётся
+ * ниже: по нему разбираются ревью, созданные до упрощения шкалы.
  */
 
+export type ArtifactReviewDecision = 'ACCEPTED' | 'REJECTED' | 'NEEDS_REVISION';
+
+export const ARTIFACT_SCORE_MIN = 0;
+export const ARTIFACT_SCORE_MAX = 10;
+
+/** Принятый артефакт — качественный. Балл на приёмку не влияет. */
+export function isQualityArtifact(decision: ArtifactReviewDecision | null | undefined): boolean {
+  return decision === 'ACCEPTED';
+}
+
+/** @deprecated Исторический рубрикатор: только для чтения старых ревью. */
 export const ARTIFACT_QUALITY_CRITERIA = [
   {
     code: 'relevance',
@@ -43,6 +57,7 @@ export type ArtifactCriterionCode = (typeof ARTIFACT_QUALITY_CRITERIA)[number]['
 
 export type ArtifactCriteriaScores = Readonly<Record<ArtifactCriterionCode, 0 | 1 | 2>>;
 
+/** Балл, начиная с которого артефакт считается сильным в отчётности. */
 export const QUALITY_ARTIFACT_THRESHOLD = 7;
 
 export class ArtifactCriteriaValidationError extends TypeError {
@@ -54,7 +69,11 @@ export class ArtifactCriteriaValidationError extends TypeError {
   }
 }
 
-/** Разбирает и валидирует критерии из произвольного ввода (каждый — целое 0–2). */
+/**
+ * Разбирает и валидирует критерии из произвольного ввода (каждый — целое 0–2).
+ *
+ * @deprecated Исторический рубрикатор: только для чтения старых ревью.
+ */
 export function parseArtifactCriteria(value: unknown): ArtifactCriteriaScores {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new ArtifactCriteriaValidationError('Критерии оценки должны быть объектом');
@@ -79,24 +98,13 @@ export function parseArtifactCriteria(value: unknown): ArtifactCriteriaScores {
   return result as ArtifactCriteriaScores;
 }
 
-/** Q_artifact = сумма пяти критериев (0–10). */
+/**
+ * Q_artifact = сумма пяти критериев (0–10).
+ *
+ * @deprecated Исторический рубрикатор: только для чтения старых ревью.
+ */
 export function computeArtifactScore(criteria: ArtifactCriteriaScores): number {
   return ARTIFACT_QUALITY_CRITERIA.reduce((sum, criterion) => sum + criteria[criterion.code], 0);
-}
-
-/**
- * Качественный артефакт. Для ревью без критериев (старая единая шкала)
- * действует только порог Q >= 7.
- */
-export function isQualityArtifact(
-  score: number | null,
-  criteria: ArtifactCriteriaScores | null,
-): boolean {
-  if (score === null || score < QUALITY_ARTIFACT_THRESHOLD) return false;
-  if (criteria === null) return true;
-  return ARTIFACT_QUALITY_CRITERIA.every(
-    (criterion) => !criterion.blocking || criteria[criterion.code] > 0,
-  );
 }
 
 /**

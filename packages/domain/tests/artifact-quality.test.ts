@@ -37,31 +37,23 @@ describe('parseArtifactCriteria', () => {
   });
 });
 
-describe('computeArtifactScore / isQualityArtifact', () => {
-  it('sums five criteria into Q_artifact', () => {
+describe('computeArtifactScore', () => {
+  it('sums five legacy criteria into Q_artifact', () => {
     expect(computeArtifactScore(fullCriteria)).toBe(10);
     expect(computeArtifactScore({ ...fullCriteria, relevance: 0, timeliness: 1 })).toBe(7);
   });
+});
 
-  it('requires Q >= 7 and no zero on blocking criteria', () => {
-    expect(isQualityArtifact(10, fullCriteria)).toBe(true);
-    expect(isQualityArtifact(7, fullCriteria)).toBe(true);
-    expect(isQualityArtifact(6, fullCriteria)).toBe(false);
-    // Q=8, но релевантность 0 — приёмка заблокирована.
-    expect(
-      isQualityArtifact(8, { ...fullCriteria, relevance: 0 }),
-    ).toBe(false);
-    expect(
-      isQualityArtifact(8, { ...fullCriteria, verifiability: 0 }),
-    ).toBe(false);
-    // Небокирующий критерий может быть нулевым.
-    expect(isQualityArtifact(8, { ...fullCriteria, timeliness: 0 })).toBe(true);
+describe('isQualityArtifact', () => {
+  it('treats an accepted artifact as quality regardless of score', () => {
+    expect(isQualityArtifact('ACCEPTED')).toBe(true);
   });
 
-  it('falls back to the score threshold for legacy single-score reviews', () => {
-    expect(isQualityArtifact(7, null)).toBe(true);
-    expect(isQualityArtifact(6, null)).toBe(false);
-    expect(isQualityArtifact(null, null)).toBe(false);
+  it('treats anything but acceptance as not quality', () => {
+    expect(isQualityArtifact('REJECTED')).toBe(false);
+    expect(isQualityArtifact('NEEDS_REVISION')).toBe(false);
+    expect(isQualityArtifact(null)).toBe(false);
+    expect(isQualityArtifact(undefined)).toBe(false);
   });
 });
 

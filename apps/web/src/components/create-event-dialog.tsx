@@ -1,19 +1,36 @@
 'use client';
 
-import { Check, Search, UserPlus, Users, X } from 'lucide-react';
+import { CheckIcon, SearchIcon, UserPlusIcon, UsersIcon, XIcon } from 'lucide-react';
 import { type FormEvent, useEffect, useMemo, useState } from 'react';
+import { toast } from 'sonner';
 
-import { ApiError, api } from '@/lib/api';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Skeleton } from '@/components/ui/skeleton';
+import { api, apiErrorMessage } from '@/lib/api';
+import { EVENT_STATUS_LABELS, EVENT_STATUS_ORDER } from '@/lib/status-labels';
 import type { PeopleResponse, PersonSummary } from '@/lib/types';
+import { cn } from '@/lib/utils';
 
-const EVENT_STATUSES = [
-  { value: 'PLANNED', label: 'Запланировано' },
-  { value: 'ACTIVE', label: 'Идёт' },
-  { value: 'COMPLETED', label: 'Завершено' },
-  { value: 'CANCELLED', label: 'Отменено' },
-] as const;
-
-type EventStatus = (typeof EVENT_STATUSES)[number]['value'];
+type EventStatus = (typeof EVENT_STATUS_ORDER)[number];
 
 export function CreateEventDialog({
   onClose,
@@ -34,14 +51,6 @@ export function CreateEventDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [idempotencyKey] = useState(() => crypto.randomUUID());
-
-  useEffect(() => {
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === 'Escape' && !saving) onClose();
-    }
-    window.addEventListener('keydown', closeOnEscape);
-    return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [onClose, saving]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -105,47 +114,28 @@ export function CreateEventDialog({
           participantIds: selected.map((person) => person.id),
         }),
       });
+      toast.success('Мероприятие создано');
       onCreated(result.id);
     } catch (caught) {
-      setError(
-        caught instanceof ApiError
-          ? (caught.detail ?? caught.message)
-          : 'Не удалось создать мероприятие',
-      );
+      setError(apiErrorMessage(caught, 'Не удалось создать мероприятие'));
       setSaving(false);
     }
   }
 
   return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={() => !saving && onClose()}>
-      <section
-        aria-labelledby="create-event-title"
-        aria-modal="true"
-        className="dialog create-event-dialog"
-        onMouseDown={(event) => event.stopPropagation()}
-        role="dialog"
-      >
-        <header className="dialog__header">
-          <div>
-            <p className="eyebrow">Новое мероприятие</p>
-            <h2 id="create-event-title">Создать мероприятие</h2>
-          </div>
-          <button
-            aria-label="Закрыть"
-            className="icon-button"
-            disabled={saving}
-            onClick={onClose}
-            type="button"
-          >
-            <X size={18} />
-          </button>
-        </header>
+    <Dialog open onOpenChange={(open) => !open && !saving && onClose()}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogDescription>Новое мероприятие</DialogDescription>
+          <DialogTitle>Создать мероприятие</DialogTitle>
+        </DialogHeader>
 
-        <form onSubmit={submit}>
-          <div className="form-grid">
-            <label className="form-field form-field--full">
-              <span>Название *</span>
-              <input
+        <form onSubmit={submit} className="contents">
+          <DialogBody className="space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="event-name">Название *</Label>
+              <Input
+                id="event-name"
                 autoFocus
                 maxLength={500}
                 minLength={2}
@@ -154,173 +144,174 @@ export function CreateEventDialog({
                 required
                 value={name}
               />
-            </label>
-
-            <label className="form-field">
-              <span>Статус</span>
-              <select
-                onChange={(event) => setStatus(event.target.value as EventStatus)}
-                value={status}
-              >
-                {EVENT_STATUSES.map((item) => (
-                  <option key={item.value} value={item.value}>
-                    {item.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <span aria-hidden="true" className="create-event-dialog__spacer" />
-
-            <label className="form-field">
-              <span>Начало (ваше местное время)</span>
-              <input
-                onChange={(event) => {
-                  setStartsAt(event.target.value);
-                  if (!event.target.value) setEndsAt('');
-                }}
-                type="datetime-local"
-                value={startsAt}
-              />
-            </label>
-
-            <label className="form-field">
-              <span>Окончание (ваше местное время)</span>
-              <input
-                disabled={!startsAt}
-                min={startsAt || undefined}
-                onChange={(event) => setEndsAt(event.target.value)}
-                type="datetime-local"
-                value={endsAt}
-              />
-            </label>
-
-            <div className="form-field form-field--full">
-              <span>Участники</span>
-              <div className="event-participant-picker">
-                <label className="event-participant-picker__search">
-                  <Search size={16} />
-                  <input
-                    aria-label="Поиск участника"
-                    onChange={(event) => setParticipantQuery(event.target.value)}
-                    placeholder="Введите ФИО или контакт…"
-                    value={participantQuery}
-                  />
-                  {participantQuery && (
-                    <button
-                      aria-label="Очистить поиск"
-                      onClick={() => setParticipantQuery('')}
-                      type="button"
-                    >
-                      <X size={14} />
-                    </button>
-                  )}
-                </label>
-
-                {selected.length > 0 && (
-                  <div className="event-participant-picker__selected">
-                    <div className="event-participant-picker__selected-heading">
-                      <span>
-                        <Users size={14} /> Выбрано: {selected.length}
-                      </span>
-                      <button onClick={() => setSelected([])} type="button">
-                        Очистить
-                      </button>
-                    </div>
-                    <div className="event-participant-picker__chips">
-                      {selected.map((person) => (
-                        <button
-                          aria-label={`Убрать ${person.canonicalFullName}`}
-                          className="event-participant-chip"
-                          key={person.id}
-                          onClick={() => toggleParticipant(person)}
-                          type="button"
-                        >
-                          {person.canonicalFullName} <X size={12} />
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                <div
-                  aria-busy={participantsLoading}
-                  aria-label="Результаты поиска участников"
-                  className="event-participant-picker__results"
-                  role="listbox"
-                >
-                  {participantsLoading ? (
-                    <p className="event-participant-picker__message">Ищем участников…</p>
-                  ) : participantsError ? (
-                    <p className="event-participant-picker__message event-participant-picker__message--error">
-                      {participantsError}
-                    </p>
-                  ) : participants.length === 0 ? (
-                    <p className="event-participant-picker__message">Участники не найдены</p>
-                  ) : (
-                    participants.map((person) => {
-                      const isSelected = selectedIds.has(person.id);
-                      return (
-                        <button
-                          aria-selected={isSelected}
-                          className={
-                            isSelected
-                              ? 'event-participant-option event-participant-option--selected'
-                              : 'event-participant-option'
-                          }
-                          key={person.id}
-                          onClick={() => toggleParticipant(person)}
-                          role="option"
-                          type="button"
-                        >
-                          <span className="event-participant-option__icon">
-                            {isSelected ? <Check size={15} /> : <UserPlus size={15} />}
-                          </span>
-                          <span>
-                            <strong>{person.canonicalFullName}</strong>
-                            <small>
-                              {[person.primaryContact, person.organization]
-                                .filter(Boolean)
-                                .join(' · ') || 'Без дополнительных данных'}
-                            </small>
-                          </span>
-                        </button>
-                      );
-                    })
-                  )}
-                </div>
-              </div>
-              <small className="form-field__hint">
-                Выберите участников из реестра; для создания мероприятия это необязательно.
-              </small>
             </div>
-          </div>
 
-          {error && (
-            <p aria-live="polite" className="form-error">
-              {error}
-            </p>
-          )}
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div className="space-y-1.5">
+                <Label>Статус</Label>
+                <Select value={status} onValueChange={(next) => setStatus(next as EventStatus)}>
+                  <SelectTrigger aria-label="Статус мероприятия">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {EVENT_STATUS_ORDER.map((value) => (
+                      <SelectItem key={value} value={value}>
+                        {EVENT_STATUS_LABELS[value]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="event-start">Начало</Label>
+                <Input
+                  id="event-start"
+                  onChange={(event) => {
+                    setStartsAt(event.target.value);
+                    if (!event.target.value) setEndsAt('');
+                  }}
+                  type="datetime-local"
+                  value={startsAt}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="event-end">Окончание</Label>
+                <Input
+                  id="event-end"
+                  disabled={!startsAt}
+                  min={startsAt || undefined}
+                  onChange={(event) => setEndsAt(event.target.value)}
+                  type="datetime-local"
+                  value={endsAt}
+                />
+              </div>
+            </div>
 
-          <footer className="dialog__footer">
-            <button
-              className="button button--secondary"
-              disabled={saving}
-              onClick={onClose}
-              type="button"
-            >
+            <div className="space-y-2">
+              <Label>Участники</Label>
+              <div className="relative">
+                <SearchIcon
+                  className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
+                  aria-hidden="true"
+                />
+                <Input
+                  aria-label="Поиск участника"
+                  className="pl-9"
+                  onChange={(event) => setParticipantQuery(event.target.value)}
+                  placeholder="Введите ФИО или контакт…"
+                  value={participantQuery}
+                />
+              </div>
+
+              {selected.length > 0 && (
+                <div className="bg-muted/50 space-y-2 rounded-lg border p-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground inline-flex items-center gap-1.5 text-xs font-medium">
+                      <UsersIcon className="size-3.5" /> Выбрано: {selected.length}
+                    </span>
+                    <Button type="button" variant="ghost" size="xs" onClick={() => setSelected([])}>
+                      Очистить
+                    </Button>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {selected.map((person) => (
+                      <Badge key={person.id} variant="soft-primary" asChild>
+                        <button
+                          type="button"
+                          aria-label={`Убрать ${person.canonicalFullName}`}
+                          onClick={() => toggleParticipant(person)}
+                        >
+                          {person.canonicalFullName}
+                          <XIcon />
+                        </button>
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div
+                aria-busy={participantsLoading}
+                aria-label="Результаты поиска участников"
+                className="scrollbar-thin max-h-56 space-y-1 overflow-y-auto rounded-lg border p-1"
+                role="listbox"
+              >
+                {participantsLoading ? (
+                  <div className="space-y-1 p-1">
+                    {Array.from({ length: 3 }, (_, index) => (
+                      <Skeleton key={index} className="h-11 rounded-md" />
+                    ))}
+                  </div>
+                ) : participantsError ? (
+                  <p className="text-destructive p-3 text-[13px]">{participantsError}</p>
+                ) : participants.length === 0 ? (
+                  <p className="text-muted-foreground p-3 text-[13px]">Участники не найдены</p>
+                ) : (
+                  participants.map((person) => {
+                    const isSelected = selectedIds.has(person.id);
+                    return (
+                      <button
+                        key={person.id}
+                        type="button"
+                        role="option"
+                        aria-selected={isSelected}
+                        onClick={() => toggleParticipant(person)}
+                        className={cn(
+                          'hover:bg-accent flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left transition-colors',
+                          isSelected && 'bg-primary/10',
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            'flex size-7 shrink-0 items-center justify-center rounded-md border',
+                            isSelected
+                              ? 'border-primary bg-primary text-primary-foreground'
+                              : 'text-muted-foreground',
+                          )}
+                        >
+                          {isSelected ? (
+                            <CheckIcon className="size-4" />
+                          ) : (
+                            <UserPlusIcon className="size-4" />
+                          )}
+                        </span>
+                        <span className="min-w-0">
+                          <strong className="block truncate text-[13px] font-medium">
+                            {person.canonicalFullName}
+                          </strong>
+                          <small className="text-muted-foreground block truncate text-xs">
+                            {[person.primaryContact, person.organization]
+                              .filter(Boolean)
+                              .join(' · ') || 'Без дополнительных данных'}
+                          </small>
+                        </span>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+              <p className="text-muted-foreground text-xs">
+                Участников можно добавить и позже — для создания мероприятия это необязательно.
+              </p>
+            </div>
+
+            {error && (
+              <p aria-live="polite" className="text-destructive text-[13px]">
+                {error}
+              </p>
+            )}
+          </DialogBody>
+
+          <DialogFooter>
+            <Button type="button" variant="outline" disabled={saving} onClick={onClose}>
               Отмена
-            </button>
-            <button
-              className="button button--primary"
-              disabled={saving || name.trim().length < 2}
-              type="submit"
-            >
+            </Button>
+            <Button type="submit" disabled={saving || name.trim().length < 2}>
               {saving ? 'Создаём…' : 'Создать мероприятие'}
-            </button>
-          </footer>
+            </Button>
+          </DialogFooter>
         </form>
-      </section>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

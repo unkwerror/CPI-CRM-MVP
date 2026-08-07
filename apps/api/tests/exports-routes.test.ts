@@ -26,6 +26,16 @@ const organizationRow = {
 async function exportTestApp(query: ReturnType<typeof vi.fn>, roles: Role[]) {
   const app = Fastify({ logger: false });
   await app.register(rateLimit, { global: false });
+  app.decorate('config', {
+    storage: {
+      endpoint: 'http://localhost:9000',
+      region: 'us-east-1',
+      accessKey: 'test',
+      secretKey: 'test-secret',
+      quarantineBucket: 'cpi-quarantine',
+      privateBucket: 'cpi-private',
+    },
+  } as never);
   const authUser: AuthUser = {
     sub: 'route-test-user',
     userId: USER_ID,
@@ -50,6 +60,24 @@ async function exportTestApp(query: ReturnType<typeof vi.fn>, roles: Role[]) {
   });
   await registerExportRoutes(app);
   return app;
+}
+
+/** Имена записей читаются из центрального каталога ZIP — он всегда в конце файла. */
+function readZipEntryNames(zip: Buffer): string[] {
+  const signature = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
+  const endOffset = zip.lastIndexOf(signature);
+  expect(endOffset).toBeGreaterThanOrEqual(0);
+  const total = zip.readUInt16LE(endOffset + 10);
+  let cursor = zip.readUInt32LE(endOffset + 16);
+  const names: string[] = [];
+  for (let index = 0; index < total; index += 1) {
+    const nameLength = zip.readUInt16LE(cursor + 28);
+    const extraLength = zip.readUInt16LE(cursor + 30);
+    const commentLength = zip.readUInt16LE(cursor + 32);
+    names.push(zip.toString('utf8', cursor + 46, cursor + 46 + nameLength));
+    cursor += 46 + nameLength + extraLength + commentLength;
+  }
+  return names;
 }
 
 describe('participant export route', () => {
@@ -220,6 +248,95 @@ describe('participant export route', () => {
         rows: 1,
         streaming: true,
       });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('packs the event workbook, manifest and unavailable files into the ZIP', async () => {
+    const participantId = '00000000-0000-4000-8000-000000000031';
+    let auditPayload: Record<string, unknown> = {};
+    const query = vi.fn(async (sql: string, parameters?: unknown[]) => {
+      if (sql.includes('FROM organization_settings os')) return { rows: [organizationRow] };
+      if (sql.includes('SELECT id, name FROM events')) {
+        return { rows: [{ id: EVENT_ID, name: 'Регистрация ООО' }] };
+      }
+      if (sql.includes('WITH canonical_participants AS')) {
+        return {
+          rows: [
+            {
+              person_id: participantId,
+              last_name: 'Глазырин',
+              first_name: 'Павел',
+              patronymic: 'Андреевич',
+              canonical_full_name: 'Глазырин Павел Андреевич',
+              email: null,
+              phone: null,
+              telegram: null,
+              telegram_user_id: null,
+              attended: true,
+              decisions: ['ACCEPTED'],
+            },
+          ],
+        };
+      }
+      if (sql.includes('WITH event_participants AS')) {
+        expect(parameters).toEqual([EVENT_ID]);
+        return {
+          rows: [
+            {
+              id: '00000000-0000-4000-8000-000000000040',
+              title: 'Артефакт по открытию ООО',
+              type_name: 'Документ',
+              status: 'SUBMITTED',
+              latest_version_id: '00000000-0000-4000-8000-000000000041',
+              version_number: 1,
+              latest_version_status: 'SUBMITTED',
+              submitted_at: new Date('2026-08-04T09:00:00.000Z'),
+              score: 8,
+              decision: 'ACCEPTED',
+              reviewed_at: null,
+              reviewer_name: null,
+              authors: [
+                { id: participantId, name: 'Глазырин Павел Андреевич', isParticipant: true },
+              ],
+              files: [
+                {
+                  id: '00000000-0000-4000-8000-000000000042',
+                  fileName: 'ООО.docx',
+                  sizeBytes: 1024,
+                  status: 'QUARANTINED',
+                  storageProvider: 'LOCKER',
+                },
+              ],
+              external_urls: null,
+              has_locker: true,
+            },
+          ],
+        };
+      }
+      if (sql.includes('INSERT INTO audit_log')) {
+        auditPayload = JSON.parse(String((parameters ?? [])[4]));
+        return { rows: [] };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const app = await exportTestApp(query, [Roles.DATA_STEWARD]);
+
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/exports/events/${EVENT_ID}/package.zip`,
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['content-type']).toBe('application/zip');
+      const entries = readZipEntryNames(response.rawPayload);
+      expect(entries).toContain('Участники.xlsx');
+      expect(entries).toContain('manifest.json');
+      // Файл в карантине не качается, но обязан попасть в manifest со скипами.
+      expect(entries.some((name) => name.startsWith('artifacts/'))).toBe(false);
+      expect(auditPayload).toMatchObject({ participants: 1, artifacts: 1, files: 0, skipped: 1 });
     } finally {
       await app.close();
     }

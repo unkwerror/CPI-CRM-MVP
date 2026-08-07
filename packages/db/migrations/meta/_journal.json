@@ -64,6 +64,13 @@
       "when": 1785840000000,
       "tag": "0008_participant_identity_hygiene",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1786000000000,
+      "tag": "0009_task_in_progress",
+      "breakpoints": true
     }
   ]
 }

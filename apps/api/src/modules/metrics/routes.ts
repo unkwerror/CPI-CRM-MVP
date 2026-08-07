@@ -9,8 +9,8 @@ import { HttpProblem } from '../../lib/problem.js';
  *
  * Четыре блока: экономика (выручка по факту оплаты, поток, средний чек,
  * OpEx%, выручка на голову), воронка и артефакты, активация и удержание,
- * монетизация. Качественный артефакт: Q_artifact >= 7 без нуля по
- * релевантности/проверяемости (для старых ревью — только порог балла).
+ * монетизация. Качественный артефакт — принятый на приёмке; балл 0–10
+ * идёт отдельной метрикой уровня.
  */
 
 /** Событие «качественный артефакт» на человека: текущее финальное принятое ревью. */
@@ -27,11 +27,6 @@ const QUALITY_EVENTS_CTE = `
        AND ar.voided_at IS NULL
        AND ar.status = 'FINAL'
        AND ar.decision = 'ACCEPTED'
-       AND ar.score >= 7
-       AND (
-         ar.criteria IS NULL
-         OR ((ar.criteria->>'relevance')::int > 0 AND (ar.criteria->>'verifiability')::int > 0)
-       )
        AND p.archived_at IS NULL
        AND p.merged_into_person_id IS NULL
   )

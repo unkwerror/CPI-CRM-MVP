@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { Permissions } from '@cpi-crm/domain';
 import { Type } from '@sinclair/typebox';
 import type { FastifyInstance } from 'fastify';
@@ -15,6 +17,17 @@ const LIVE_ACTIVITY_SQL = `CASE
   WHEN now() <= p.last_artifact_at + make_interval(hours => lrs.inactive_after_hours) THEN 'MEDIUM'
   ELSE 'INACTIVE'
 END`;
+
+const TaskStatusSchema = Type.Union([
+  Type.Literal('OPEN'),
+  Type.Literal('IN_PROGRESS'),
+  Type.Literal('DONE'),
+  Type.Literal('CANCELLED'),
+]);
+
+type TaskStatus = 'OPEN' | 'IN_PROGRESS' | 'DONE' | 'CANCELLED';
+
+const FINISHED_TASK_STATUSES = new Set<TaskStatus>(['DONE', 'CANCELLED']);
 
 export async function registerOperationRoutes(app: FastifyInstance): Promise<void> {
   app.get(
@@ -61,7 +74,7 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
                 count(*) FILTER (WHERE lp.activation_state = 'UNKNOWN_LEGACY')::text AS unknown_legacy,
                 (SELECT unreviewed_artifacts::text FROM artifact_metrics),
                 (SELECT count(*)::text FROM duplicate_candidates WHERE status = 'OPEN') AS duplicate_candidates,
-                (SELECT count(*)::text FROM tasks WHERE status = 'OPEN' AND due_at < now() AND archived_at IS NULL) AS overdue_tasks,
+                (SELECT count(*)::text FROM tasks WHERE status NOT IN ('DONE', 'CANCELLED') AND due_at < now() AND archived_at IS NULL) AS overdue_tasks,
                 (SELECT recent_versions::text FROM artifact_metrics),
                 (SELECT recent_authors::text FROM artifact_metrics),
                 (SELECT count(*)::text FROM events WHERE archived_at IS NULL) AS event_count
@@ -69,7 +82,7 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
       );
       const scores = await app.pool.query<{ score: number; count: string }>(
         `SELECT series.score, count(ar.id)::text AS count
-           FROM generate_series(1, 10) AS series(score)
+           FROM generate_series(0, 10) AS series(score)
            LEFT JOIN artifact_reviews ar ON ar.score = series.score AND ar.status = 'FINAL' AND ar.voided_at IS NULL
            LEFT JOIN artifact_review_selections ars ON ars.current_final_review_id = ar.id
           GROUP BY series.score ORDER BY series.score`,
@@ -103,32 +116,173 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
       preHandler: app.requirePermission(Permissions.PEOPLE_READ),
       schema: {
         tags: ['Задачи'],
-        querystring: Type.Object({ overdue: Type.Optional(Type.Boolean()) }),
+        querystring: Type.Object({
+          overdue: Type.Optional(Type.Boolean()),
+          status: Type.Optional(TaskStatusSchema),
+          assignee: Type.Optional(Type.Union([Type.Literal('me'), Type.Literal('all')])),
+          search: Type.Optional(Type.String({ maxLength: 200 })),
+          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })),
+        }),
       },
     },
     async (request) => {
-      const overdue = (request.query as { overdue?: boolean }).overdue ?? false;
+      const query = request.query as {
+        overdue?: boolean;
+        status?: TaskStatus;
+        assignee?: 'me' | 'all';
+        search?: string;
+        limit?: number;
+      };
+      const search = query.search?.trim() ?? '';
       const result = await app.pool.query(
-        `SELECT t.id, t.person_id, t.title, t.status, t.due_at,
-                p.canonical_full_name AS person_name
+        `SELECT t.id, t.person_id, t.project_id, t.title, t.description, t.status,
+                t.due_at, t.completed_at, t.result, t.is_next_step, t.version, t.created_at,
+                p.canonical_full_name AS person_name,
+                u.display_name AS assignee_name,
+                t.assignee_user_id
            FROM tasks t
            LEFT JOIN persons p ON p.id = t.person_id
+           LEFT JOIN app_users u ON u.id = t.assignee_user_id
           WHERE t.archived_at IS NULL
-            AND (NOT $1::boolean OR (t.status = 'OPEN' AND t.due_at < now()))
-          ORDER BY t.status = 'OPEN' DESC, t.due_at NULLS LAST, t.created_at DESC
-          LIMIT 100`,
-        [overdue],
+            AND (NOT $1::boolean OR (t.status <> 'DONE' AND t.status <> 'CANCELLED' AND t.due_at < now()))
+            AND ($2::text IS NULL OR t.status = $2::task_status)
+            AND ($3::uuid IS NULL OR t.assignee_user_id = $3::uuid)
+            AND ($4::text = '' OR t.title ILIKE '%' || $4 || '%'
+                 OR p.canonical_full_name ILIKE '%' || $4 || '%')
+          ORDER BY t.status = 'DONE', t.status = 'CANCELLED',
+                   t.due_at NULLS LAST, t.created_at DESC
+          LIMIT $5`,
+        [
+          query.overdue ?? false,
+          query.status ?? null,
+          query.assignee === 'me' ? request.authUser!.userId : null,
+          search,
+          query.limit ?? 200,
+        ],
       );
       return {
         items: result.rows.map((item) => ({
           id: item.id,
           personId: item.person_id,
+          projectId: item.project_id,
           title: item.title,
+          description: item.description,
           status: item.status,
           dueAt: item.due_at?.toISOString() ?? null,
+          completedAt: item.completed_at?.toISOString() ?? null,
+          result: item.result,
+          isNextStep: item.is_next_step,
+          version: item.version,
+          createdAt: item.created_at?.toISOString() ?? null,
           personName: item.person_name,
+          assigneeUserId: item.assignee_user_id,
+          assigneeName: item.assignee_name,
         })),
       };
+    },
+  );
+
+  app.patch(
+    '/tasks/:id',
+    {
+      preHandler: app.requirePermission(Permissions.TASKS_MANAGE),
+      schema: {
+        tags: ['Задачи'],
+        params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
+        body: Type.Object({
+          version: Type.Integer({ minimum: 1 }),
+          status: Type.Optional(TaskStatusSchema),
+          title: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
+          description: Type.Optional(Type.Union([Type.String({ maxLength: 10_000 }), Type.Null()])),
+          dueAt: Type.Optional(
+            Type.Union([Type.String({ format: 'date-time' }), Type.Null()]),
+          ),
+          isNextStep: Type.Optional(Type.Boolean()),
+          result: Type.Optional(Type.Union([Type.String({ maxLength: 10_000 }), Type.Null()])),
+        }),
+      },
+    },
+    async (request) => {
+      const id = (request.params as { id: string }).id;
+      const body = request.body as {
+        version: number;
+        status?: TaskStatus;
+        title?: string;
+        description?: string | null;
+        dueAt?: string | null;
+        isNextStep?: boolean;
+        result?: string | null;
+      };
+      return transaction(app.pool, async (client) => {
+        const current = await client.query(
+          `SELECT id, person_id, title, description, status, due_at, completed_at,
+                  result, is_next_step, version
+             FROM tasks WHERE id = $1 AND archived_at IS NULL FOR UPDATE`,
+          [id],
+        );
+        const row = current.rows[0];
+        if (!row) throw new HttpProblem(404, 'Задача не найдена');
+        if (row.version !== body.version) throw new HttpProblem(409, 'Задача уже изменена');
+
+        const nextStatus: TaskStatus = body.status ?? row.status;
+        const nextIsNextStep = body.isNextStep ?? row.is_next_step;
+        // The partial unique index only tolerates one live next step per person,
+        // so free the slot before this task claims it.
+        if (nextIsNextStep && !FINISHED_TASK_STATUSES.has(nextStatus) && row.person_id) {
+          await client.query(
+            `UPDATE tasks
+                SET is_next_step = false, version = version + 1, updated_at = now()
+              WHERE person_id = $1 AND id <> $2 AND is_next_step
+                AND status NOT IN ('DONE', 'CANCELLED') AND archived_at IS NULL`,
+            [row.person_id, id],
+          );
+        }
+
+        const updated = await client.query(
+          `UPDATE tasks
+              SET title = COALESCE($2, title),
+                  description = CASE WHEN $3::boolean THEN $4 ELSE description END,
+                  status = $5::task_status,
+                  due_at = CASE WHEN $6::boolean THEN $7::timestamptz ELSE due_at END,
+                  is_next_step = CASE WHEN $8::task_status IN ('DONE', 'CANCELLED')
+                                      THEN false ELSE $9::boolean END,
+                  result = CASE WHEN $10::boolean THEN $11 ELSE result END,
+                  completed_at = CASE WHEN $8::task_status = 'DONE'
+                                      THEN COALESCE(completed_at, now()) ELSE NULL END,
+                  version = version + 1, updated_at = now()
+            WHERE id = $1
+            RETURNING id, status, version`,
+          [
+            id,
+            body.title?.trim() ?? null,
+            body.description !== undefined,
+            body.description === undefined ? null : body.description?.trim() || null,
+            nextStatus,
+            body.dueAt !== undefined,
+            body.dueAt ? new Date(body.dueAt) : null,
+            nextStatus,
+            nextIsNextStep,
+            body.result !== undefined,
+            body.result === undefined ? null : body.result?.trim() || null,
+          ],
+        );
+        await writeAudit(client, {
+          actor: request.authUser!,
+          requestId: request.id,
+          action: 'task.updated',
+          entityType: 'task',
+          entityId: id,
+          before: {
+            title: row.title,
+            status: row.status,
+            dueAt: row.due_at?.toISOString() ?? null,
+            isNextStep: row.is_next_step,
+          },
+          after: { ...body, status: nextStatus },
+        });
+        const result = updated.rows[0]!;
+        return { id: result.id, status: result.status, version: result.version };
+      });
     },
   );
 
@@ -141,6 +295,7 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
         body: Type.Object({
           personId: Type.String({ format: 'uuid' }),
           title: Type.String({ minLength: 1, maxLength: 500 }),
+          description: Type.Optional(Type.String({ maxLength: 10_000 })),
           dueAt: Type.Optional(Type.String({ format: 'date-time' })),
           isNextStep: Type.Optional(Type.Boolean()),
         }),
@@ -150,6 +305,7 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
       const body = request.body as {
         personId: string;
         title: string;
+        description?: string;
         dueAt?: string;
         isNextStep?: boolean;
       };
@@ -178,15 +334,17 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
                       SELECT id FROM persons
                        WHERE id = $1 OR merged_into_person_id = $1
                     )
-                AND status = 'OPEN' AND archived_at IS NULL`,
+                AND status NOT IN ('DONE', 'CANCELLED') AND archived_at IS NULL`,
             [canonicalPersonId],
           );
         }
         const task = await client.query<{ id: string }>(
-          `INSERT INTO tasks (person_id, title, created_by_user_id, assignee_user_id, due_at, is_next_step) VALUES ($1, $2, $3, $3, $4, $5) RETURNING id`,
+          `INSERT INTO tasks (person_id, title, description, created_by_user_id, assignee_user_id, due_at, is_next_step)
+           VALUES ($1, $2, $3, $4, $4, $5, $6) RETURNING id`,
           [
             canonicalPersonId,
             body.title.trim(),
+            body.description?.trim() || null,
             request.authUser!.userId,
             body.dueAt ? new Date(body.dueAt) : null,
             body.isNextStep ?? false,
@@ -224,7 +382,7 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
           `UPDATE tasks
               SET status = 'DONE', completed_at = now(), result = $2,
                   is_next_step = false, version = version + 1, updated_at = now()
-            WHERE id = $1 AND status = 'OPEN' AND archived_at IS NULL
+            WHERE id = $1 AND status IN ('OPEN', 'IN_PROGRESS') AND archived_at IS NULL
             RETURNING id`,
           [id, body.result?.trim() || null],
         );
@@ -353,6 +511,88 @@ async function registerDuplicateRoutes(app: FastifyInstance) {
           right: compactPerson(row.b_id, row.b_name, row.b_contact, row.b_organization),
         })),
       };
+    },
+  );
+
+  app.post(
+    '/duplicate-candidates',
+    {
+      preHandler: app.requirePermission(Permissions.DUPLICATES_RESOLVE),
+      schema: {
+        tags: ['Дубли'],
+        summary: 'Завести пару на слияние вручную',
+        body: Type.Object({
+          personAId: Type.String({ format: 'uuid' }),
+          personBId: Type.String({ format: 'uuid' }),
+          reason: Type.String({ minLength: 3, maxLength: 2000 }),
+        }),
+      },
+    },
+    async (request, reply) => {
+      const body = request.body as { personAId: string; personBId: string; reason: string };
+      if (body.personAId === body.personBId)
+        throw new HttpProblem(400, 'Нельзя объединить карточку саму с собой');
+      // Схема требует person_a_id < person_b_id и 64 hex-символа отпечатка.
+      const [first, second] = [body.personAId, body.personBId].sort();
+      const fingerprint = createHash('sha256').update(`manual:${first}:${second}`).digest('hex');
+
+      return transaction(app.pool, async (client) => {
+        // Карточки в архиве допустимы: гигиена ФИО прячет личности, заведённые
+        // ботом по имени из Telegram, а слияние с живым участником — это ровно
+        // тот способ, которым такие карточки возвращаются в оборот.
+        const people = await client.query<{
+          id: string;
+          merged_into_person_id: string | null;
+          archived: boolean;
+        }>(
+          `SELECT id, merged_into_person_id, archived_at IS NOT NULL AS archived
+             FROM persons
+            WHERE id = ANY($1::uuid[])
+            ORDER BY id FOR UPDATE`,
+          [[first, second]],
+        );
+        if (people.rows.length !== 2) throw new HttpProblem(404, 'Одна из карточек не найдена');
+        if (people.rows.some((row) => row.merged_into_person_id))
+          throw new HttpProblem(409, 'Одна из карточек уже объединена');
+        if (people.rows.every((row) => row.archived))
+          throw new HttpProblem(409, 'Обе карточки в архиве — объединять нечего');
+
+        const existing = await client.query<{ id: string; status: string }>(
+          `SELECT id, status FROM duplicate_candidates
+            WHERE person_a_id = $1 AND person_b_id = $2
+            ORDER BY status = 'OPEN' DESC, detected_at DESC
+            LIMIT 1`,
+          [first, second],
+        );
+        const open = existing.rows.find((row) => row.status === 'OPEN');
+        if (open) return reply.code(200).send({ id: open.id, status: 'OPEN' });
+
+        const created = await client.query<{ id: string }>(
+          `INSERT INTO duplicate_candidates
+             (person_a_id, person_b_id, confidence_basis_points, evidence_fingerprint, reasons)
+           VALUES ($1, $2, 10000, $3, $4::jsonb)
+           ON CONFLICT (person_a_id, person_b_id, evidence_fingerprint)
+           DO UPDATE SET status = 'OPEN', decided_at = NULL, decided_by_user_id = NULL,
+                         decision_reason = NULL, updated_at = now()
+           RETURNING id`,
+          [first, second, fingerprint, JSON.stringify(['MANUAL'])],
+        );
+        const id = created.rows[0]!.id;
+        await client.query('DELETE FROM not_duplicate_pairs WHERE person_a_id = $1 AND person_b_id = $2', [
+          first,
+          second,
+        ]);
+        await writeAudit(client, {
+          actor: request.authUser!,
+          requestId: request.id,
+          action: 'duplicate.manually_queued',
+          entityType: 'duplicate_candidate',
+          entityId: id,
+          reason: body.reason,
+          after: { personAId: first, personBId: second },
+        });
+        return reply.code(201).send({ id, status: 'OPEN' });
+      });
     },
   );
 
@@ -527,7 +767,7 @@ async function registerDuplicateRoutes(app: FastifyInstance) {
                         SELECT id FROM persons
                          WHERE id = $1 OR merged_into_person_id = $1
                       )
-                  AND status = 'OPEN' AND is_next_step AND archived_at IS NULL
+                  AND status NOT IN ('DONE', 'CANCELLED') AND is_next_step AND archived_at IS NULL
              )
              UPDATE tasks
                 SET is_next_step = false, updated_at = now()

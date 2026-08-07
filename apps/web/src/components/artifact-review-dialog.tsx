@@ -1,10 +1,39 @@
 'use client';
 
-import { Download, ExternalLink, FileText, LoaderCircle, X } from 'lucide-react';
+import {
+  CheckCircle2Icon,
+  DownloadIcon,
+  ExternalLinkIcon,
+  FileTextIcon,
+  LoaderCircleIcon,
+  XCircleIcon,
+} from 'lucide-react';
 import { type FormEvent, useEffect, useState } from 'react';
+import { toast } from 'sonner';
 
-import { ApiError, api, formatDate } from '@/lib/api';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Label } from '@/components/ui/label';
+import { Slider } from '@/components/ui/slider';
+import { Textarea } from '@/components/ui/textarea';
+import { api, apiErrorMessage, formatDate } from '@/lib/api';
+import {
+  ARTIFACT_VERSION_STATUS_LABELS,
+  REVIEW_DECISION_LABELS,
+  REVIEW_DECISION_VARIANTS,
+  scoreVariant,
+} from '@/lib/status-labels';
 import type { ArtifactVersionDetail } from '@/lib/types';
+import { cn } from '@/lib/utils';
 
 interface ArtifactReviewDialogProps {
   versionId: string;
@@ -12,50 +41,21 @@ interface ArtifactReviewDialogProps {
   onReviewed: () => void | Promise<void>;
 }
 
-/** Рубрикатор качества ЦПИ: пять критериев по 0–2, Q_artifact = сумма. */
-const REVIEW_CRITERIA = [
-  {
-    code: 'relevance',
-    label: 'Релевантность',
-    blocking: true,
-    hint: 'Отвечает задаче мероприятия, проекта, продукта или запроса',
-  },
-  {
-    code: 'completeness',
-    label: 'Полнота',
-    blocking: false,
-    hint: 'Можно понять и использовать без устных пояснений автора',
-  },
-  {
-    code: 'verifiability',
-    label: 'Проверяемость',
-    blocking: true,
-    hint: 'Есть доказательство: ссылка, файл, код, расчёт, демо',
-  },
-  {
-    code: 'applicability',
-    label: 'Потенциал применения',
-    blocking: false,
-    hint: 'Можно использовать дальше: в проекте, продукте, продаже',
-  },
-  {
-    code: 'timeliness',
-    label: 'Срок и формат',
-    blocking: false,
-    hint: 'Сдан в срок и в переиспользуемом формате',
-  },
-] as const;
+type Decision = 'ACCEPTED' | 'REJECTED';
 
-type CriterionCode = (typeof REVIEW_CRITERIA)[number]['code'];
-type CriteriaState = Record<CriterionCode, 0 | 1 | 2>;
-
-const DEFAULT_CRITERIA: CriteriaState = {
-  relevance: 2,
-  completeness: 2,
-  verifiability: 2,
-  applicability: 2,
-  timeliness: 2,
+const SCORE_HINTS: Record<number, string> = {
+  0: 'Нет полезного содержания',
+  3: 'Есть заготовка, но использовать нельзя',
+  5: 'Рабочий минимум',
+  7: 'Сильный артефакт',
+  10: 'Эталон, можно показывать партнёру',
 };
+
+function scoreHint(score: number): string {
+  const thresholds = [10, 7, 5, 3, 0];
+  const match = thresholds.find((threshold) => score >= threshold) ?? 0;
+  return SCORE_HINTS[match] ?? '';
+}
 
 export function ArtifactReviewDialog({
   versionId,
@@ -64,8 +64,8 @@ export function ArtifactReviewDialog({
 }: ArtifactReviewDialogProps) {
   const [detail, setDetail] = useState<ArtifactVersionDetail | null>(null);
   const [loading, setLoading] = useState(true);
-  const [criteria, setCriteria] = useState<CriteriaState>(DEFAULT_CRITERIA);
-  const [decision, setDecision] = useState<'NEEDS_REVISION' | 'ACCEPTED' | 'REJECTED'>('ACCEPTED');
+  const [decision, setDecision] = useState<Decision>('ACCEPTED');
+  const [score, setScore] = useState(7);
   const [comment, setComment] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -78,8 +78,11 @@ export function ArtifactReviewDialog({
       .then((result) => {
         if (!active) return;
         setDetail(result);
-        if (result.currentReview) {
-          setDecision(result.currentReview.decision);
+        const review = result.currentReview;
+        if (review) {
+          setDecision(review.decision === 'ACCEPTED' ? 'ACCEPTED' : 'REJECTED');
+          setScore(review.score);
+          setComment(review.comment ?? '');
         }
       })
       .catch((caught) => {
@@ -93,29 +96,20 @@ export function ArtifactReviewDialog({
     };
   }, [versionId]);
 
-  const totalScore = REVIEW_CRITERIA.reduce((sum, item) => sum + criteria[item.code], 0);
-  const blockedByZero = REVIEW_CRITERIA.some(
-    (item) => item.blocking && criteria[item.code] === 0,
-  );
-  const isQuality = totalScore >= 7 && !blockedByZero;
-
   async function submitReview(event: FormEvent) {
     event.preventDefault();
-    if (decision === 'ACCEPTED' && blockedByZero) {
-      setError('Нельзя принять артефакт с нулём по релевантности или проверяемости.');
-      return;
-    }
     setSaving(true);
     setError(null);
     try {
       await api(`/artifact-versions/${versionId}/reviews`, {
         method: 'POST',
         body: JSON.stringify({
-          criteria,
           decision,
-          comment: comment.trim() || undefined,
+          score,
+          ...(comment.trim() ? { comment: comment.trim() } : {}),
         }),
       });
+      toast.success(decision === 'ACCEPTED' ? 'Артефакт принят' : 'Артефакт не принят');
       await onReviewed();
       onClose();
     } catch (caught) {
@@ -126,216 +120,219 @@ export function ArtifactReviewDialog({
   }
 
   async function downloadFile(fileId: string) {
-    setError(null);
     try {
       const result = await api<{ downloadUrl: string }>(`/files/${fileId}/download-url`);
       const opened = window.open(result.downloadUrl, '_blank', 'noopener,noreferrer');
       if (opened) opened.opener = null;
     } catch (caught) {
-      setError(apiErrorMessage(caught, 'Не удалось открыть файл'));
+      toast.error(apiErrorMessage(caught, 'Не удалось открыть файл'));
     }
   }
 
+  const canReview = detail?.status === 'SUBMITTED' && detail.canReview;
+
   return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
-      <section
-        className="dialog artifact-review-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="artifact-review-title"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <header className="dialog__header">
-          <div>
-            <p className="eyebrow">Версия артефакта</p>
-            <h2 id="artifact-review-title">{detail?.title ?? 'Загрузка…'}</h2>
-          </div>
-          <button className="icon-button" type="button" aria-label="Закрыть" onClick={onClose}>
-            <X size={18} />
-          </button>
-        </header>
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogDescription>Версия артефакта</DialogDescription>
+          <DialogTitle>{detail?.title ?? 'Загрузка…'}</DialogTitle>
+        </DialogHeader>
 
-        {loading ? (
-          <div className="artifact-version-loading">
-            <LoaderCircle size={20} /> Загружаем версию…
-          </div>
-        ) : detail ? (
-          <>
-            <div className="artifact-version-summary">
-              <span>{detail.typeName}</span>
-              <span>Версия {detail.versionNumber}</span>
-              <span>{detail.status}</span>
-              <span>{formatDate(detail.submittedAt, true)}</span>
-            </div>
-            <div className="artifact-version-authors">
-              <strong>Авторы:</strong>{' '}
-              {detail.contributors
-                .filter((item) => item.role === 'AUTHOR')
-                .map((item) => item.name)
-                .join(', ') || '—'}
-            </div>
-
-            {detail.textContent && (
-              <section className="artifact-version-content">
-                <h3>Текст</h3>
-                <pre>{detail.textContent}</pre>
-              </section>
-            )}
-
-            {detail.externalUrls.length > 0 && (
-              <section className="artifact-version-content">
-                <h3>Ссылки</h3>
-                <div className="artifact-version-assets">
-                  {detail.externalUrls.map((url) => (
-                    <a
-                      className="button button--secondary"
-                      href={url}
-                      key={url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      referrerPolicy="no-referrer"
-                    >
-                      <ExternalLink size={15} /> Открыть внешний ресурс
-                    </a>
-                  ))}
-                </div>
-              </section>
-            )}
-
-            {detail.files.length > 0 && (
-              <section className="artifact-version-content">
-                <h3>Файлы</h3>
-                <div className="artifact-version-assets">
-                  {detail.files.map((file) => (
-                    <button
-                      className="button button--secondary"
-                      type="button"
-                      key={file.id}
-                      disabled={file.status !== 'AVAILABLE'}
-                      onClick={() => downloadFile(file.id)}
-                    >
-                      <Download size={15} /> {file.fileName}
-                      {file.status !== 'AVAILABLE' ? ` · ${file.status}` : ''}
-                    </button>
-                  ))}
-                </div>
-              </section>
-            )}
-
-            {!detail.textContent && !detail.externalUrls.length && !detail.files.length && (
-              <div className="artifact-version-empty">
-                <FileText size={18} /> Содержимое версии не приложено.
-              </div>
-            )}
-
-            {detail.currentReview && (
-              <section className="artifact-current-review">
-                <span className="score-chip">{detail.currentReview.score}</span>
+        <DialogBody className="space-y-5">
+          {loading ? (
+            <p className="text-muted-foreground flex items-center gap-2 py-8 text-sm">
+              <LoaderCircleIcon className="size-4 animate-spin" /> Загружаем версию…
+            </p>
+          ) : !detail ? (
+            <p className="text-destructive text-sm">{error ?? 'Версия недоступна'}</p>
+          ) : (
+            <>
+              <div className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px]">
+                <Badge variant="soft-muted">{detail.typeName}</Badge>
+                <span>Версия {detail.versionNumber}</span>
+                <span>·</span>
                 <span>
-                  <strong>{reviewDecisionLabel(detail.currentReview.decision)}</strong>
-                  <small>
-                    {detail.currentReview.reviewerName ?? 'Рецензент'} ·{' '}
-                    {formatDate(detail.currentReview.reviewedAt, true)}
-                  </small>
-                  {detail.currentReview.comment && <p>{detail.currentReview.comment}</p>}
+                  {ARTIFACT_VERSION_STATUS_LABELS[detail.status] ?? detail.status}
                 </span>
-              </section>
-            )}
+                <span>·</span>
+                <span>{formatDate(detail.submittedAt, true)}</span>
+              </div>
 
-            {error && <p className="form-error">{error}</p>}
+              <p className="text-[13px]">
+                <span className="text-muted-foreground">Авторы: </span>
+                {detail.contributors
+                  .filter((item) => item.role === 'AUTHOR')
+                  .map((item) => item.name)
+                  .join(', ') || '—'}
+              </p>
 
-            {detail.status === 'SUBMITTED' && detail.canReview && (
-              <form onSubmit={submitReview}>
-                <div className="form-grid artifact-review-form">
-                  {REVIEW_CRITERIA.map((item) => (
-                    <label className="form-field" key={item.code} title={item.hint}>
-                      <span>
-                        {item.label}
-                        {item.blocking ? ' (0 блокирует приёмку)' : ''} *
-                      </span>
-                      <select
-                        value={criteria[item.code]}
-                        onChange={(event) =>
-                          setCriteria((prev) => ({
-                            ...prev,
-                            [item.code]: Number(event.target.value) as 0 | 1 | 2,
-                          }))
-                        }
-                      >
-                        <option value={0}>0 — не выполнено</option>
-                        <option value={1}>1 — частично</option>
-                        <option value={2}>2 — полностью</option>
-                      </select>
-                    </label>
-                  ))}
-                  <label className="form-field">
-                    <span>Решение *</span>
-                    <select
-                      value={decision}
-                      onChange={(event) => setDecision(event.target.value as typeof decision)}
-                    >
-                      <option value="ACCEPTED">Принят</option>
-                      <option value="NEEDS_REVISION">Нужна доработка</option>
-                      <option value="REJECTED">Отклонён</option>
-                    </select>
-                  </label>
-                  <div className="form-field">
-                    <span>Q_artifact</span>
-                    <p style={{ margin: 0 }}>
-                      <strong>{totalScore} / 10</strong>{' '}
-                      {isQuality ? (
-                        <span style={{ color: 'var(--color-success, #15803d)' }}>
-                          качественный
-                        </span>
-                      ) : (
-                        <span style={{ color: 'var(--color-danger, #b91c1c)' }}>
-                          {blockedByZero
-                            ? 'приёмка заблокирована нулём'
-                            : 'ниже порога 7/10'}
-                        </span>
-                      )}
-                    </p>
+              {detail.textContent && (
+                <section className="space-y-1.5">
+                  <Label>Текст</Label>
+                  <pre className="bg-muted scrollbar-thin max-h-56 overflow-auto rounded-lg p-3 text-[13px] whitespace-pre-wrap">
+                    {detail.textContent}
+                  </pre>
+                </section>
+              )}
+
+              {detail.externalUrls.length > 0 && (
+                <section className="space-y-1.5">
+                  <Label>Ссылки</Label>
+                  <div className="flex flex-wrap gap-2">
+                    {detail.externalUrls.map((url) => (
+                      <Button key={url} variant="outline" size="sm" asChild>
+                        <a
+                          href={url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          referrerPolicy="no-referrer"
+                        >
+                          <ExternalLinkIcon /> Открыть внешний ресурс
+                        </a>
+                      </Button>
+                    ))}
                   </div>
-                  <label className="form-field form-field--full">
-                    <span>Комментарий</span>
-                    <textarea
+                </section>
+              )}
+
+              {detail.files.length > 0 && (
+                <section className="space-y-1.5">
+                  <Label>Файлы</Label>
+                  <div className="flex flex-wrap gap-2">
+                    {detail.files.map((file) => (
+                      <Button
+                        key={file.id}
+                        variant="outline"
+                        size="sm"
+                        disabled={file.status !== 'AVAILABLE'}
+                        onClick={() => downloadFile(file.id)}
+                      >
+                        <DownloadIcon /> {file.fileName}
+                        {file.status !== 'AVAILABLE' ? ` · ${file.status}` : ''}
+                      </Button>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {!detail.textContent && !detail.externalUrls.length && !detail.files.length && (
+                <p className="text-muted-foreground flex items-center gap-2 text-[13px]">
+                  <FileTextIcon className="size-4" /> Содержимое версии не приложено.
+                </p>
+              )}
+
+              {detail.currentReview && (
+                <section className="bg-muted/50 flex items-start gap-3 rounded-lg border p-3">
+                  <Badge
+                    variant={scoreVariant(detail.currentReview.score)}
+                    className="mt-0.5 min-w-9 justify-center text-sm tabular"
+                  >
+                    {detail.currentReview.score}
+                  </Badge>
+                  <div className="min-w-0 space-y-0.5 text-[13px]">
+                    <p className="font-medium">
+                      {REVIEW_DECISION_LABELS[detail.currentReview.decision] ??
+                        detail.currentReview.decision}
+                    </p>
+                    <p className="text-muted-foreground text-xs">
+                      {detail.currentReview.reviewerName ?? 'Рецензент'} ·{' '}
+                      {formatDate(detail.currentReview.reviewedAt, true)}
+                    </p>
+                    {detail.currentReview.comment && <p>{detail.currentReview.comment}</p>}
+                  </div>
+                </section>
+              )}
+
+              {error && <p className="text-destructive text-[13px]">{error}</p>}
+
+              {canReview && (
+                <form id="artifact-review-form" onSubmit={submitReview} className="space-y-5">
+                  <fieldset className="space-y-2">
+                    <Label asChild>
+                      <legend>Решение</legend>
+                    </Label>
+                    <div className="grid grid-cols-2 gap-2">
+                      {(
+                        [
+                          { value: 'ACCEPTED', Icon: CheckCircle2Icon },
+                          { value: 'REJECTED', Icon: XCircleIcon },
+                        ] as const
+                      ).map(({ value, Icon }) => (
+                        <button
+                          key={value}
+                          type="button"
+                          aria-pressed={decision === value}
+                          onClick={() => setDecision(value)}
+                          className={cn(
+                            'focus-visible:ring-ring/50 flex items-center justify-center gap-2 rounded-lg border px-3 py-2.5 text-sm font-medium transition-colors focus-visible:ring-[3px] focus-visible:outline-none',
+                            decision === value
+                              ? value === 'ACCEPTED'
+                                ? 'border-success bg-success/12 text-success'
+                                : 'border-destructive bg-destructive/12 text-destructive'
+                              : 'hover:bg-accent text-muted-foreground',
+                          )}
+                        >
+                          <Icon className="size-4" />
+                          {REVIEW_DECISION_LABELS[value]}
+                        </button>
+                      ))}
+                    </div>
+                  </fieldset>
+
+                  <div className="space-y-2">
+                    <div className="flex items-baseline justify-between">
+                      <Label htmlFor="artifact-score">Оценка</Label>
+                      <span className="text-sm font-semibold tabular">{score} / 10</span>
+                    </div>
+                    <Slider
+                      id="artifact-score"
+                      min={0}
+                      max={10}
+                      step={1}
+                      value={[score]}
+                      onValueChange={([next]) => setScore(next ?? 0)}
+                    />
+                    <p className="text-muted-foreground text-xs">{scoreHint(score)}</p>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <Label htmlFor="artifact-comment">Комментарий</Label>
+                    <Textarea
+                      id="artifact-comment"
                       rows={3}
                       value={comment}
                       onChange={(event) => setComment(event.target.value)}
+                      placeholder="Что автору стоит учесть в следующий раз"
                     />
-                  </label>
-                </div>
-                <footer className="dialog__footer">
-                  <button className="button button--secondary" type="button" onClick={onClose}>
-                    Отмена
-                  </button>
-                  <button className="button button--primary" disabled={saving}>
-                    {saving
-                      ? 'Сохраняем…'
-                      : detail.currentReview
-                        ? 'Сохранить новую оценку'
-                        : 'Сохранить оценку'}
-                  </button>
-                </footer>
-              </form>
-            )}
-          </>
-        ) : (
-          <p className="form-error">{error ?? 'Версия недоступна'}</p>
-        )}
-      </section>
-    </div>
+                  </div>
+                </form>
+              )}
+
+              {detail.status === 'SUBMITTED' && !detail.canReview && (
+                <p className="text-muted-foreground text-[13px]">
+                  У вас нет прав на приёмку этой версии.
+                </p>
+              )}
+            </>
+          )}
+        </DialogBody>
+
+        <DialogFooter>
+          <Button variant="outline" type="button" onClick={onClose}>
+            {canReview ? 'Отмена' : 'Закрыть'}
+          </Button>
+          {canReview && (
+            <Button form="artifact-review-form" type="submit" disabled={saving}>
+              {saving
+                ? 'Сохраняем…'
+                : detail?.currentReview
+                  ? 'Сохранить новую оценку'
+                  : 'Сохранить оценку'}
+            </Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
-}
-
-function apiErrorMessage(caught: unknown, fallback: string): string {
-  if (caught instanceof ApiError)
-    return caught.detail ? `${caught.message}: ${caught.detail}` : caught.message;
-  return caught instanceof Error ? caught.message : fallback;
-}
-
-function reviewDecisionLabel(decision: 'NEEDS_REVISION' | 'ACCEPTED' | 'REJECTED'): string {
-  if (decision === 'ACCEPTED') return 'Принят';
-  if (decision === 'NEEDS_REVISION') return 'Нужна доработка';
-  return 'Отклонён';
 }

@@ -1,11 +1,20 @@
+import { Badge } from '@/components/ui/badge';
 import type { ActivationState, ActivityStatus } from '@/lib/types';
 
-const activityLabels: Record<ActivityStatus, string> = {
+const ACTIVITY_LABELS: Record<ActivityStatus, string> = {
   ACTIVE: 'Активен',
   MEDIUM: 'Средняя активность',
   INACTIVE: 'Неактивен',
   UNKNOWN: 'Статус неизвестен',
 };
+
+const ACTIVITY_VARIANTS = {
+  ACTIVE: 'soft-success',
+  MEDIUM: 'soft-warning',
+  INACTIVE: 'soft-destructive',
+  UNKNOWN: 'soft-muted',
+  NOT_ACTIVATED: 'soft-muted',
+} as const;
 
 export function StatusBadge({
   activity,
@@ -20,7 +29,7 @@ export function StatusBadge({
       ? 'Не активирован'
       : activation === 'UNKNOWN_LEGACY' && activity === 'UNKNOWN'
         ? 'История неполна'
-        : activityLabels[activity];
+        : ACTIVITY_LABELS[activity];
 
-  return <span className={`status status--${effective.toLowerCase()}`}>{label}</span>;
+  return <Badge variant={ACTIVITY_VARIANTS[effective]}>{label}</Badge>;
 }
