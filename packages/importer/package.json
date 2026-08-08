@@ -19,6 +19,7 @@
     "clean": "rm -rf dist tsconfig.tsbuildinfo",
     "import": "tsx src/cli.ts import",
     "event-attendance-import": "tsx src/event-attendance-import-cli.ts",
+    "legacy-artifact-dating": "tsx src/legacy-artifact-dating-cli.ts",
     "participant-hygiene": "tsx src/participant-hygiene-cli.ts",
     "test": "vitest run",
     "test:watch": "vitest",

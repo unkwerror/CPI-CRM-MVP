@@ -259,11 +259,38 @@ services:
     pids_limit: 128
     logging: *default-logging
 
+  # Восстанавливает дату отправки материалам legacy-мероприятий из сохранённых
+  # исходных строк. Идемпотентна: видит только версии с пустой датой. Идёт после
+  # гигиены, чтобы две задачи не пересчитывали одни и те же карточки одновременно.
+  legacy-artifact-dating:
+    image: cpi-crm-tools:${IMAGE_TAG:-latest}
+    command:
+      - corepack
+      - pnpm
+      - --filter
+      - '@cpi-crm/importer'
+      - legacy-artifact-dating
+      - --
+      - --apply
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      CPI_IMPORT_ORGANIZATION_ID: 00000000-0000-4000-8000-000000000010
+      CPI_IMPORT_USER_ID: 00000000-0000-4000-8000-000000000001
+    depends_on:
+      participant-hygiene:
+        condition: service_completed_successfully
+    networks: [backend]
+    restart: 'no'
+    mem_limit: 384m
+    cpus: 0.75
+    pids_limit: 128
+    logging: *default-logging
+
   api:
     <<: *api-image
     environment: *api-environment
     depends_on:
-      participant-hygiene:
+      legacy-artifact-dating:
         condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully

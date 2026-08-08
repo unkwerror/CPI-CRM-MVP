@@ -23,6 +23,15 @@ const COUNTABILITY_REASONS = Object.freeze({
   pending: 'SUBMITTED_AT_UNKNOWN',
 });
 
+/**
+ * Что известно о доказательстве на момент пересчёта. При импорте дата материала
+ * неизвестна, после восстановления даты из исходной строки — известна, и запись
+ * в истории статусов должна это отражать.
+ */
+export interface LegacyLifecycleEvidence {
+  readonly submittedAtKnown: boolean;
+}
+
 export interface LegacyArtifactEventAssignment {
   readonly sourceRecordId: string;
   readonly personId: string;
@@ -245,25 +254,37 @@ export async function recalculateLegacyArtifactAuthors(
   client: PoolClient,
   versionIds: ReadonlySet<string>,
   now = new Date(),
+  lifecycleEvidence: LegacyLifecycleEvidence = { submittedAtKnown: false },
 ): Promise<number> {
   if (versionIds.size === 0) return 0;
+  // Отбираем по главной карточке, а не по карточке автора: карточку, спрятанную
+  // гигиеной ФИО и слитую с главной, пересчитывать нужно — её артефакт принадлежит
+  // главной. При этом сама главная карточка обязана быть активной.
   const authors = await client.query<{
     person_id: string;
     related_version_id: string;
   }>(
-    `SELECT COALESCE(person.merged_into_person_id, person.id) AS person_id,
+    `SELECT canonical.id AS person_id,
             min(contributor.artifact_version_id::text)::uuid AS related_version_id
        FROM artifact_version_contributors contributor
        JOIN persons person ON person.id = contributor.person_id
+       JOIN persons canonical ON canonical.id = COALESCE(person.merged_into_person_id, person.id)
       WHERE contributor.artifact_version_id = ANY($1::uuid[])
         AND contributor.contribution_role = 'AUTHOR'
-        AND person.archived_at IS NULL
-      GROUP BY COALESCE(person.merged_into_person_id, person.id)
+        AND canonical.archived_at IS NULL
+        AND canonical.merged_into_person_id IS NULL
+      GROUP BY canonical.id
       ORDER BY person_id`,
     [[...versionIds]],
   );
   for (const author of authors.rows) {
-    await recalculateLegacyArtifactAuthor(client, author.person_id, author.related_version_id, now);
+    await recalculateLegacyArtifactAuthor(
+      client,
+      author.person_id,
+      author.related_version_id,
+      now,
+      lifecycleEvidence,
+    );
   }
   return authors.rows.length;
 }
@@ -465,6 +486,7 @@ async function recalculateLegacyArtifactAuthor(
   personId: string,
   relatedVersionId: string,
   now: Date,
+  lifecycleEvidence: LegacyLifecycleEvidence,
 ): Promise<void> {
   const profile = await client.query<{
     lifecycle_data_state: 'LEGACY_INCOMPLETE' | 'COMPLETE';
@@ -557,6 +579,7 @@ async function recalculateLegacyArtifactAuthor(
       ruleSetVersion: current.rule_version,
       relatedVersionId,
       effectiveAt: calculated.calculatedAt,
+      lifecycleEvidence,
     });
   }
   if (current.activity_status !== calculated.activityStatus) {
@@ -570,6 +593,7 @@ async function recalculateLegacyArtifactAuthor(
       ruleSetVersion: current.rule_version,
       relatedVersionId,
       effectiveAt: calculated.calculatedAt,
+      lifecycleEvidence,
     });
   }
 }
@@ -586,6 +610,7 @@ async function insertLifecycleTransition(
     readonly ruleSetVersion: number;
     readonly relatedVersionId: string;
     readonly effectiveAt: Date;
+    readonly lifecycleEvidence: LegacyLifecycleEvidence;
   },
 ): Promise<void> {
   await client.query(
@@ -606,7 +631,7 @@ async function insertLifecycleTransition(
       JSON.stringify({
         ruleSetVersion: input.ruleSetVersion,
         evidence: 'PROVEN_LEGACY_MATERIAL',
-        submittedAtKnown: false,
+        submittedAtKnown: input.lifecycleEvidence.submittedAtKnown,
       }),
     ],
   );

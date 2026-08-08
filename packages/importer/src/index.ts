@@ -7,6 +7,7 @@ export * from './event-attendance-workbook.js';
 export * from './event-attendance-import.js';
 export * from './hash.js';
 export * from './hygiene.js';
+export * from './legacy-artifact-dating.js';
 export * from './legacy-artifacts.js';
 export * from './observations.js';
 export * from './participant-hygiene.js';
