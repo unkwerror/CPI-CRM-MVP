@@ -221,6 +221,133 @@ describe('event routes', () => {
     }
   });
 
+  it('adds a participant to the winning card of a merged cluster', async () => {
+    const CANONICAL_ID = '00000000-0000-4000-8000-000000000031';
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('FROM organization_settings os')) return { rows: [organizationRow] };
+      throw new Error(`Unexpected pool SQL: ${sql}`);
+    });
+    const clientQuery = vi.fn(async (sql: string, parameters?: unknown[]) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] };
+      if (sql.includes('SELECT id, starts_at FROM events')) {
+        return { rows: [{ id: EVENT_ID, starts_at: new Date('2026-05-15T03:00:00Z') }] };
+      }
+      if (sql.includes('AS person_id') && sql.includes('canonical_full_name')) {
+        expect(parameters).toEqual([PERSON_ID, ORGANIZATION_ID]);
+        return { rows: [{ person_id: CANONICAL_ID, canonical_full_name: 'Иванов Иван Иванович' }] };
+      }
+      if (sql.includes('SELECT participation.id')) {
+        // Проверяем весь кластер, а не только главную карточку.
+        expect(parameters).toEqual([EVENT_ID, CANONICAL_ID]);
+        return { rows: [] };
+      }
+      if (sql.includes('UPDATE event_participations')) return { rows: [], rowCount: 0 };
+      if (sql.includes('INSERT INTO event_participations')) {
+        expect(parameters).toEqual([
+          EVENT_ID,
+          CANONICAL_ID,
+          'ACCEPTED',
+          'ATTENDED',
+          new Date('2026-05-15T03:00:00Z'),
+        ]);
+        return { rows: [{ id: '00000000-0000-4000-8000-000000000050' }] };
+      }
+      if (sql.includes('INSERT INTO audit_log')) {
+        return { rows: [{ id: '00000000-0000-4000-8000-000000000099' }] };
+      }
+      throw new Error(`Unexpected client SQL: ${sql}`);
+    });
+    const release = vi.fn();
+    const connect = vi.fn(
+      async () => ({ query: clientQuery, release }) as unknown as import('pg').PoolClient,
+    );
+    const app = await eventTestApp(query, [Roles.COMMUNITY_MANAGER], connect);
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/events/${EVENT_ID}/participants`,
+        payload: { personId: PERSON_ID, decision: 'ACCEPTED', attendance: 'ATTENDED' },
+      });
+
+      expect(response.statusCode).toBe(201);
+      expect(response.json()).toMatchObject({
+        personId: CANONICAL_ID,
+        canonicalFullName: 'Иванов Иван Иванович',
+      });
+      expect(release).toHaveBeenCalledOnce();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('refuses to add the same participant twice', async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('FROM organization_settings os')) return { rows: [organizationRow] };
+      throw new Error(`Unexpected pool SQL: ${sql}`);
+    });
+    const clientQuery = vi.fn(async (sql: string) => {
+      if (sql === 'BEGIN' || sql === 'ROLLBACK') return { rows: [] };
+      if (sql.includes('SELECT id, starts_at FROM events'))
+        return { rows: [{ id: EVENT_ID, starts_at: null }] };
+      if (sql.includes('AS person_id') && sql.includes('canonical_full_name'))
+        return { rows: [{ person_id: PERSON_ID, canonical_full_name: 'Иванов Иван Иванович' }] };
+      if (sql.includes('SELECT participation.id')) return { rows: [{ id: 'existing' }] };
+      throw new Error(`Unexpected client SQL: ${sql}`);
+    });
+    const connect = vi.fn(
+      async () =>
+        ({ query: clientQuery, release: vi.fn() }) as unknown as import('pg').PoolClient,
+    );
+    const app = await eventTestApp(query, [Roles.COMMUNITY_MANAGER], connect);
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/events/${EVENT_ID}/participants`,
+        payload: { personId: PERSON_ID },
+      });
+
+      expect(response.statusCode).toBe(409);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('keeps a participant who submitted an artifact at this event', async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('FROM organization_settings os')) return { rows: [organizationRow] };
+      throw new Error(`Unexpected pool SQL: ${sql}`);
+    });
+    const clientQuery = vi.fn(async (sql: string) => {
+      if (sql === 'BEGIN' || sql === 'ROLLBACK') return { rows: [] };
+      if (sql.includes('SELECT 1 FROM events')) return { rows: [{ '1': 1 }] };
+      if (sql.includes('COALESCE(merged_into_person_id, id) AS person_id'))
+        return { rows: [{ person_id: PERSON_ID }] };
+      if (sql.includes('FROM artifacts artifact')) return { rows: [{ count: '1' }] };
+      throw new Error(`Unexpected client SQL: ${sql}`);
+    });
+    const connect = vi.fn(
+      async () =>
+        ({ query: clientQuery, release: vi.fn() }) as unknown as import('pg').PoolClient,
+    );
+    const app = await eventTestApp(query, [Roles.COMMUNITY_MANAGER], connect);
+
+    try {
+      const response = await app.inject({
+        method: 'DELETE',
+        url: `/events/${EVENT_ID}/participants/${PERSON_ID}`,
+      });
+
+      expect(response.statusCode).toBe(409);
+      expect(clientQuery.mock.calls.some(([sql]) => sql.includes('SET archived_at = now()'))).toBe(
+        false,
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
   it('returns one canonical participant without contacts or raw source payloads to a reader', async () => {
     const queries: string[] = [];
     const query = vi.fn(async (sql: string, parameters?: unknown[]) => {

@@ -142,8 +142,11 @@ export function EventPageClient({ id }: { id: string }) {
 
         <TabsContent value="participants">
           <EventParticipantsTab
-            participants={event.participants}
+            canWrite={can('people.write')}
+            eventId={event.id}
+            onChanged={reloadAll}
             onOpenArtifact={setReviewVersionId}
+            participants={event.participants}
           />
         </TabsContent>
 

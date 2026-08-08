@@ -181,6 +181,244 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  /**
+   * Добавить участника в мероприятие вручную.
+   *
+   * Таблица посещений закрывает массовый случай, но не единичный: человек пришёл
+   * без регистрации, его забыли в списке, или карточку завели уже после
+   * мероприятия. Раньше такую запись можно было получить только новой выгрузкой
+   * из XLSX, поэтому её просто не добавляли.
+   *
+   * Участие привязывается к главной карточке кластера: иначе после слияния
+   * запись потерялась бы в проигравшей карточке.
+   */
+  app.post(
+    '/events/:id/participants',
+    {
+      preHandler: app.requirePermission(Permissions.PEOPLE_WRITE),
+      schema: {
+        tags: ['Мероприятия'],
+        summary: 'Добавить участника в мероприятие',
+        params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
+        body: Type.Object(
+          {
+            personId: Type.String({ format: 'uuid' }),
+            decision: Type.Optional(
+              Type.Union([
+                Type.Literal('UNKNOWN'),
+                Type.Literal('PENDING'),
+                Type.Literal('ACCEPTED'),
+                Type.Literal('REJECTED'),
+                Type.Literal('WAITLISTED'),
+              ]),
+            ),
+            attendance: Type.Optional(
+              Type.Union([
+                Type.Literal('UNKNOWN'),
+                Type.Literal('ATTENDED'),
+                Type.Literal('NO_SHOW'),
+                Type.Literal('PARTIAL'),
+              ]),
+            ),
+          },
+          { additionalProperties: false },
+        ),
+      },
+    },
+    async (request, reply) => {
+      const eventId = (request.params as { id: string }).id;
+      const body = request.body as {
+        personId: string;
+        decision?: 'UNKNOWN' | 'PENDING' | 'ACCEPTED' | 'REJECTED' | 'WAITLISTED';
+        attendance?: 'UNKNOWN' | 'ATTENDED' | 'NO_SHOW' | 'PARTIAL';
+      };
+      const decision = body.decision ?? 'UNKNOWN';
+      const attendance = body.attendance ?? 'UNKNOWN';
+      const organization = await getOrganizationContext(app.pool);
+
+      const created = await transaction(app.pool, async (client) => {
+        const event = await client.query<{ id: string; starts_at: Date | null }>(
+          `SELECT id, starts_at FROM events
+            WHERE id = $1 AND organization_id = $2 AND archived_at IS NULL`,
+          [eventId, organization.id],
+        );
+        if (!event.rows[0]) throw new HttpProblem(404, 'Мероприятие не найдено');
+
+        const person = await client.query<{ person_id: string; canonical_full_name: string }>(
+          `SELECT canonical.id AS person_id, canonical.canonical_full_name
+             FROM persons requested
+             JOIN persons canonical
+               ON canonical.id = COALESCE(requested.merged_into_person_id, requested.id)
+            WHERE requested.id = $1 AND requested.organization_id = $2
+              AND canonical.archived_at IS NULL
+            FOR UPDATE OF canonical`,
+          [body.personId, organization.id],
+        );
+        if (!person.rows[0]) throw new HttpProblem(404, 'Участник не найден');
+        const personId = person.rows[0].person_id;
+
+        const existing = await client.query<{ id: string }>(
+          `SELECT participation.id
+             FROM event_participations participation
+            WHERE participation.event_id = $1
+              AND participation.archived_at IS NULL
+              AND participation.person_id IN (
+                    SELECT id FROM persons WHERE id = $2 OR merged_into_person_id = $2
+                  )
+            LIMIT 1`,
+          [eventId, personId],
+        );
+        if (existing.rows[0]) throw new HttpProblem(409, 'Участник уже есть в этом мероприятии');
+
+        // Снятого участника возвращаем той же записью: к ней привязаны ссылки на
+        // строки источников, и новая строка их потеряла бы.
+        const restored = await client.query<{ id: string }>(
+          `UPDATE event_participations
+              SET archived_at = NULL,
+                  decision = $3::participation_decision,
+                  attendance = $4::attendance_status,
+                  decision_at = CASE WHEN $3::text = 'UNKNOWN' THEN NULL ELSE now() END,
+                  attended_at = CASE WHEN $4::text = 'UNKNOWN' THEN NULL
+                                     ELSE COALESCE($5::timestamptz, now()) END,
+                  updated_at = now(), version = version + 1
+            WHERE id = (
+              SELECT id FROM event_participations
+               WHERE event_id = $1 AND person_id = $2 AND archived_at IS NOT NULL
+               ORDER BY archived_at DESC
+               LIMIT 1
+            )
+            RETURNING id`,
+          [eventId, personId, decision, attendance, event.rows[0].starts_at],
+        );
+
+        const participation =
+          restored.rows[0] ??
+          (
+            await client.query<{ id: string }>(
+              `INSERT INTO event_participations
+                 (person_id, event_id, registered_at, decision, decision_at,
+                  attendance, attended_at, data_origin)
+               VALUES ($2, $1, now(),
+                       $3::participation_decision,
+                       CASE WHEN $3::text = 'UNKNOWN' THEN NULL ELSE now() END,
+                       $4::attendance_status,
+                       CASE WHEN $4::text = 'UNKNOWN' THEN NULL
+                            ELSE COALESCE($5::timestamptz, now()) END,
+                       'LIVE')
+               RETURNING id`,
+              [eventId, personId, decision, attendance, event.rows[0].starts_at],
+            )
+          ).rows[0]!;
+
+        await writeAudit(client, {
+          actor: request.authUser!,
+          requestId: request.id,
+          action: 'event.participant_added',
+          entityType: 'event_participation',
+          entityId: participation.id,
+          after: { eventId, personId, decision, attendance, restored: restored.rows[0] !== undefined },
+        });
+
+        return {
+          id: participation.id,
+          personId,
+          canonicalFullName: person.rows[0].canonical_full_name,
+          decision,
+          attendance,
+        };
+      });
+
+      return reply.code(201).send(created);
+    },
+  );
+
+  /**
+   * Снять участника с мероприятия.
+   *
+   * Запись архивируется, а не удаляется: ошибочное добавление нужно уметь
+   * откатить, а история участия — часть данных о человеке.
+   */
+  app.delete(
+    '/events/:id/participants/:personId',
+    {
+      preHandler: app.requirePermission(Permissions.PEOPLE_WRITE),
+      schema: {
+        tags: ['Мероприятия'],
+        summary: 'Снять участника с мероприятия',
+        params: Type.Object({
+          id: Type.String({ format: 'uuid' }),
+          personId: Type.String({ format: 'uuid' }),
+        }),
+      },
+    },
+    async (request, reply) => {
+      const { id: eventId, personId } = request.params as { id: string; personId: string };
+      const organization = await getOrganizationContext(app.pool);
+
+      await transaction(app.pool, async (client) => {
+        const event = await client.query(
+          `SELECT 1 FROM events
+            WHERE id = $1 AND organization_id = $2 AND archived_at IS NULL`,
+          [eventId, organization.id],
+        );
+        if (!event.rows[0]) throw new HttpProblem(404, 'Мероприятие не найдено');
+
+        const person = await client.query<{ person_id: string }>(
+          `SELECT COALESCE(merged_into_person_id, id) AS person_id
+             FROM persons WHERE id = $1 AND organization_id = $2`,
+          [personId, organization.id],
+        );
+        if (!person.rows[0]) throw new HttpProblem(404, 'Участник не найден');
+        const canonicalId = person.rows[0].person_id;
+
+        // Артефакт, сданный на этом мероприятии, — доказательство участия сильнее
+        // любого списка, поэтому такую запись снять нельзя.
+        const artifacts = await client.query<{ count: string }>(
+          `SELECT count(*)::text AS count
+             FROM artifacts artifact
+             JOIN artifact_versions version ON version.artifact_id = artifact.id
+             JOIN artifact_version_contributors contributor
+               ON contributor.artifact_version_id = version.id
+            WHERE artifact.event_id = $1
+              AND artifact.archived_at IS NULL
+              AND artifact.status <> 'VOIDED'
+              AND contributor.person_id IN (
+                    SELECT id FROM persons WHERE id = $2 OR merged_into_person_id = $2
+                  )`,
+          [eventId, canonicalId],
+        );
+        if (Number(artifacts.rows[0]?.count ?? 0) > 0)
+          throw new HttpProblem(
+            409,
+            'У участника есть артефакт этого мероприятия',
+            'Сначала перенесите или аннулируйте артефакт — иначе он останется без участника.',
+          );
+
+        const archived = await client.query(
+          `UPDATE event_participations
+              SET archived_at = now(), updated_at = now(), version = version + 1
+            WHERE event_id = $1 AND archived_at IS NULL
+              AND person_id IN (
+                    SELECT id FROM persons WHERE id = $2 OR merged_into_person_id = $2
+                  )`,
+          [eventId, canonicalId],
+        );
+        if (archived.rowCount === 0) throw new HttpProblem(404, 'Запись участия не найдена');
+
+        await writeAudit(client, {
+          actor: request.authUser!,
+          requestId: request.id,
+          action: 'event.participant_removed',
+          entityType: 'event',
+          entityId: eventId,
+          before: { personId: canonicalId, participations: archived.rowCount },
+        });
+      });
+
+      return reply.code(204).send();
+    },
+  );
+
   app.patch(
     '/events/:id',
     {
