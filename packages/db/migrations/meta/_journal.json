@@ -71,6 +71,27 @@
       "when": 1786000000000,
       "tag": "0009_task_in_progress",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786100000000,
+      "tag": "0010_locker_pending_submissions",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1786110000000,
+      "tag": "0011_person_deletion",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1786120000000,
+      "tag": "0012_campaigns",
+      "breakpoints": true
     }
   ]
 }

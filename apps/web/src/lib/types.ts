@@ -58,7 +58,11 @@ export interface PersonDetail extends PersonSummary {
   notes?: string | null;
   /** Индекс качества головы Q_head. */
   headQuality?: HeadQuality;
+  /** Согласие на рассылки по каналам: отписка исключает из аудиторий, но не из базы. */
+  marketingConsent?: { telegram: ConsentStatus; email: ConsentStatus };
 }
+
+export type ConsentStatus = 'GRANTED' | 'DENIED' | 'UNKNOWN' | 'WITHDRAWN';
 
 export interface ArtifactSummary {
   id: string;
@@ -257,6 +261,33 @@ export interface TaskSummary {
 
 export interface TasksResponse {
   items: TaskSummary[];
+}
+
+/** Отправка из бота, которую CRM не смогла привязать к участнику автоматически. */
+export interface LockerPendingSubmission {
+  id: string;
+  lockerSubmissionId: string;
+  telegram: string;
+  telegramUserId: string;
+  reportedFullName: string;
+  reportedPhone: string | null;
+  reportedOrganization: string | null;
+  eventTitle: string;
+  submittedAt: string;
+  reasonCode: 'FIO_REQUIRED' | 'PERSON_AMBIGUOUS' | 'IDENTITY_CONFLICT' | 'DELETED_IDENTITY';
+  reasonLabel: string;
+  reasonDetail: string | null;
+  status: 'PENDING' | 'RESOLVED' | 'REJECTED';
+  attempts: number;
+  fileCount: number;
+  resolvedPersonId: string | null;
+  resolvedPersonName: string | null;
+  resolvedAt: string | null;
+}
+
+export interface LockerPendingResponse {
+  pendingCount: number;
+  items: LockerPendingSubmission[];
 }
 
 export interface SourceSummary {
@@ -509,6 +540,88 @@ export interface CpiMetrics {
       flow: number;
     }[];
   };
+}
+
+export type CampaignChannel = 'TELEGRAM' | 'EMAIL';
+export type CampaignStatus =
+  | 'DRAFT'
+  | 'APPROVED'
+  | 'SENDING'
+  | 'PAUSED'
+  | 'SENT'
+  | 'CANCELLED';
+
+export interface CampaignButton {
+  text: string;
+  action: 'INTERESTED' | 'MORE_INFO' | 'UNSUBSCRIBED' | 'URL';
+  url?: string;
+}
+
+export interface CampaignSegment {
+  hasArtifact?: boolean;
+  lastArtifactWithinDays?: number;
+  incompleteProfile?: boolean;
+  eventIds?: string[];
+}
+
+export interface Campaign {
+  id: string;
+  name: string;
+  channel: CampaignChannel;
+  status: CampaignStatus;
+  goal: string | null;
+  subject: string | null;
+  body: string;
+  buttons: CampaignButton[];
+  segment: CampaignSegment;
+  waveSize: number;
+  messagesPerSecond: number;
+  sentCount: number;
+  failedCount: number;
+  approvedAt: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+  version: number;
+}
+
+export interface CampaignDetail extends Campaign {
+  stats: {
+    queued: number;
+    sent: number;
+    delivered: number;
+    failed: number;
+    interested: number;
+    moreInfo: number;
+    unsubscribed: number;
+    opened: number;
+  };
+}
+
+export interface CampaignAudience {
+  total: number;
+  alreadyQueued: number;
+  sample: { name: string; address: string; preview: string }[];
+}
+
+/** Достижимость базы по каналам: кому вообще можно отправить рассылку. */
+export interface AudienceReachability {
+  total: number;
+  channels: {
+    telegramBot: number;
+    telegramUsernameOnly: number;
+    email: number;
+    phone: number;
+    unreachable: number;
+  };
+  coverage: {
+    botOrEmail: number;
+    botShare: number | null;
+    emailShare: number | null;
+  };
+  pilotCandidates: number;
+  optedOut: { telegram: number; email: number };
+  deletedForever: number;
 }
 
 /** Индекс качества головы Q_head (0–100) с компонентами. */

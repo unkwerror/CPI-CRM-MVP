@@ -13,6 +13,7 @@ import type { FastifyInstance } from 'fastify';
 import type { PoolClient } from 'pg';
 
 import { writeAudit } from '../../lib/audit.js';
+import { hashIdentityKey } from '../../lib/identity-hash.js';
 import { requireLockerIntegration } from '../../lib/locker-auth.js';
 import { getOrganizationContext, type OrganizationContext } from '../../lib/organization.js';
 import { HttpProblem } from '../../lib/problem.js';
@@ -28,6 +29,27 @@ const LOCKER_ACTOR: AuthUser = {
   roles: [],
   permissions: [],
 };
+
+export type LockerReviewReason =
+  | 'FIO_REQUIRED'
+  | 'PERSON_AMBIGUOUS'
+  | 'IDENTITY_CONFLICT'
+  | 'DELETED_IDENTITY';
+
+/**
+ * Отправку, которую нельзя привязать к участнику автоматически, нельзя и терять:
+ * бот считает 4xx окончательным отказом и больше не повторяет. Поэтому такие
+ * случаи не отклоняются, а попадают в очередь разбора.
+ */
+export class LockerReviewRequired extends Error {
+  constructor(
+    readonly reasonCode: LockerReviewReason,
+    readonly detail: string,
+  ) {
+    super(detail);
+    this.name = 'LockerReviewRequired';
+  }
+}
 
 const nullableText = (maximum: number) =>
   Type.Optional(Type.Union([Type.String({ maxLength: maximum }), Type.Null()]));
@@ -138,12 +160,14 @@ type LockerSubmissionInput = {
   files: LockerFileInput[];
 };
 
-type LockerSyncInput = {
+export type LockerSyncInput = {
   schemaVersion: 1;
   user: LockerUserInput;
   event: LockerEventInput;
   submission: LockerSubmissionInput;
 };
+
+type LockerPersonResolution = 'EXTERNAL_ID' | 'CONTACT' | 'CREATED' | 'RESTORED';
 
 export async function registerLockerIntegrationRoutes(app: FastifyInstance): Promise<void> {
   const authorize = requireLockerIntegration(app.config.locker.integrationToken);
@@ -158,10 +182,21 @@ export async function registerLockerIntegrationRoutes(app: FastifyInstance): Pro
     async (request) => {
       const user = request.body as LockerUserInput;
       const organization = await getOrganizationContext(app.pool);
-      return transaction(app.pool, async (client) => {
-        await lockLockerUser(client, user.telegramUserId);
-        return resolveLockerPerson(client, organization, user, request.id);
-      });
+      try {
+        return await transaction(app.pool, async (client) => {
+          await lockLockerUser(client, user.telegramUserId);
+          return resolveLockerPerson(client, organization, user, request.id);
+        });
+      } catch (error) {
+        if (error instanceof LockerReviewRequired) {
+          throw new HttpProblem(
+            error.reasonCode === 'FIO_REQUIRED' ? 422 : 409,
+            error.detail,
+            'Отправку с этим профилем CRM примет в очередь разбора.',
+          );
+        }
+        throw error;
+      }
     },
   );
 
@@ -175,63 +210,183 @@ export async function registerLockerIntegrationRoutes(app: FastifyInstance): Pro
     async (request, reply) => {
       const body = request.body as LockerSyncInput;
       const organization = await getOrganizationContext(app.pool);
-      const result = await transaction(app.pool, async (client) => {
-        await client.query(
-          `SELECT pg_advisory_xact_lock(hashtextextended('locker-submission:' || $1, 0))`,
-          [body.submission.lockerSubmissionId],
+      try {
+        const result = await transaction(app.pool, (client) =>
+          ingestLockerSubmission(client, organization, body, request.id),
         );
-        const payloadHash = hashLockerSubmissionPayload(body);
-        const existing = await client.query<{
-          person_id: string;
-          event_id: string;
-          artifact_id: string;
-          artifact_version_id: string;
-          payload_hash: string;
-        }>(
-          `SELECT person_id, event_id, artifact_id, artifact_version_id, payload_hash
-             FROM locker_submission_links
-            WHERE locker_submission_id = $1`,
-          [body.submission.lockerSubmissionId],
+        return reply.code(result.replayed ? 200 : 201).send(result);
+      } catch (error) {
+        if (!(error instanceof LockerReviewRequired)) throw error;
+        // Транзакция приёма откатилась, поэтому заявку в очередь пишем отдельно.
+        const parked = await transaction(app.pool, (client) =>
+          parkLockerSubmission(client, organization, body, error, request.id),
         );
-        if (existing.rows[0]) {
-          if (existing.rows[0].payload_hash !== payloadHash) {
-            throw new HttpProblem(409, 'Отправка Locker уже синхронизирована с другим содержимым');
-          }
-          return { ...mapExisting(existing.rows[0]), replayed: true };
-        }
-
-        await lockLockerUser(client, body.user.telegramUserId);
-        const person = await resolveLockerPerson(client, organization, body.user, request.id);
-        const eventId = await resolveLockerEvent(client, organization, body.event, request.id);
-        await client.query(
-          `INSERT INTO event_participations
-             (person_id, event_id, registered_at, decision, attendance, data_origin)
-           VALUES ($1, $2, $3, 'UNKNOWN', 'UNKNOWN', 'LIVE')
-           ON CONFLICT (person_id, event_id) WHERE archived_at IS NULL
-           DO UPDATE SET registered_at = COALESCE(event_participations.registered_at, EXCLUDED.registered_at),
-                         updated_at = now()`,
-          [person.personId, eventId, new Date(body.submission.createdAt)],
-        );
-        const artifact = await createLockerArtifact(
-          client,
-          organization,
-          person.personId,
-          eventId,
-          body,
-          payloadHash,
-          request.id,
-        );
-        return {
-          personId: person.personId,
-          personResolution: person.resolution,
-          eventId,
-          ...artifact,
-          replayed: false,
-        };
-      });
-      return reply.code(result.replayed ? 200 : 201).send(result);
+        return reply.code(202).send(parked);
+      }
     },
   );
+}
+
+export async function ingestLockerSubmission(
+  client: PoolClient,
+  organization: OrganizationContext,
+  body: LockerSyncInput,
+  requestId: string,
+): Promise<{
+  personId: string;
+  personResolution?: LockerPersonResolution;
+  eventId: string;
+  artifactId: string;
+  artifactVersionId: string;
+  replayed: boolean;
+}> {
+  await client.query(
+    `SELECT pg_advisory_xact_lock(hashtextextended('locker-submission:' || $1, 0))`,
+    [body.submission.lockerSubmissionId],
+  );
+  const payloadHash = hashLockerSubmissionPayload(body);
+  const existing = await client.query<{
+    person_id: string;
+    event_id: string;
+    artifact_id: string;
+    artifact_version_id: string;
+    payload_hash: string;
+  }>(
+    `SELECT person_id, event_id, artifact_id, artifact_version_id, payload_hash
+       FROM locker_submission_links
+      WHERE locker_submission_id = $1`,
+    [body.submission.lockerSubmissionId],
+  );
+  if (existing.rows[0]) {
+    if (existing.rows[0].payload_hash !== payloadHash) {
+      throw new HttpProblem(409, 'Отправка Locker уже синхронизирована с другим содержимым');
+    }
+    return { ...mapExisting(existing.rows[0]), replayed: true };
+  }
+
+  await lockLockerUser(client, body.user.telegramUserId);
+  const person = await resolveLockerPerson(client, organization, body.user, requestId);
+  const eventId = await resolveLockerEvent(client, organization, body.event, requestId);
+  await client.query(
+    `INSERT INTO event_participations
+       (person_id, event_id, registered_at, decision, attendance, data_origin)
+     VALUES ($1, $2, $3, 'UNKNOWN', 'UNKNOWN', 'LIVE')
+     ON CONFLICT (person_id, event_id) WHERE archived_at IS NULL
+     DO UPDATE SET registered_at = COALESCE(event_participations.registered_at, EXCLUDED.registered_at),
+                   updated_at = now()`,
+    [person.personId, eventId, new Date(body.submission.createdAt)],
+  );
+  const artifact = await createLockerArtifact(
+    client,
+    organization,
+    person.personId,
+    eventId,
+    body,
+    payloadHash,
+    requestId,
+  );
+  await client.query(
+    `UPDATE locker_pending_submissions
+        SET status = 'RESOLVED', resolved_person_id = $2, resolved_at = now(),
+            resolution_note = COALESCE(resolution_note, 'Синхронизирована повторно'),
+            updated_at = now()
+      WHERE locker_submission_id = $1 AND status = 'PENDING'`,
+    [body.submission.lockerSubmissionId, person.personId],
+  );
+  return {
+    personId: person.personId,
+    personResolution: person.resolution,
+    eventId,
+    ...artifact,
+    replayed: false,
+  };
+}
+
+async function parkLockerSubmission(
+  client: PoolClient,
+  organization: OrganizationContext,
+  body: LockerSyncInput,
+  review: LockerReviewRequired,
+  requestId: string,
+): Promise<{ status: 'PENDING_REVIEW'; pendingId: string; reasonCode: LockerReviewReason }> {
+  const parked = await client.query<{ id: string }>(
+    `INSERT INTO locker_pending_submissions
+       (organization_id, locker_submission_id, locker_user_id, telegram_user_id,
+        telegram_username, reported_full_name, reported_phone, reported_organization,
+        locker_event_id, event_title, submitted_at, payload, payload_hash,
+        reason_code, reason_detail)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15)
+     ON CONFLICT (locker_submission_id) DO UPDATE
+       SET payload = EXCLUDED.payload,
+           payload_hash = EXCLUDED.payload_hash,
+           reported_full_name = EXCLUDED.reported_full_name,
+           reported_phone = EXCLUDED.reported_phone,
+           reported_organization = EXCLUDED.reported_organization,
+           telegram_username = EXCLUDED.telegram_username,
+           reason_code = EXCLUDED.reason_code,
+           reason_detail = EXCLUDED.reason_detail,
+           status = 'PENDING',
+           resolved_person_id = NULL, resolved_by_user_id = NULL,
+           resolved_at = NULL, resolution_note = NULL,
+           attempts = locker_pending_submissions.attempts + 1,
+           last_seen_at = now(), updated_at = now()
+     RETURNING id`,
+    [
+      organization.id,
+      body.submission.lockerSubmissionId,
+      body.user.lockerUserId,
+      body.user.telegramUserId,
+      body.user.telegramUsername ? cleanText(body.user.telegramUsername, 64) : null,
+      cleanText(body.user.fullName, 500),
+      body.user.phone ? cleanText(body.user.phone, 100) : null,
+      body.user.organization ? cleanText(body.user.organization, 500) : null,
+      body.event.lockerEventId,
+      cleanText(body.event.title, 500),
+      new Date(body.submission.submittedAt),
+      JSON.stringify(body),
+      hashLockerSubmissionPayload(body),
+      review.reasonCode,
+      review.detail,
+    ],
+  );
+  const pendingId = parked.rows[0]!.id;
+  await writeAudit(client, {
+    actor: LOCKER_ACTOR,
+    requestId,
+    action: 'locker.submission_pending_review',
+    entityType: 'locker_pending_submission',
+    entityId: pendingId,
+    after: {
+      lockerSubmissionId: body.submission.lockerSubmissionId,
+      telegramUserId: body.user.telegramUserId,
+      reasonCode: review.reasonCode,
+      reasonDetail: review.detail,
+    },
+  });
+  return { status: 'PENDING_REVIEW', pendingId, reasonCode: review.reasonCode };
+}
+
+async function assertNotDeletedIdentity(
+  client: PoolClient,
+  organization: OrganizationContext,
+  user: LockerUserInput,
+): Promise<void> {
+  const hashes = [
+    hashIdentityKey('TELEGRAM_ID', user.telegramUserId),
+    hashIdentityKey('LOCKER_USER', user.lockerUserId),
+  ];
+  const tombstone = await client.query<{ deleted_at: Date }>(
+    `SELECT deleted_at FROM person_deletion_tombstones
+      WHERE organization_id = $1 AND contact_hashes && $2::text[]
+      ORDER BY deleted_at DESC LIMIT 1`,
+    [organization.id, hashes],
+  );
+  if (tombstone.rows[0]) {
+    throw new LockerReviewRequired(
+      'DELETED_IDENTITY',
+      'Участник с этими данными был удалён из базы: нужно решение оператора',
+    );
+  }
 }
 
 async function lockLockerUser(client: PoolClient, telegramUserId: string): Promise<void> {
@@ -240,12 +395,12 @@ async function lockLockerUser(client: PoolClient, telegramUserId: string): Promi
   ]);
 }
 
-async function resolveLockerPerson(
+export async function resolveLockerPerson(
   client: PoolClient,
   organization: OrganizationContext,
   user: LockerUserInput,
   requestId: string,
-): Promise<{ personId: string; resolution: 'EXTERNAL_ID' | 'CONTACT' | 'CREATED' }> {
+): Promise<{ personId: string; resolution: LockerPersonResolution }> {
   const linked = await client.query<{ person_id: string }>(
     `SELECT DISTINCT COALESCE(person.merged_into_person_id, person.id) AS person_id
        FROM external_identities identity
@@ -271,7 +426,10 @@ async function resolveLockerPerson(
     ...new Set([...linked.rows, ...hinted.rows].map((row) => row.person_id)),
   ];
   if (externallyLinkedIds.length > 1) {
-    throw new HttpProblem(409, 'Идентификаторы Locker связаны с разными участниками CRM');
+    throw new LockerReviewRequired(
+      'IDENTITY_CONFLICT',
+      'Идентификаторы Locker связаны с разными участниками CRM',
+    );
   }
 
   const fio = parseRussianFullName(user.fullName);
@@ -279,7 +437,7 @@ async function resolveLockerPerson(
   const phone = user.phone?.trim() ? normalizePhone(user.phone) : null;
   const hadExternalLink = externallyLinkedIds.length === 1;
   let personId = externallyLinkedIds[0];
-  let resolution: 'EXTERNAL_ID' | 'CONTACT' | 'CREATED' = 'EXTERNAL_ID';
+  let resolution: LockerPersonResolution = 'EXTERNAL_ID';
 
   if (!personId) {
     const telegramMatch = await client.query<{ person_id: string }>(
@@ -295,7 +453,10 @@ async function resolveLockerPerson(
     );
     const ids = [...new Set(telegramMatch.rows.map((row) => row.person_id))];
     if (ids.length > 1)
-      throw new HttpProblem(409, 'Telegram ID указан у нескольких участников CRM');
+      throw new LockerReviewRequired(
+        'PERSON_AMBIGUOUS',
+        'Telegram ID указан у нескольких участников CRM',
+      );
     personId = ids[0];
   }
 
@@ -339,21 +500,33 @@ async function resolveLockerPerson(
     );
     const ids = [...new Set(exactNameMatch.rows.map((row) => row.person_id))];
     if (ids.length > 1) {
-      throw new HttpProblem(
-        409,
+      throw new LockerReviewRequired(
+        'PERSON_AMBIGUOUS',
         'ФИО соответствует нескольким участникам CRM',
-        'Свяжите карточку вручную через crmPersonId, не объединяя разные Telegram ID.',
       );
     }
     personId = ids[0];
   }
 
   if (!personId) {
+    // Гигиена ФИО прячет карточки, заведённые ботом по неполному имени из Telegram,
+    // вместе с их участиями. Без этого шага такой человек не находится ни одним из
+    // поисков выше, и каждая новая отправка плодила бы дубль.
+    const restored = await restoreArchivedLockerPerson(client, organization, user, fio, requestId);
+    if (restored) {
+      personId = restored;
+      resolution = 'RESTORED';
+    }
+  }
+
+  if (!personId) {
+    // Человека могли удалить из базы по требованию. Молча создать карточку заново
+    // нельзя, но и отправку терять нельзя — отправляем в разбор.
+    await assertNotDeletedIdentity(client, organization, user);
     if (!fio) {
-      throw new HttpProblem(
-        422,
-        'Для участника требуется полное ФИО',
-        'Укажите в боте фамилию, имя и отчество русскими буквами.',
+      throw new LockerReviewRequired(
+        'FIO_REQUIRED',
+        'В профиле Locker не указано полное ФИО русскими буквами',
       );
     }
     const created = await client.query<{ id: string }>(
@@ -395,7 +568,7 @@ async function resolveLockerPerson(
       entityId: personId,
       after: { lockerUserId: user.lockerUserId, telegramUserId: user.telegramUserId },
     });
-  } else if (!hadExternalLink) {
+  } else if (!hadExternalLink && resolution !== 'RESTORED') {
     resolution = 'CONTACT';
   }
 
@@ -421,10 +594,9 @@ async function resolveLockerPerson(
     [personId, user.telegramUserId],
   );
   if (conflictingTelegramIdentity.rows[0]) {
-    throw new HttpProblem(
-      409,
+    throw new LockerReviewRequired(
+      'IDENTITY_CONFLICT',
       'Участник CRM уже связан с другим Telegram ID',
-      'Разные стабильные Telegram ID нельзя объединять в одну сущность участника.',
     );
   }
 
@@ -444,6 +616,113 @@ async function resolveLockerPerson(
     },
   });
   return { personId, resolution };
+}
+
+/**
+ * Возвращает в оборот карточку, спрятанную гигиеной ФИО. Восстановить можно
+ * только вместе с корректным ФИО: у активных карточек оно проверяется
+ * ограничением persons_active_russian_fio_check.
+ */
+async function restoreArchivedLockerPerson(
+  client: PoolClient,
+  organization: OrganizationContext,
+  user: LockerUserInput,
+  fio: ReturnType<typeof parseRussianFullName>,
+  requestId: string,
+): Promise<string | null> {
+  const archived = await client.query<{ id: string; canonical_full_name: string }>(
+    `SELECT DISTINCT person.id, person.canonical_full_name
+       FROM persons person
+      WHERE person.organization_id = $1
+        AND person.archived_at IS NOT NULL
+        AND person.merged_into_person_id IS NULL
+        AND (
+          EXISTS (
+            SELECT 1 FROM external_identities identity
+             WHERE identity.person_id = person.id
+               AND identity.organization_id = $1
+               AND ((identity.source_namespace = 'locker.user' AND identity.external_id = $2)
+                 OR (identity.source_namespace = 'locker.telegram' AND identity.external_id = $3))
+          )
+          OR EXISTS (
+            SELECT 1 FROM contact_points contact
+             WHERE contact.person_id = person.id
+               AND contact.type = 'TELEGRAM'
+               AND contact.messenger_stable_id = $3
+          )
+        )
+      ORDER BY person.id`,
+    [organization.id, user.lockerUserId, user.telegramUserId],
+  );
+  if (archived.rows.length === 0) return null;
+  if (archived.rows.length > 1) {
+    throw new LockerReviewRequired(
+      'PERSON_AMBIGUOUS',
+      'Идентификаторы Locker ведут к нескольким скрытым карточкам',
+    );
+  }
+  if (!fio) {
+    throw new LockerReviewRequired(
+      'FIO_REQUIRED',
+      'Карточка скрыта гигиеной ФИО, а профиль Locker по-прежнему без полного ФИО',
+    );
+  }
+
+  const personId = archived.rows[0]!.id;
+  const previousName = archived.rows[0]!.canonical_full_name;
+  await client.query(
+    `UPDATE persons
+        SET archived_at = NULL,
+            canonical_full_name = $2, normalized_full_name = $3,
+            last_name = $4, first_name = $5, patronymic = $6,
+            lifecycle_data_state = 'COMPLETE',
+            updated_at = now(), version = version + 1
+      WHERE id = $1`,
+    [
+      personId,
+      fio.canonicalFullName,
+      fio.normalizedFullName,
+      fio.lastName,
+      fio.firstName,
+      fio.patronymic,
+    ],
+  );
+  for (const table of [
+    'contact_points',
+    'person_aliases',
+    'affiliations',
+    'event_participations',
+    'external_identities',
+  ]) {
+    await client.query(
+      `UPDATE ${table} SET archived_at = NULL, updated_at = now() WHERE person_id = $1 AND archived_at IS NOT NULL`,
+      [personId],
+    );
+  }
+  await client.query(
+    `INSERT INTO person_aliases
+       (person_id, raw_value, normalized_value, alias_type, data_origin, is_preferred)
+     SELECT $1, $2, $3, 'SOURCE_VARIANT', 'LIVE', true
+      WHERE NOT EXISTS (
+        SELECT 1 FROM person_aliases
+         WHERE person_id = $1 AND normalized_value = $3 AND archived_at IS NULL
+      )`,
+    [personId, fio.canonicalFullName, fio.normalizedFullName],
+  );
+  await writeAudit(client, {
+    actor: LOCKER_ACTOR,
+    requestId,
+    action: 'locker.person_restored',
+    entityType: 'person',
+    entityId: personId,
+    before: { canonicalFullName: previousName, archived: true },
+    after: {
+      canonicalFullName: fio.canonicalFullName,
+      lockerUserId: user.lockerUserId,
+      telegramUserId: user.telegramUserId,
+    },
+  });
+  return personId;
 }
 
 async function upsertLockerIdentities(

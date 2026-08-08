@@ -9,11 +9,13 @@ import {
   GaugeIcon,
   HandCoinsIcon,
   HandshakeIcon,
+  InboxIcon,
   ListChecksIcon,
   LogOutIcon,
   MenuIcon,
   PackageIcon,
   SearchIcon,
+  SendIcon,
   SettingsIcon,
   ShieldCheckIcon,
   UsersIcon,
@@ -41,6 +43,7 @@ const WORKSPACE_NAV = [
   { href: '/review', label: 'Приёмка', icon: FileCheck2Icon, permission: 'artifacts.read' },
   { href: '/tasks', label: 'Задачи', icon: ListChecksIcon, permission: 'tasks.manage' },
   { href: '/calendar', label: 'Календарь', icon: CalendarDaysIcon, permission: 'people.read' },
+  { href: '/inbox', label: 'Заявки из бота', icon: InboxIcon, permission: 'people.read' },
 ];
 
 const SALES_NAV = [
@@ -49,6 +52,8 @@ const SALES_NAV = [
   { href: '/deals', label: 'Продажи', icon: HandCoinsIcon, permission: 'deals.read' },
   { href: '/expenses', label: 'Расходы', icon: WalletIcon, permission: 'expenses.read' },
   { href: '/metrics', label: 'Метрики', icon: GaugeIcon, permission: 'metrics.read' },
+  { href: '/audience', label: 'Аудитория', icon: UsersIcon, permission: 'people.read' },
+  { href: '/campaigns', label: 'Рассылки', icon: SendIcon, permission: 'campaigns.read' },
 ];
 
 const SYSTEM_NAV = [
@@ -68,6 +73,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [search, setSearch] = useState('');
   const [user, setUser] = useState<CurrentUser | null | undefined>(undefined);
   const [overdue, setOverdue] = useState(0);
+  const [botInbox, setBotInbox] = useState(0);
 
   useEffect(() => {
     void api<CurrentUser>('/auth/me')
@@ -80,7 +86,10 @@ export function AppShell({ children }: { children: ReactNode }) {
     void api<DashboardMetrics>('/metrics/dashboard')
       .then((metrics) => setOverdue(metrics.overdueTasks))
       .catch(() => setOverdue(0));
-  }, [user]);
+    void api<{ pendingCount: number }>('/locker/pending?status=PENDING')
+      .then((response) => setBotInbox(response.pendingCount))
+      .catch(() => setBotInbox(0));
+  }, [user, pathname]);
 
   useEffect(() => setMobileOpen(false), [pathname]);
 
@@ -192,6 +201,11 @@ export function AppShell({ children }: { children: ReactNode }) {
                         {item.href === '/tasks' && overdue > 0 && (
                           <span className="bg-destructive text-destructive-foreground rounded-full px-1.5 py-0.5 text-[10px] font-semibold tabular">
                             {overdue}
+                          </span>
+                        )}
+                        {item.href === '/inbox' && botInbox > 0 && (
+                          <span className="bg-warning text-warning-foreground rounded-full px-1.5 py-0.5 text-[10px] font-semibold tabular">
+                            {botInbox}
                           </span>
                         )}
                       </Link>

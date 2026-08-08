@@ -1,6 +1,12 @@
 export const Permissions = {
   PEOPLE_READ: 'people.read',
   PEOPLE_WRITE: 'people.write',
+  /** Безвозвратное удаление персональных данных участника. Только администратор. */
+  PEOPLE_DELETE: 'people.delete',
+  CAMPAIGNS_READ: 'campaigns.read',
+  CAMPAIGNS_WRITE: 'campaigns.write',
+  /** Утверждение и запуск рассылки: отдельно от редактирования текста. */
+  CAMPAIGNS_SEND: 'campaigns.send',
   EVENTS_WRITE: 'events.write',
   CONTACTS_READ: 'contacts.read',
   CONTACTS_WRITE: 'contacts.write',
@@ -69,6 +75,9 @@ export const ROLE_PERMISSIONS: Readonly<Record<Role, readonly Permission[]>> = O
     Permissions.AUDIT_READ,
     Permissions.EXPORTS_BULK,
     Permissions.SETTINGS_MANAGE,
+    Permissions.CAMPAIGNS_READ,
+    Permissions.CAMPAIGNS_WRITE,
+    Permissions.CAMPAIGNS_SEND,
   ),
   [Roles.COMMUNITY_MANAGER]: permissions(
     Permissions.PEOPLE_READ,
@@ -80,6 +89,8 @@ export const ROLE_PERMISSIONS: Readonly<Record<Role, readonly Permission[]>> = O
     Permissions.ARTIFACTS_WRITE,
     Permissions.TASKS_MANAGE,
     Permissions.METRICS_READ,
+    Permissions.CAMPAIGNS_READ,
+    Permissions.CAMPAIGNS_WRITE,
   ),
   [Roles.EVENT_MANAGER]: permissions(
     Permissions.PEOPLE_READ,
@@ -123,6 +134,8 @@ export const ROLE_PERMISSIONS: Readonly<Record<Role, readonly Permission[]>> = O
     Permissions.PEOPLE_READ,
     Permissions.METRICS_READ,
     Permissions.EXPENSES_READ,
+    Permissions.CAMPAIGNS_READ,
+    Permissions.CAMPAIGNS_WRITE,
   ),
   [Roles.PRODUCT_MANAGER]: permissions(
     Permissions.PEOPLE_READ,

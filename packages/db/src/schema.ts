@@ -1785,6 +1785,221 @@ export const lockerSubmissionLinks = pgTable(
   ],
 );
 
+export const campaignChannelEnum = pgEnum('campaign_channel', ['TELEGRAM', 'EMAIL']);
+export const campaignStatusEnum = pgEnum('campaign_status', [
+  'DRAFT',
+  'APPROVED',
+  'SENDING',
+  'PAUSED',
+  'SENT',
+  'CANCELLED',
+]);
+export const campaignRecipientStatusEnum = pgEnum('campaign_recipient_status', [
+  'QUEUED',
+  'SENT',
+  'DELIVERED',
+  'FAILED',
+  'SKIPPED',
+]);
+export const campaignReplyEnum = pgEnum('campaign_reply', [
+  'INTERESTED',
+  'MORE_INFO',
+  'UNSUBSCRIBED',
+]);
+
+/**
+ * Кампания активации базы. Текст правится до утверждения; после утверждения
+ * меняется только ход отправки, чтобы половина базы не получила другой текст.
+ */
+export const campaigns = pgTable(
+  'campaigns',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    organizationId: uuid('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    channel: campaignChannelEnum('channel').notNull(),
+    status: campaignStatusEnum('status').notNull().default('DRAFT'),
+    goal: text('goal'),
+    subject: text('subject'),
+    body: text('body').notNull(),
+    buttons: jsonb('buttons').$type<JsonObject[]>().notNull().default([]),
+    segment: jsonb('segment').$type<JsonObject>().notNull().default({}),
+    waveSize: integer('wave_size').notNull().default(200),
+    messagesPerSecond: integer('messages_per_second').notNull().default(20),
+    sentCount: integer('sent_count').notNull().default(0),
+    failedCount: integer('failed_count').notNull().default(0),
+    approvedByUserId: uuid('approved_by_user_id').references(() => appUsers.id, {
+      onDelete: 'set null',
+    }),
+    approvedAt: timestamptz('approved_at'),
+    startedAt: timestamptz('started_at'),
+    finishedAt: timestamptz('finished_at'),
+    createdByUserId: uuid('created_by_user_id').references(() => appUsers.id, {
+      onDelete: 'set null',
+    }),
+    ...editable(),
+  },
+  (table) => [
+    index('campaigns_status_idx').on(table.status, table.createdAt),
+    check('campaigns_body_check', sql`length(btrim(${table.body})) > 0`),
+    check('campaigns_wave_check', sql`${table.waveSize} BETWEEN 1 AND 5000`),
+    check('campaigns_rate_check', sql`${table.messagesPerSecond} BETWEEN 1 AND 25`),
+    check(
+      'campaigns_subject_check',
+      sql`${table.channel} <> 'EMAIL' OR ${table.subject} IS NOT NULL`,
+    ),
+    check(
+      'campaigns_approval_check',
+      sql`${table.status} IN ('DRAFT', 'CANCELLED') OR ${table.approvedAt} IS NOT NULL`,
+    ),
+  ],
+);
+
+export const campaignRecipients = pgTable(
+  'campaign_recipients',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    campaignId: uuid('campaign_id')
+      .notNull()
+      .references(() => campaigns.id, { onDelete: 'cascade' }),
+    personId: uuid('person_id')
+      .notNull()
+      .references(() => persons.id, { onDelete: 'cascade' }),
+    /** Telegram ID или email на момент отправки: контакт мог измениться позже. */
+    address: text('address').notNull(),
+    wave: integer('wave').notNull().default(1),
+    status: campaignRecipientStatusEnum('status').notNull().default('QUEUED'),
+    reply: campaignReplyEnum('reply'),
+    repliedAt: timestamptz('replied_at'),
+    sentAt: timestamptz('sent_at'),
+    deliveredAt: timestamptz('delivered_at'),
+    error: text('error'),
+    externalMessageId: text('external_message_id'),
+    ...timestamps(),
+  },
+  (table) => [
+    uniqueIndex('campaign_recipients_person_uidx').on(table.campaignId, table.personId),
+    index('campaign_recipients_queue_idx').on(table.campaignId, table.status, table.wave),
+    check(
+      'campaign_recipients_sent_check',
+      sql`${table.status} NOT IN ('SENT', 'DELIVERED') OR ${table.sentAt} IS NOT NULL`,
+    ),
+  ],
+);
+
+export const campaignEvents = pgTable(
+  'campaign_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    recipientId: uuid('recipient_id')
+      .notNull()
+      .references(() => campaignRecipients.id, { onDelete: 'cascade' }),
+    type: text('type').notNull(),
+    payload: jsonb('payload').$type<JsonObject>().notNull().default({}),
+    /** Идентификатор события провайдера: вебхуки приходят повторно. */
+    externalEventId: text('external_event_id'),
+    occurredAt: timestamptz('occurred_at').notNull().defaultNow(),
+    createdAt: timestamptz('created_at').notNull().defaultNow(),
+  },
+  (table) => [
+    index('campaign_events_recipient_idx').on(table.recipientId, table.occurredAt),
+    uniqueIndex('campaign_events_external_uidx')
+      .on(table.externalEventId)
+      .where(sql`${table.externalEventId} IS NOT NULL`),
+    check(
+      'campaign_events_type_check',
+      sql`${table.type} IN ('SENT', 'DELIVERED', 'OPENED', 'CLICKED', 'REPLIED',
+                            'UNSUBSCRIBED', 'BOUNCED', 'SPAM', 'FAILED')`,
+    ),
+  ],
+);
+
+export const personDeletionTombstones = pgTable(
+  'person_deletion_tombstones',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    organizationId: uuid('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'restrict' }),
+    /** sha256 нормализованных контактов: карточки уже нет, сверять больше нечем. */
+    contactHashes: text('contact_hashes').array().notNull().default([]),
+    nameHash: text('name_hash').notNull(),
+    reason: text('reason').notNull(),
+    deletedPersonId: uuid('deleted_person_id').notNull(),
+    deletedByUserId: uuid('deleted_by_user_id').references(() => appUsers.id, {
+      onDelete: 'set null',
+    }),
+    deletedAt: timestamptz('deleted_at').notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('person_deletion_tombstones_person_uidx').on(table.deletedPersonId),
+    check('person_deletion_tombstones_name_hash_check', sql`${table.nameHash} ~ '^[0-9a-f]{64}$'`),
+  ],
+);
+
+export const lockerPendingStatusEnum = pgEnum('locker_pending_status', [
+  'PENDING',
+  'RESOLVED',
+  'REJECTED',
+]);
+
+export const lockerPendingSubmissions = pgTable(
+  'locker_pending_submissions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    organizationId: uuid('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'restrict' }),
+    lockerSubmissionId: uuid('locker_submission_id').notNull(),
+    lockerUserId: uuid('locker_user_id').notNull(),
+    telegramUserId: text('telegram_user_id').notNull(),
+    telegramUsername: text('telegram_username'),
+    reportedFullName: text('reported_full_name').notNull(),
+    reportedPhone: text('reported_phone'),
+    reportedOrganization: text('reported_organization'),
+    lockerEventId: uuid('locker_event_id').notNull(),
+    eventTitle: text('event_title').notNull(),
+    submittedAt: timestamptz('submitted_at').notNull(),
+    payload: jsonb('payload').$type<JsonObject>().notNull(),
+    payloadHash: text('payload_hash').notNull(),
+    reasonCode: text('reason_code').notNull(),
+    reasonDetail: text('reason_detail'),
+    status: lockerPendingStatusEnum('status').notNull().default('PENDING'),
+    resolvedPersonId: uuid('resolved_person_id').references(() => persons.id, {
+      onDelete: 'set null',
+    }),
+    resolvedByUserId: uuid('resolved_by_user_id').references(() => appUsers.id, {
+      onDelete: 'set null',
+    }),
+    resolvedAt: timestamptz('resolved_at'),
+    resolutionNote: text('resolution_note'),
+    attempts: integer('attempts').notNull().default(1),
+    lastSeenAt: timestamptz('last_seen_at').notNull().defaultNow(),
+    ...timestamps(),
+  },
+  (table) => [
+    uniqueIndex('locker_pending_submissions_submission_uidx').on(table.lockerSubmissionId),
+    index('locker_pending_submissions_queue_idx').on(table.status, table.submittedAt),
+    index('locker_pending_submissions_telegram_idx')
+      .on(table.telegramUserId)
+      .where(sql`${table.status} = 'PENDING'`),
+    check('locker_pending_submissions_telegram_check', sql`${table.telegramUserId} ~ '^[0-9]+$'`),
+    check('locker_pending_submissions_hash_check', sql`${table.payloadHash} ~ '^[0-9a-f]{64}$'`),
+    check(
+      'locker_pending_submissions_reason_check',
+      sql`${table.reasonCode} IN ('FIO_REQUIRED', 'PERSON_AMBIGUOUS', 'IDENTITY_CONFLICT', 'DELETED_IDENTITY')`,
+    ),
+    check(
+      'locker_pending_submissions_resolution_check',
+      sql`(${table.status} = 'PENDING' AND ${table.resolvedAt} IS NULL AND ${table.resolvedPersonId} IS NULL)
+          OR (${table.status} = 'REJECTED' AND ${table.resolvedAt} IS NOT NULL)
+          OR (${table.status} = 'RESOLVED' AND ${table.resolvedAt} IS NOT NULL AND ${table.resolvedPersonId} IS NOT NULL)`,
+    ),
+  ],
+);
+
 export const sourceEntityLinks = pgTable(
   'source_entity_links',
   {

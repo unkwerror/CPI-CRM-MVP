@@ -13,7 +13,9 @@ import {
   PhoneIcon,
   PlusIcon,
   TagIcon,
+  UserMinusIcon,
 } from 'lucide-react';
+import { useRouter } from 'next/navigation';
 import {
   type ComponentProps,
   type ReactNode,
@@ -37,6 +39,7 @@ import { EmptyState } from '@/components/empty-state';
 import { PageHeader, PageStack } from '@/components/page-header';
 import { PersonContactDialog } from '@/components/person-contact-dialog';
 import { PersonInteractionDialog } from '@/components/person-interaction-dialog';
+import { PersonRemovalDialog } from '@/components/person-removal-dialog';
 import { StatusBadge } from '@/components/status-badge';
 import { TaskDialog } from '@/components/task-dialog';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -81,12 +84,15 @@ export function PersonPageClient({ id }: { id: string }) {
   const [showContact, setShowContact] = useState(false);
   const [showInteraction, setShowInteraction] = useState(false);
   const [showTask, setShowTask] = useState(false);
+  const [showRemoval, setShowRemoval] = useState(false);
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notesDraft, setNotesDraft] = useState<string | null>(null);
   const [savingNotes, setSavingNotes] = useState(false);
+  const router = useRouter();
   const { can } = useCurrentUser();
   const canEditPerson = can('people.write');
+  const canDeletePerson = can('people.delete');
   const canEditContacts = can('contacts.write');
   const canManageTasks = can('tasks.manage');
   const canAddArtifact = can('artifacts.write');
@@ -189,9 +195,30 @@ export function PersonPageClient({ id }: { id: string }) {
                 <FilePlus2Icon /> Добавить артефакт
               </Button>
             )}
+            {canEditPerson && (
+              <Button
+                aria-label="Убрать участника"
+                onClick={() => setShowRemoval(true)}
+                variant="outline"
+              >
+                <UserMinusIcon />
+              </Button>
+            )}
           </>
         }
       />
+
+      {canEditPerson && (
+        <PersonRemovalDialog
+          canDelete={canDeletePerson}
+          onOpenChange={setShowRemoval}
+          onRemoved={() => router.push('/participants')}
+          open={showRemoval}
+          personId={person.id}
+          personName={person.canonicalFullName}
+          version={person.version}
+        />
+      )}
 
       <Card>
         <CardContent className="grid gap-5 sm:grid-cols-2 xl:grid-cols-4">
@@ -331,6 +358,12 @@ export function PersonPageClient({ id }: { id: string }) {
                 {person.contacts.length === 0 && (
                   <p className="text-muted-foreground text-[13px]">Контакты ещё не указаны.</p>
                 )}
+                <MarketingConsent
+                  canEdit={canEditPerson}
+                  consent={person.marketingConsent}
+                  onChanged={reload}
+                  personId={person.id}
+                />
               </CardContent>
             </Card>
 
@@ -574,6 +607,80 @@ export function PersonPageClient({ id }: { id: string }) {
         />
       )}
     </PageStack>
+  );
+}
+
+const CONSENT_CHANNELS = [
+  { key: 'telegram', purpose: 'MARKETING_TELEGRAM', label: 'Telegram' },
+  { key: 'email', purpose: 'MARKETING_EMAIL', label: 'Email' },
+] as const;
+
+/**
+ * Отписка от рассылок — отдельное от архива состояние: человек остаётся
+ * участником со всей историей, но выпадает из аудиторий кампаний.
+ */
+function MarketingConsent({
+  personId,
+  consent,
+  canEdit,
+  onChanged,
+}: {
+  personId: string;
+  consent: PersonDetail['marketingConsent'];
+  canEdit: boolean;
+  onChanged: () => Promise<void> | void;
+}) {
+  const [saving, setSaving] = useState<string | null>(null);
+  if (!consent) return null;
+
+  async function record(purpose: string, status: 'GRANTED' | 'WITHDRAWN') {
+    setSaving(purpose);
+    try {
+      await api(`/people/${personId}/consent`, {
+        method: 'POST',
+        body: JSON.stringify({ purpose, status }),
+      });
+      toast.success(status === 'WITHDRAWN' ? 'Отписка записана' : 'Согласие записано');
+      await onChanged();
+    } catch (caught) {
+      toast.error(apiErrorMessage(caught, 'Не удалось записать согласие'));
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  return (
+    <div className="border-t pt-3">
+      <p className="text-muted-foreground text-xs font-semibold tracking-wider uppercase">
+        Рассылки
+      </p>
+      <div className="mt-2 space-y-2">
+        {CONSENT_CHANNELS.map((channel) => {
+          const status = consent[channel.key];
+          const optedOut = status === 'WITHDRAWN' || status === 'DENIED';
+          return (
+            <div className="flex items-center justify-between gap-2" key={channel.key}>
+              <span className="text-[13px]">
+                {channel.label}
+                <Badge className="ml-2" variant={optedOut ? 'soft-warning' : 'soft-success'}>
+                  {optedOut ? 'не писать' : status === 'GRANTED' ? 'согласие есть' : 'не спрашивали'}
+                </Badge>
+              </span>
+              {canEdit && (
+                <Button
+                  disabled={saving === channel.purpose}
+                  onClick={() => record(channel.purpose, optedOut ? 'GRANTED' : 'WITHDRAWN')}
+                  size="xs"
+                  variant="ghost"
+                >
+                  {optedOut ? 'Вернуть' : 'Отписать'}
+                </Button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 

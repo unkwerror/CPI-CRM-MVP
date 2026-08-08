@@ -44,6 +44,10 @@ export interface ApiConfig {
     baseUrl: string;
     integrationToken: string;
   };
+  email: {
+    /** Тот же секрет, что у воркера: им подписаны ссылки внутри писем. */
+    linkSecret: string;
+  };
 }
 
 export function loadConfig(): ApiConfig {
@@ -93,6 +97,9 @@ export function loadConfig(): ApiConfig {
     locker: {
       baseUrl: required('LOCKER_BASE_URL', 'http://localhost:8080').replace(/\/+$/u, ''),
       integrationToken: lockerIntegrationToken,
+    },
+    email: {
+      linkSecret: required('CAMPAIGN_LINK_SECRET', 'local-campaign-link-secret-change-me'),
     },
   };
 }

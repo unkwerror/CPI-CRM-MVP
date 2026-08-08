@@ -20,6 +20,7 @@ import { Type } from '@sinclair/typebox';
 import type { FastifyInstance } from 'fastify';
 
 import { writeAudit } from '../../lib/audit.js';
+import { hashIdentityKey } from '../../lib/identity-hash.js';
 import { getOrganizationContext } from '../../lib/organization.js';
 import { HttpProblem } from '../../lib/problem.js';
 import { decodeCursor, encodeCursor, transaction } from '../../lib/sql.js';
@@ -58,6 +59,16 @@ function buildHeadQuality(
       commercialApplicability: components.commercialApplicability,
     },
   };
+}
+
+const MARKETING_PURPOSES = ['MARKETING_TELEGRAM', 'MARKETING_EMAIL'] as const;
+type MarketingPurpose = (typeof MARKETING_PURPOSES)[number];
+
+function consentStatus(
+  rows: readonly { purpose: string; status: string }[],
+  purpose: MarketingPurpose,
+): string {
+  return rows.find((row) => row.purpose === purpose)?.status ?? 'UNKNOWN';
 }
 
 const LIVE_ACTIVITY_SQL = `CASE
@@ -538,6 +549,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
         tags,
         participations,
         headQualityRows,
+        marketingConsent,
       ] = await Promise.all([
         app.pool.query(
           `SELECT id, type, raw_value, messenger_stable_id, is_primary, is_verified
@@ -664,6 +676,15 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
                         WHERE d.person_id IN ${clusterSql} AND d.archived_at IS NULL) AS commercial`,
           [canonical],
         ),
+        // Действует последняя запись по каждой цели: отзыв согласия перекрывает выданное.
+        app.pool.query<{ purpose: string; status: string; recorded_at: Date }>(
+          `SELECT DISTINCT ON (purpose) purpose, status, recorded_at
+             FROM consent_records
+            WHERE person_id IN ${clusterSql}
+              AND purpose IN ('MARKETING_TELEGRAM', 'MARKETING_EMAIL')
+            ORDER BY purpose, recorded_at DESC`,
+          [canonical],
+        ),
       ]);
       const mappedArtifacts = artifacts.rows.map((item) => ({
         id: item.id,
@@ -754,6 +775,10 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
         tags: tags.rows.map((item) => item.name),
         notes: row.notes ?? null,
         headQuality: buildHeadQuality(headQualityRows.rows[0]),
+        marketingConsent: {
+          telegram: consentStatus(marketingConsent.rows, 'MARKETING_TELEGRAM'),
+          email: consentStatus(marketingConsent.rows, 'MARKETING_EMAIL'),
+        },
       };
     },
   );
@@ -1269,6 +1294,343 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
       return reply.code(201).send(created);
     },
   );
+
+  app.post(
+    '/people/:id/consent',
+    {
+      preHandler: app.requirePermission(Permissions.PEOPLE_WRITE),
+      schema: {
+        tags: ['Участники'],
+        summary: 'Записать согласие или отказ от рассылок',
+        description:
+          'Отписка — не удаление: человек остаётся участником, но исключается из аудиторий. ' +
+          'Запись отзыва нужно хранить, иначе следующий импорт вернёт его в рассылку.',
+        params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
+        body: Type.Object({
+          purpose: Type.Union(MARKETING_PURPOSES.map((purpose) => Type.Literal(purpose))),
+          status: Type.Union([Type.Literal('GRANTED'), Type.Literal('WITHDRAWN')]),
+          note: Type.Optional(Type.String({ maxLength: 500 })),
+        }),
+      },
+    },
+    async (request, reply) => {
+      const id = await resolveCanonicalId(app, (request.params as { id: string }).id);
+      const body = request.body as {
+        purpose: MarketingPurpose;
+        status: 'GRANTED' | 'WITHDRAWN';
+        note?: string;
+      };
+      const created = await transaction(app.pool, async (client) => {
+        const exists = await client.query(
+          `SELECT 1 FROM persons WHERE id = $1 AND archived_at IS NULL`,
+          [id],
+        );
+        if (exists.rowCount === 0) throw new HttpProblem(404, 'Участник не найден');
+        const result = await client.query<{ id: string }>(
+          `INSERT INTO consent_records
+             (person_id, purpose, status, evidence, data_origin, recorded_by_user_id)
+           VALUES ($1, $2, $3, $4::jsonb, 'LIVE', $5)
+           RETURNING id`,
+          [
+            id,
+            body.purpose,
+            body.status,
+            JSON.stringify({ note: body.note ?? null, source: 'CRM' }),
+            request.authUser!.userId,
+          ],
+        );
+        await writeAudit(client, {
+          actor: request.authUser!,
+          requestId: request.id,
+          action: 'consent.recorded',
+          entityType: 'person',
+          entityId: id,
+          after: { purpose: body.purpose, status: body.status },
+          ...(body.note ? { reason: body.note } : {}),
+        });
+        return result.rows[0]!;
+      });
+      return reply.code(201).send(created);
+    },
+  );
+
+  app.post(
+    '/people/:id/archive',
+    {
+      preHandler: app.requirePermission(Permissions.PEOPLE_WRITE),
+      schema: {
+        tags: ['Участники'],
+        summary: 'Убрать участника из активной базы',
+        description:
+          'Обратимое скрытие: карточка, контакты и участия перестают попадать в списки, ' +
+          'выгрузки и аудитории рассылок, но история и артефакты сохраняются.',
+        params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
+        body: Type.Object({
+          version: Type.Integer({ minimum: 0 }),
+          reason: Type.String({ minLength: 3, maxLength: 500 }),
+        }),
+      },
+    },
+    async (request) => {
+      const id = await resolveCanonicalId(app, (request.params as { id: string }).id);
+      const body = request.body as { version: number; reason: string };
+      return transaction(app.pool, async (client) => {
+        const current = await client.query<{ canonical_full_name: string; version: number }>(
+          `SELECT canonical_full_name, version FROM persons
+            WHERE id = $1 AND archived_at IS NULL FOR UPDATE`,
+          [id],
+        );
+        if (!current.rows[0]) throw new HttpProblem(404, 'Участник не найден');
+        if (current.rows[0].version !== body.version)
+          throw new HttpProblem(
+            409,
+            'Карточка уже изменена',
+            'Обновите страницу: кто-то изменил участника параллельно.',
+          );
+        await archivePersonCluster(client, id);
+        await writeAudit(client, {
+          actor: request.authUser!,
+          requestId: request.id,
+          action: 'person.archived',
+          entityType: 'person',
+          entityId: id,
+          before: { canonicalFullName: current.rows[0].canonical_full_name },
+          reason: body.reason,
+        });
+        return { id, archived: true };
+      });
+    },
+  );
+
+  app.delete(
+    '/people/:id',
+    {
+      preHandler: app.requirePermission(Permissions.PEOPLE_DELETE),
+      schema: {
+        tags: ['Участники'],
+        summary: 'Удалить участника безвозвратно',
+        description:
+          'Стирает карточку, контакты, участия и связи. Артефакты мероприятия остаются, ' +
+          'но теряют авторство. Остаётся только запись в журнале и отпечатки контактов, ' +
+          'чтобы повторный импорт не завёл человека заново.',
+        params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
+        body: Type.Object({
+          reason: Type.String({ minLength: 3, maxLength: 500 }),
+          /** Подтверждение ФИО: удаление необратимо, поэтому просим повторить имя. */
+          confirmFullName: Type.String({ minLength: 1, maxLength: 300 }),
+        }),
+      },
+    },
+    async (request) => {
+      const id = await resolveCanonicalId(app, (request.params as { id: string }).id);
+      const body = request.body as { reason: string; confirmFullName: string };
+      const organization = await getOrganizationContext(app.pool);
+      return transaction(app.pool, async (client) => {
+        const current = await client.query<{
+          canonical_full_name: string;
+          normalized_full_name: string;
+        }>(
+          `SELECT canonical_full_name, normalized_full_name FROM persons
+            WHERE id = $1 AND organization_id = $2 FOR UPDATE`,
+          [id, organization.id],
+        );
+        const person = current.rows[0];
+        if (!person) throw new HttpProblem(404, 'Участник не найден');
+        if (normalizeFullName(body.confirmFullName) !== person.normalized_full_name)
+          throw new HttpProblem(
+            400,
+            'ФИО подтверждения не совпадает',
+            `Введите «${person.canonical_full_name}», чтобы подтвердить удаление.`,
+          );
+
+        const cluster = await client.query<{ id: string }>(
+          `SELECT id FROM persons WHERE id = $1 OR merged_into_person_id = $1 FOR UPDATE`,
+          [id],
+        );
+        const memberIds = cluster.rows.map((row) => row.id);
+        const fingerprints = await collectIdentityHashes(client, memberIds, person);
+
+        await client.query(
+          `INSERT INTO person_deletion_tombstones
+             (organization_id, contact_hashes, name_hash, reason, deleted_person_id, deleted_by_user_id)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (deleted_person_id) DO NOTHING`,
+          [
+            organization.id,
+            fingerprints.contactHashes,
+            fingerprints.nameHash,
+            body.reason,
+            id,
+            request.authUser!.userId,
+          ],
+        );
+
+        // Журнал пишем до удаления: запись переживает карточку и остаётся
+        // единственным доказательством, кто и почему стёр данные.
+        await writeAudit(client, {
+          actor: request.authUser!,
+          requestId: request.id,
+          action: 'person.deleted',
+          entityType: 'person',
+          entityId: id,
+          before: {
+            canonicalFullName: person.canonical_full_name,
+            clusterSize: memberIds.length,
+            contactFingerprints: fingerprints.contactHashes.length,
+          },
+          reason: body.reason,
+        });
+
+        // Ссылки с ON DELETE RESTRICT нужно снять руками, иначе удаление упадёт.
+        for (const table of [
+          'artifact_version_contributors',
+          'lifecycle_status_history',
+          'interactions',
+          'external_identities',
+          'locker_submission_links',
+        ]) {
+          await client.query(`DELETE FROM ${table} WHERE person_id = ANY($1::uuid[])`, [memberIds]);
+        }
+        // Наблюдения импорта — след исходного файла, а не карточка: снимаем привязку,
+        // чтобы история загрузок осталась воспроизводимой.
+        await client.query(
+          `UPDATE person_observations
+              SET resolved_person_id = NULL,
+                  resolution_status = 'REJECTED',
+                  resolution_reason = 'Участник удалён из базы',
+                  updated_at = now()
+            WHERE resolved_person_id = ANY($1::uuid[])`,
+          [memberIds],
+        );
+        // Слияние, где удаляемый был мастером, приходится убирать целиком: ссылка
+        // на мастера обязательна, обнулить её нельзя. Сначала — всё, что на нём висит.
+        await client.query(
+          `DELETE FROM merge_reassignment_queue
+            WHERE resolved_person_id = ANY($1::uuid[])
+               OR merge_operation_id IN (
+                    SELECT id FROM merge_operations WHERE master_person_id = ANY($1::uuid[])
+                  )`,
+          [memberIds],
+        );
+        await client.query(
+          `DELETE FROM merge_operation_items
+            WHERE source_person_id = ANY($1::uuid[])
+               OR target_person_id = ANY($1::uuid[])
+               OR merge_operation_id IN (
+                    SELECT id FROM merge_operations WHERE master_person_id = ANY($1::uuid[])
+                  )`,
+          [memberIds],
+        );
+        await client.query(`DELETE FROM merge_operations WHERE master_person_id = ANY($1::uuid[])`, [
+          memberIds,
+        ]);
+        // Уцелевшие слияния могут ссылаться на пару дублей этого человека —
+        // сама пара уходит, ссылка на неё необязательна.
+        await client.query(
+          `UPDATE merge_operations SET duplicate_candidate_id = NULL, updated_at = now()
+            WHERE duplicate_candidate_id IN (
+                    SELECT id FROM duplicate_candidates
+                     WHERE person_a_id = ANY($1::uuid[]) OR person_b_id = ANY($1::uuid[])
+                  )`,
+          [memberIds],
+        );
+        await client.query(
+          `DELETE FROM duplicate_candidates
+            WHERE person_a_id = ANY($1::uuid[]) OR person_b_id = ANY($1::uuid[])`,
+          [memberIds],
+        );
+        await client.query(
+          `DELETE FROM not_duplicate_pairs
+            WHERE person_a_id = ANY($1::uuid[]) OR person_b_id = ANY($1::uuid[])`,
+          [memberIds],
+        );
+        // Задачи и сделки — работа студии, а не персональные данные: отвязываем.
+        // Задача без проекта существует только ради этого человека, её удаляем:
+        // схема запрещает задачу без субъекта.
+        await client.query(
+          `DELETE FROM tasks WHERE person_id = ANY($1::uuid[]) AND project_id IS NULL`,
+          [memberIds],
+        );
+        await client.query(
+          `UPDATE tasks SET person_id = NULL, updated_at = now()
+            WHERE person_id = ANY($1::uuid[])`,
+          [memberIds],
+        );
+        await client.query(
+          `UPDATE deals SET person_id = NULL, updated_at = now()
+            WHERE person_id = ANY($1::uuid[])`,
+          [memberIds],
+        );
+        // Остальное (контакты, псевдонимы, участия, согласия, теги) уходит каскадом.
+        await client.query(`DELETE FROM persons WHERE id = ANY($1::uuid[])`, [memberIds]);
+        return { id, deleted: true, removedCards: memberIds.length };
+      });
+    },
+  );
+}
+
+/** Обратимое скрытие всего кластера участника вместе со связанными записями. */
+async function archivePersonCluster(
+  client: import('pg').PoolClient,
+  canonicalId: string,
+): Promise<void> {
+  await client.query(
+    `UPDATE persons SET archived_at = now(), updated_at = now(), version = version + 1
+      WHERE (id = $1 OR merged_into_person_id = $1) AND archived_at IS NULL`,
+    [canonicalId],
+  );
+  for (const table of [
+    'person_aliases',
+    'contact_points',
+    'affiliations',
+    'event_participations',
+    'external_identities',
+  ]) {
+    await client.query(
+      `UPDATE ${table} SET archived_at = now(), updated_at = now()
+        WHERE person_id IN (SELECT id FROM persons WHERE id = $1 OR merged_into_person_id = $1)
+          AND archived_at IS NULL`,
+      [canonicalId],
+    );
+  }
+}
+
+async function collectIdentityHashes(
+  client: import('pg').PoolClient,
+  memberIds: readonly string[],
+  person: { normalized_full_name: string },
+): Promise<{ contactHashes: string[]; nameHash: string }> {
+  const contacts = await client.query<{
+    type: string;
+    normalized_value: string;
+    messenger_stable_id: string | null;
+  }>(
+    `SELECT type, normalized_value, messenger_stable_id
+       FROM contact_points WHERE person_id = ANY($1::uuid[])`,
+    [memberIds],
+  );
+  const identities = await client.query<{ source_namespace: string; external_id: string }>(
+    `SELECT source_namespace, external_id
+       FROM external_identities WHERE person_id = ANY($1::uuid[])`,
+    [memberIds],
+  );
+  const hashes = new Set<string>();
+  for (const contact of contacts.rows) {
+    if (contact.type === 'EMAIL' || contact.type === 'PHONE' || contact.type === 'TELEGRAM')
+      hashes.add(hashIdentityKey(contact.type, contact.normalized_value));
+    if (contact.messenger_stable_id)
+      hashes.add(hashIdentityKey('TELEGRAM_ID', contact.messenger_stable_id));
+  }
+  for (const identity of identities.rows) {
+    if (identity.source_namespace === 'locker.telegram')
+      hashes.add(hashIdentityKey('TELEGRAM_ID', identity.external_id));
+    if (identity.source_namespace === 'locker.user')
+      hashes.add(hashIdentityKey('LOCKER_USER', identity.external_id));
+  }
+  return {
+    contactHashes: [...hashes].sort(),
+    nameHash: hashIdentityKey('NAME', person.normalized_full_name),
+  };
 }
 
 function sourceFields(rawJson: unknown): Array<{ header: string; address: string; value: string }> {

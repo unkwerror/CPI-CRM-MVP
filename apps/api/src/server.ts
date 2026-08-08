@@ -9,6 +9,8 @@ import Fastify, { LogController, type FastifyError } from 'fastify';
 import { loadConfig, type ApiConfig } from './config.js';
 import { HttpProblem } from './lib/problem.js';
 import { registerArtifactRoutes } from './modules/artifacts/routes.js';
+import { registerAudienceRoutes } from './modules/audience/routes.js';
+import { registerCampaignRoutes } from './modules/campaigns/routes.js';
 import { registerCatalogRoutes } from './modules/catalogs/routes.js';
 import { registerDealRoutes } from './modules/deals/routes.js';
 import { registerExpenseRoutes } from './modules/expenses/routes.js';
@@ -16,6 +18,7 @@ import { registerEventRoutes } from './modules/events/routes.js';
 import { registerExportRoutes } from './modules/exports/routes.js';
 import { registerFileRoutes } from './modules/files/routes.js';
 import { registerImportRoutes } from './modules/imports/routes.js';
+import { registerLockerPendingRoutes } from './modules/integrations/locker-pending-routes.js';
 import { registerLockerIntegrationRoutes } from './modules/integrations/locker-routes.js';
 import { registerMetricRoutes } from './modules/metrics/routes.js';
 import { registerOperationRoutes } from './modules/operations/routes.js';
@@ -34,7 +37,10 @@ export function isMutationOriginAllowed(input: {
   routeUrl?: string | undefined;
 }): boolean {
   if (SAFE_METHODS.has(input.method.toUpperCase())) return true;
-  if (input.routeUrl?.startsWith('/integrations/locker/')) return true;
+  // Серверные интеграции приходят без Origin и авторизуются общим секретом,
+  // публичные ссылки из писем — подписью в самом адресе.
+  if (input.routeUrl?.startsWith('/integrations/')) return true;
+  if (input.routeUrl?.startsWith('/public/')) return true;
   if (input.origin === input.webOrigin) return true;
 
   // Explicit local development mode remains compatible with CLI/inject calls
@@ -149,6 +155,7 @@ export async function buildServer(config: ApiConfig = loadConfig()) {
 
   await registerPeopleRoutes(app);
   await registerLockerIntegrationRoutes(app);
+  await registerLockerPendingRoutes(app);
   await registerEventRoutes(app);
   await registerExportRoutes(app);
   await registerArtifactRoutes(app);
@@ -161,6 +168,8 @@ export async function buildServer(config: ApiConfig = loadConfig()) {
   await registerDealRoutes(app);
   await registerExpenseRoutes(app);
   await registerMetricRoutes(app);
+  await registerAudienceRoutes(app);
+  await registerCampaignRoutes(app);
 
   app.setNotFoundHandler(async (request) => {
     throw new HttpProblem(404, 'Маршрут не найден', `${request.method} не поддерживается.`);

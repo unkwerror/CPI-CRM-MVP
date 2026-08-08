@@ -2,6 +2,8 @@ import { S3Client } from '@aws-sdk/client-s3';
 import { Pool } from 'pg';
 
 import { reevaluateArtifactVersion } from './artifact-countability.js';
+import { CampaignEmailSender } from './campaign-email-sender.js';
+import { CampaignSender } from './campaign-sender.js';
 import type { WorkerConfig } from './config.js';
 import { inTransaction } from './db.js';
 import { FileScanner } from './file-scanner.js';
@@ -13,10 +15,13 @@ export class WorkerRuntime {
   readonly #pool: Pool;
   readonly #scanner: FileScanner;
   readonly #outbox: OutboxProcessor;
+  readonly #campaigns: CampaignSender;
+  readonly #campaignEmails: CampaignEmailSender;
   readonly #abort = new AbortController();
   readonly #tasks = new Set<Promise<unknown>>();
   #dueTimer?: NodeJS.Timeout;
   #reconciliationTimer?: NodeJS.Timeout;
+  #campaignTimer?: NodeJS.Timeout;
   #activePoll: Promise<number> | undefined;
   #stopped = false;
 
@@ -53,6 +58,25 @@ export class WorkerRuntime {
         }
       },
     );
+    this.#campaigns = new CampaignSender(this.#pool, {
+      telegramBotToken: config.campaigns.telegramBotToken,
+      telegramApiUrl: config.campaigns.telegramApiUrl,
+      batchSize: config.campaigns.batchSize,
+    });
+    this.#campaignEmails = new CampaignEmailSender(this.#pool, {
+      host: config.campaigns.smtpHost,
+      port: config.campaigns.smtpPort,
+      user: config.campaigns.smtpUser,
+      password: config.campaigns.smtpPassword,
+      fromEmail: config.campaigns.fromEmail,
+      fromName: config.campaigns.fromName,
+      replyTo: config.campaigns.replyTo,
+      botLink: config.campaigns.telegramBotLink,
+      publicUrl: config.campaigns.publicUrl,
+      linkSecret: config.campaigns.linkSecret,
+      dailyLimit: config.campaigns.smtpDailyLimit,
+      batchSize: config.campaigns.batchSize,
+    });
   }
 
   public async run(): Promise<void> {
@@ -65,6 +89,10 @@ export class WorkerRuntime {
     this.#reconciliationTimer = setInterval(
       () => this.track(this.runReconciliation()),
       this.config.reconciliationIntervalMs,
+    );
+    this.#campaignTimer = setInterval(
+      () => this.track(this.runCampaigns()),
+      this.config.campaigns.intervalMs,
     );
 
     while (!this.#abort.signal.aborted) {
@@ -90,8 +118,10 @@ export class WorkerRuntime {
     this.#abort.abort();
     if (this.#dueTimer) clearInterval(this.#dueTimer);
     if (this.#reconciliationTimer) clearInterval(this.#reconciliationTimer);
+    if (this.#campaignTimer) clearInterval(this.#campaignTimer);
     if (this.#activePoll) await Promise.allSettled([this.#activePoll]);
     await Promise.allSettled([...this.#tasks]);
+    await this.#campaignEmails.close();
     await this.#pool.end();
     console.info('CPI CRM worker stopped', { workerId: this.config.workerId });
   }
@@ -132,6 +162,17 @@ export class WorkerRuntime {
       console.info('Due lifecycle pass completed', { transitions });
     } catch (error) {
       console.error('Due lifecycle pass failed', { error: errorMessage(error) });
+    }
+  }
+
+  private async runCampaigns(): Promise<void> {
+    try {
+      const telegram = await this.#campaigns.processOnce();
+      const email = await this.#campaignEmails.processOnce();
+      if (telegram > 0 || email > 0)
+        console.info('Campaign messages delivered', { telegram, email });
+    } catch (error) {
+      console.error('Campaign delivery pass failed', { error: errorMessage(error) });
     }
   }
 

@@ -34,6 +34,9 @@ const config: ApiConfig = {
     baseUrl: 'https://locker.example.test',
     integrationToken: 'test-locker-integration-token-000000',
   },
+  email: {
+    linkSecret: 'test-campaign-link-secret',
+  },
 };
 
 describe('HTTP security policy', () => {
