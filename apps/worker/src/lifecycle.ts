@@ -150,6 +150,10 @@ export async function recalculatePersonLifecycle(
   if (!current) return { found: false, changed: false };
   const canonicalPersonId = current.id;
 
+  // Архивная карточка автора не отменяет доказательство: $1 всегда главная
+  // карточка кластера, поэтому под фильтр попадали только слитые карточки — а их
+  // артефакты после слияния принадлежат главной. Гигиена ФИО архивирует карточки,
+  // заведённые ботом, и именно у них доказательство активации терялось.
   const evidence = await client.query<EvidenceRow>(
     `SELECT av.qualifies_for_activation, av.qualifies_for_activity,
             av.submitted_at, av.recorded_at
@@ -158,7 +162,6 @@ export async function recalculatePersonLifecycle(
        JOIN artifact_versions av ON av.id = avc.artifact_version_id
        JOIN artifacts a ON a.id = av.artifact_id
       WHERE (contributor.id = $1 OR contributor.merged_into_person_id = $1)
-        AND contributor.archived_at IS NULL
         AND avc.contribution_role = 'AUTHOR'
         AND av.status = 'SUBMITTED'
         AND a.status <> 'VOIDED'`,

@@ -244,6 +244,9 @@ describe('recalculatePersonLifecycle reconciliation', () => {
       }
       if (sql.includes('JOIN persons contributor')) {
         expect(sql).toContain('contributor.merged_into_person_id = $1');
+        // Карточку, спрятанную гигиеной ФИО и слитую с главной, отбрасывать нельзя:
+        // иначе сданный через бота артефакт перестаёт доказывать активацию.
+        expect(sql).not.toContain('contributor.archived_at IS NULL');
         expect(parameters).toEqual([CANONICAL_PERSON_ID]);
         return {
           rows: [

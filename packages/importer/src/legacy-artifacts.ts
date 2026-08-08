@@ -501,7 +501,8 @@ async function recalculateLegacyArtifactAuthor(
        JOIN artifact_versions version ON version.id = contributor.artifact_version_id
        JOIN artifacts artifact ON artifact.id = version.artifact_id
       WHERE (author.id = $1 OR author.merged_into_person_id = $1)
-        AND author.archived_at IS NULL
+        -- Архивную карточку не исключаем: $1 уже главная, поэтому фильтр отсекал
+        -- только слитые карточки, чьи артефакты принадлежат главной.
         AND contributor.contribution_role = 'AUTHOR'
         AND version.status = 'SUBMITTED'
         AND artifact.status <> 'VOIDED'`,
