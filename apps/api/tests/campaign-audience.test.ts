@@ -41,6 +41,27 @@ describe('building a campaign audience', () => {
     expect(params.at(-1)).toBe(200);
   });
 
+  it('hides cards archived by name hygiene unless they are asked for', () => {
+    const { sql: without } = buildAudienceQuery(organizationId, 'TELEGRAM', {});
+    const { sql: included } = buildAudienceQuery(organizationId, 'TELEGRAM', {
+      includeHidden: true,
+    });
+    expect(without).toContain('AND person.archived_at IS NULL');
+    expect(included).not.toContain('AND person.archived_at IS NULL');
+  });
+
+  it('keeps a Telegram id reachable even when hygiene archived the contact', () => {
+    const { sql } = buildAudienceQuery(organizationId, 'TELEGRAM', {});
+    expect(sql).toContain(
+      "OR (contact.type = 'TELEGRAM' AND contact.messenger_stable_id IS NOT NULL)",
+    );
+  });
+
+  it('never writes to an address that bounced for good', () => {
+    const { sql } = buildAudienceQuery(organizationId, 'EMAIL', {});
+    expect(sql).toContain("bounce.payload->>'permanent' = 'true'");
+  });
+
   it('skips the wave for people already queued in the same campaign', () => {
     const { sql } = buildAudienceQuery(
       organizationId,

@@ -45,8 +45,8 @@ export interface ApiConfig {
     integrationToken: string;
   };
   email: {
-    /** Тот же секрет, что у воркера: им подписаны ссылки внутри писем. */
-    linkSecret: string;
+    /** Секрет в адресе вебхука Unisender Go: другой аутентификации у него нет. */
+    webhookSecret: string;
   };
 }
 
@@ -99,7 +99,7 @@ export function loadConfig(): ApiConfig {
       integrationToken: lockerIntegrationToken,
     },
     email: {
-      linkSecret: required('CAMPAIGN_LINK_SECRET', 'local-campaign-link-secret-change-me'),
+      webhookSecret: required('CAMPAIGN_WEBHOOK_SECRET', 'local-campaign-webhook-secret-change-me'),
     },
   };
 }

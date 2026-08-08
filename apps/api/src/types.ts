@@ -22,6 +22,9 @@ declare module 'fastify' {
     requirePermission: (
       permission: Permission,
     ) => (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
+    requireAnyPermission: (
+      permissions: Permission[],
+    ) => (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
   }
 
   interface FastifyRequest {

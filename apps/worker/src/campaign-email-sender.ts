@@ -1,7 +1,6 @@
-import { signCampaignLink } from '@cpi-crm/domain';
-import { createTransport, type Transporter } from 'nodemailer';
 import type { Pool } from 'pg';
 
+import type { CampaignAttachment, CampaignAttachmentStore } from './campaign-attachments.js';
 import {
   claimQueue,
   finishCompletedCampaigns,
@@ -14,49 +13,50 @@ import {
 } from './campaign-delivery.js';
 
 /**
- * Отправка кампаний по email через собственный SMTP (Яндекс 360).
+ * Отправка кампаний по email через Unisender Go.
  *
- * Ящик Яндекса пропускает 300 писем в сутки, и превышение не просто отбивается:
- * отправка блокируется на сутки, а каждая новая попытка продлевает блокировку.
- * Поэтому дневная квота считается до отправки, а на отказ сервера воркер
- * останавливает весь проход, вместо того чтобы перебирать очередь дальше.
+ * Провайдер взят вместо собственного SMTP по двум причинам: ящик Яндекса отдаёт
+ * 300 писем в сутки, а главное — у SMTP нет обратной связи. Здесь же приходят
+ * статусы доставки, и по ним база сама чистится от мёртвых адресов.
  *
- * Статусов доставки у SMTP нет: открытие собирается пикселем, отписка — своей
- * ссылкой, а недоставленные письма падают отчётами в ящик отправителя.
+ * `metadata.recipient_id` — ключ, по которому вебхук находит нашу запись: адрес
+ * для этого не годится, один человек получает несколько рассылок.
+ *
+ * Отписку показывает сам провайдер: свою ссылку добавлять нельзя, иначе в письме
+ * их окажется две.
  */
 
 export interface CampaignEmailSenderOptions {
-  readonly host: string;
-  readonly port: number;
-  readonly user: string;
-  readonly password: string;
+  /** Пустой ключ выключает email-канал: воркер не должен падать без рассылок. */
+  readonly apiKey: string;
+  readonly apiUrl: string;
   readonly fromEmail: string;
   readonly fromName: string;
   readonly replyTo: string;
   readonly botLink: string;
-  readonly publicUrl: string;
-  readonly linkSecret: string;
+  /** Предохранитель от случайной отправки всей базы: потолок за сутки. */
   readonly dailyLimit: number;
   readonly batchSize: number;
 }
 
-/** Ответ SMTP: 4xx — «попробуйте позже», 5xx — окончательный отказ. */
-interface SmtpError {
-  responseCode?: number;
-  message: string;
+interface SendResponse {
+  status?: string;
+  job_id?: string;
+  failed_emails?: Record<string, string>;
+  code?: number;
+  message?: string;
 }
 
 export class CampaignEmailSender {
-  #transport: Transporter | undefined;
-
   public constructor(
     private readonly pool: Pool,
+    private readonly attachments: CampaignAttachmentStore,
     private readonly options: CampaignEmailSenderOptions,
   ) {}
 
-  /** @returns сколько писем принял SMTP-сервер за проход */
+  /** @returns сколько писем принял провайдер за проход */
   public async processOnce(): Promise<number> {
-    if (!this.options.host || !this.options.user) return 0;
+    if (!this.options.apiKey) return 0;
     const remaining = this.options.dailyLimit - (await this.sentLastDay());
     if (remaining <= 0) return 0;
 
@@ -68,20 +68,21 @@ export class CampaignEmailSender {
     if (queued.length === 0) return 0;
 
     let sent = 0;
-    for (const recipient of queued) {
-      const outcome = await this.deliver(recipient);
-      if (outcome === 'STOP_PASS') break;
-      if (outcome === 'SENT') sent += 1;
-      await sleep(Math.ceil(1000 / Math.max(1, recipient.messages_per_second)));
+    try {
+      for (const recipient of queued) {
+        const outcome = await this.deliver(recipient);
+        if (outcome === 'STOP_PASS') break;
+        if (outcome === 'SENT') sent += 1;
+        await sleep(Math.ceil(1000 / Math.max(1, recipient.messages_per_second)));
+      }
+    } finally {
+      this.attachments.clear();
     }
     await finishCompletedCampaigns(this.pool);
     return sent;
   }
 
-  /**
-   * Лимит Яндекса скользящий, поэтому считаем именно за прошедшие сутки, а не
-   * с начала календарного дня.
-   */
+  /** Лимит считается за прошедшие сутки, а не с начала календарного дня. */
   private async sentLastDay(): Promise<number> {
     const result = await this.pool.query<{ count: string }>(
       `SELECT count(*)::text
@@ -95,66 +96,87 @@ export class CampaignEmailSender {
 
   private async deliver(recipient: QueuedRecipient): Promise<'SENT' | 'FAILED' | 'STOP_PASS'> {
     const text = renderBody(recipient.body, recipient);
-    const unsubscribeUrl = this.link('UNSUBSCRIBE', recipient.id);
+    const files = await this.attachments.load(recipient.campaign_id);
+    const photos = files.filter((file) => file.kind === 'PHOTO');
+    const documents = files.filter((file) => file.kind === 'DOCUMENT');
+
     try {
-      const info = await this.transport().sendMail({
-        from: { name: this.options.fromName, address: this.options.fromEmail },
-        to: recipient.address,
-        replyTo: this.options.replyTo,
-        subject: recipient.subject ?? 'Стартап-студия',
-        text: buildPlaintext(text, recipient, this.options.botLink, unsubscribeUrl),
-        html: buildHtml(text, recipient, this.options.botLink, unsubscribeUrl, {
-          pixelUrl: this.link('OPEN', recipient.id),
+      const response = await fetch(`${this.options.apiUrl}/email/send.json`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'X-API-KEY': this.options.apiKey },
+        body: JSON.stringify({
+          message: {
+            recipients: [
+              { email: recipient.address, metadata: { recipient_id: recipient.id } },
+            ],
+            // Шаблонизатор выключен: подстановки уже сделаны на нашей стороне, а
+            // текст письма пишет человек, и фигурные скобки в нём не команда.
+            template_engine: 'none',
+            body: {
+              html: buildHtml(text, recipient, this.options.botLink, photos),
+              plaintext: buildPlaintext(text, recipient, this.options.botLink),
+            },
+            subject: recipient.subject ?? 'Стартап-студия',
+            from_email: this.options.fromEmail,
+            from_name: this.options.fromName,
+            reply_to: this.options.replyTo,
+            track_read: 1,
+            track_links: 1,
+            ...(documents.length > 0 ? { attachments: documents.map(toApiAttachment) } : {}),
+            ...(photos.length > 0 ? { inline_attachments: photos.map(toInlineAttachment) } : {}),
+          },
         }),
-        headers: {
-          // Почтовые клиенты показывают свою кнопку отписки: без неё письма
-          // чаще помечают спамом, чем ищут ссылку в тексте.
-          'List-Unsubscribe': `<${unsubscribeUrl}>`,
-          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
-        },
       });
-      await markSent(this.pool, recipient, info.messageId);
-      return 'SENT';
-    } catch (caught) {
-      const error = caught as SmtpError;
-      const code = error.responseCode ?? 0;
-      if (code >= 500 && code < 600) {
-        await markFailed(this.pool, recipient, error.message);
+      const payload = (await response.json()) as SendResponse;
+
+      if (response.ok && payload.status === 'success' && !payload.failed_emails) {
+        await markSent(this.pool, recipient, payload.job_id);
+        return 'SENT';
+      }
+      // Провайдер разделяет отказы: по конкретному адресу — его проблема, по
+      // запросу целиком — наша, и дальше в этом проходе идти незачем.
+      const addressError = payload.failed_emails?.[recipient.address];
+      if (addressError) {
+        await markFailed(this.pool, recipient, addressError);
         return 'FAILED';
       }
-      // 4xx, обрыв соединения или исчерпанная квота — очередь ждёт следующего
-      // прохода. Долбиться дальше нельзя: Яндекс продлевает блокировку.
-      console.error('SMTP rejected a campaign email', {
+      if (response.status === 400 || response.status === 404) {
+        await markFailed(this.pool, recipient, payload.message ?? `Ошибка ${String(payload.code)}`);
+        return 'FAILED';
+      }
+      console.error('Unisender Go rejected a campaign email', {
         recipientId: recipient.id,
-        code,
-        error: error.message,
+        httpStatus: response.status,
+        code: payload.code,
+        message: payload.message,
+      });
+      return 'STOP_PASS';
+    } catch (caught) {
+      // Сеть отвалилась: очередь ждёт следующего прохода, письмо не потеряно.
+      console.error('Unisender Go request failed', {
+        recipientId: recipient.id,
+        error: caught instanceof Error ? caught.message : String(caught),
       });
       return 'STOP_PASS';
     }
   }
+}
 
-  private transport(): Transporter {
-    this.#transport ??= createTransport({
-      host: this.options.host,
-      port: this.options.port,
-      secure: this.options.port === 465,
-      auth: { user: this.options.user, pass: this.options.password },
-      pool: true,
-      maxConnections: 1,
-    });
-    return this.#transport;
-  }
+function toApiAttachment(file: CampaignAttachment) {
+  return { type: file.mimeType, name: file.fileName, content: file.bytes.toString('base64') };
+}
 
-  private link(purpose: 'OPEN' | 'UNSUBSCRIBE', recipientId: string): string {
-    const token = signCampaignLink(this.options.linkSecret, purpose, recipientId);
-    const path = purpose === 'OPEN' ? 'pixel' : 'unsubscribe';
-    return `${this.options.publicUrl}/public/campaigns/${path}/${token}`;
-  }
+/** Имя inline-вложения — это его cid в HTML. */
+function toInlineAttachment(file: CampaignAttachment, index: number) {
+  return {
+    type: file.mimeType,
+    name: inlineCid(index),
+    content: file.bytes.toString('base64'),
+  };
+}
 
-  public async close(): Promise<void> {
-    this.#transport?.close();
-    return Promise.resolve();
-  }
+function inlineCid(index: number): string {
+  return `photo${String(index + 1)}`;
 }
 
 /**
@@ -176,12 +198,18 @@ function buildHtml(
   text: string,
   recipient: QueuedRecipient,
   botLink: string,
-  unsubscribeUrl: string,
-  tracking: { pixelUrl: string },
+  photos: readonly CampaignAttachment[],
 ): string {
   const paragraphs = text
     .split(/\n{2,}/u)
     .map((block) => `<p style="margin:0 0 16px">${block.replaceAll('\n', '<br>')}</p>`)
+    .join('');
+  const images = photos
+    .map(
+      (photo, index) =>
+        `<p style="margin:0 0 16px"><img alt="${escapeAttribute(photo.fileName)}" ` +
+        `src="cid:${inlineCid(index)}" style="max-width:100%;height:auto;border-radius:8px"></p>`,
+    )
     .join('');
   const actions = recipient.buttons
     .map(
@@ -194,24 +222,16 @@ function buildHtml(
     .join('');
   return (
     '<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:16px;' +
-    `line-height:1.5;color:#111">${paragraphs}${actions}` +
-    `<p style="margin:24px 0 0;font-size:13px;color:#666">Не хотите получать письма — ` +
-    `<a href="${escapeAttribute(unsubscribeUrl)}" style="color:#666">отпишитесь</a>.</p>` +
-    `<img alt="" height="1" src="${escapeAttribute(tracking.pixelUrl)}" width="1"></div>`
+    `line-height:1.5;color:#111">${paragraphs}${images}${actions}</div>`
   );
 }
 
-function buildPlaintext(
-  text: string,
-  recipient: QueuedRecipient,
-  botLink: string,
-  unsubscribeUrl: string,
-): string {
+function buildPlaintext(text: string, recipient: QueuedRecipient, botLink: string): string {
   const body = text.replaceAll(/<[^>]+>/gu, '');
   const actions = recipient.buttons
     .map((button) => `${button.text}: ${buildReplyLink(botLink, button, recipient.id)}`)
     .join('\n');
-  return [body, actions, `Отписаться: ${unsubscribeUrl}`].filter(Boolean).join('\n\n');
+  return [body, actions].filter(Boolean).join('\n\n');
 }
 
 function escapeAttribute(value: string): string {

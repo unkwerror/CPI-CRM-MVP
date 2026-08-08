@@ -50,10 +50,16 @@ export async function registerFileRoutes(app: FastifyInstance): Promise<void> {
     },
   });
 
+  // Загрузка файла нужна двум разделам: артефактам и вложениям рассылки.
+  const canUpload = app.requireAnyPermission([
+    Permissions.ARTIFACTS_WRITE,
+    Permissions.CAMPAIGNS_WRITE,
+  ]);
+
   app.post(
     '/files/upload-intents',
     {
-      preHandler: app.requirePermission(Permissions.ARTIFACTS_WRITE),
+      preHandler: canUpload,
       schema: {
         tags: ['Файлы'],
         body: Type.Object({
@@ -117,7 +123,7 @@ export async function registerFileRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/files/:id/complete',
     {
-      preHandler: app.requirePermission(Permissions.ARTIFACTS_WRITE),
+      preHandler: canUpload,
       schema: { tags: ['Файлы'], params: Type.Object({ id: Type.String({ format: 'uuid' }) }) },
     },
     async (request) => {
@@ -165,7 +171,12 @@ export async function registerFileRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/files/:id',
     {
-      preHandler: app.requirePermission(Permissions.ARTIFACTS_READ),
+      // Загрузивший ждёт здесь окончания антивирусной проверки, поэтому маршрут
+      // открыт тем же разрешениям, что и сама загрузка.
+      preHandler: app.requireAnyPermission([
+        Permissions.ARTIFACTS_READ,
+        Permissions.CAMPAIGNS_WRITE,
+      ]),
       schema: { tags: ['Файлы'], params: Type.Object({ id: Type.String({ format: 'uuid' }) }) },
     },
     async (request) => {

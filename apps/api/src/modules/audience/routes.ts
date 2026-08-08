@@ -23,6 +23,7 @@ interface ReachabilityRow {
   opted_out_telegram: string;
   opted_out_email: string;
   deleted_forever: string;
+  hidden_telegram_bot: string;
 }
 
 export async function registerAudienceRoutes(app: FastifyInstance): Promise<void> {
@@ -52,7 +53,22 @@ export async function registerAudienceRoutes(app: FastifyInstance): Promise<void
              FROM contact_points contact
              JOIN persons member ON member.id = contact.person_id
             WHERE member.organization_id = $1
-              AND contact.archived_at IS NULL
+              -- Архивный Telegram ID остаётся рабочим: контакт прячет гигиена ФИО.
+              AND (
+                contact.archived_at IS NULL
+                OR (contact.type = 'TELEGRAM' AND contact.messenger_stable_id IS NOT NULL)
+              )
+         ),
+         -- Спрятанные гигиеной, но нажавшие /start: аудитория просьбы дозаполнить ФИО.
+         hidden_bot AS (
+           SELECT count(DISTINCT person.id) AS value
+             FROM persons person
+             JOIN contact_points contact ON contact.person_id = person.id
+            WHERE person.organization_id = $1
+              AND person.archived_at IS NOT NULL
+              AND person.merged_into_person_id IS NULL
+              AND contact.type = 'TELEGRAM'
+              AND contact.messenger_stable_id IS NOT NULL
          ),
          flags AS (
            SELECT canonical.id,
@@ -92,7 +108,8 @@ export async function registerAudienceRoutes(app: FastifyInstance): Promise<void
              WHERE purpose = 'MARKETING_EMAIL'
                AND status IN ('DENIED', 'WITHDRAWN'))::text AS opted_out_email,
            (SELECT count(*) FROM person_deletion_tombstones
-             WHERE organization_id = $1)::text AS deleted_forever`,
+             WHERE organization_id = $1)::text AS deleted_forever,
+           (SELECT value FROM hidden_bot)::text AS hidden_telegram_bot`,
         [organization.id],
       );
       const row = result.rows[0]!;
@@ -107,6 +124,7 @@ export async function registerAudienceRoutes(app: FastifyInstance): Promise<void
           email,
           phone: Number(row.phone),
           unreachable: Number(row.unreachable),
+          hiddenTelegramBot: Number(row.hidden_telegram_bot),
         },
         coverage: {
           botOrEmail: Number(row.bot_or_email),

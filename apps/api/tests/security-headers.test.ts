@@ -35,7 +35,7 @@ const config: ApiConfig = {
     integrationToken: 'test-locker-integration-token-000000',
   },
   email: {
-    linkSecret: 'test-campaign-link-secret',
+    webhookSecret: 'test-campaign-webhook-secret',
   },
 };
 

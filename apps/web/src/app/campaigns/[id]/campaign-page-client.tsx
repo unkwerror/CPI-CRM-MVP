@@ -4,6 +4,7 @@ import { CheckIcon, PauseIcon, SendIcon, UsersIcon } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { toast } from 'sonner';
 
+import { CampaignAttachments } from '@/components/campaign-attachments';
 import { PageHeader, PageStack } from '@/components/page-header';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -242,6 +243,26 @@ export function CampaignPageClient({ id }: { id: string }) {
                       value={segment.lastArtifactWithinDays ?? ''}
                     />
                   </div>
+                  {campaign.channel === 'TELEGRAM' ? (
+                    <label className="flex items-start gap-2 text-sm" htmlFor="segment-hidden">
+                      <input
+                        checked={segment.includeHidden === true}
+                        className="mt-1"
+                        id="segment-hidden"
+                        onChange={(event) =>
+                          setSegment({ ...segment, includeHidden: event.target.checked })
+                        }
+                        type="checkbox"
+                      />
+                      <span>
+                        Включить скрытые карточки
+                        <span className="block text-muted-foreground">
+                          Люди с неполным ФИО спрятаны гигиеной, но бот им писать может. Нужно для
+                          просьбы дозаполнить профиль.
+                        </span>
+                      </span>
+                    </label>
+                  ) : null}
                   <div className="space-y-2">
                     <Label htmlFor="wave-size">Размер волны</Label>
                     <Input
@@ -285,7 +306,12 @@ export function CampaignPageClient({ id }: { id: string }) {
               <Stat label="В очереди" value={campaign.stats.queued} />
               <Stat label="Отправлено" value={campaign.stats.sent} />
               {campaign.channel === 'EMAIL' ? (
-                <Stat label="Открыли" value={campaign.stats.opened} />
+                <>
+                  <Stat label="Доставлено" value={campaign.stats.delivered} />
+                  <Stat label="Открыли" value={campaign.stats.opened} />
+                  <Stat label="Перешли по ссылке" value={campaign.stats.clicked} />
+                  <Stat label="Адрес не существует" value={campaign.stats.bounced} />
+                </>
               ) : null}
               <Stat label="Ошибок" value={campaign.stats.failed} />
               <Stat label="Интересен конкурс" value={campaign.stats.interested} />
@@ -295,6 +321,14 @@ export function CampaignPageClient({ id }: { id: string }) {
           </Card>
         </div>
       </div>
+
+      <CampaignAttachments
+        campaignId={id}
+        channel={campaign.channel}
+        editable={isDraft && canWrite}
+        items={campaign.attachments}
+        onChanged={load}
+      />
 
       {audience?.sample.length ? (
         <Card>

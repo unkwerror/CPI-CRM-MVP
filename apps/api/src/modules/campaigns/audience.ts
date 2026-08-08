@@ -1,9 +1,10 @@
 /**
  * Отбор аудитории кампании.
  *
- * Два правила действуют всегда и не отключаются сегментом: пишем только тем,
- * до кого канал реально дотягивается, и никогда — тем, кто отписался. Всё
- * остальное — необязательные фильтры поверх.
+ * Три правила действуют всегда и не отключаются сегментом: пишем только тем,
+ * до кого канал реально дотягивается, никогда — тем, кто отписался, и никогда —
+ * на адреса с окончательной недоставкой. Всё остальное — необязательные фильтры
+ * поверх.
  */
 
 export type CampaignChannel = 'TELEGRAM' | 'EMAIL';
@@ -17,6 +18,11 @@ export interface CampaignSegment {
   incompleteProfile?: boolean;
   /** Участвовал хотя бы в одном из мероприятий. */
   eventIds?: string[];
+  /**
+   * Включить карточки, спрятанные гигиеной ФИО. Именно им адресована просьба
+   * дозаполнить профиль в боте: в реестре их не видно, но бот им писать может.
+   */
+  includeHidden?: boolean;
 }
 
 export const CONSENT_PURPOSE: Readonly<Record<CampaignChannel, string>> = {
@@ -77,17 +83,37 @@ export function buildAudienceQuery(
   }
 
   const addressColumn = channel === 'TELEGRAM' ? 'telegram' : 'email';
+  // Мёртвый адрес чинить нечем: провайдер уже сказал, что доставки не будет, а
+  // повторные отправки на такие адреса портят репутацию домена целиком.
+  if (channel === 'EMAIL') {
+    filters.push(`NOT EXISTS (
+      SELECT 1 FROM campaign_recipients bounced
+        JOIN campaign_events bounce ON bounce.recipient_id = bounced.id
+       WHERE bounced.address = address.email
+         AND bounce.type = 'BOUNCED'
+         AND bounce.payload->>'permanent' = 'true'
+    )`);
+  }
   const sql = `
     WITH addresses AS (
       SELECT COALESCE(member.merged_into_person_id, member.id) AS person_id,
              min(contact.messenger_stable_id) FILTER (
                WHERE contact.type = 'TELEGRAM' AND contact.messenger_stable_id IS NOT NULL
              ) AS telegram,
-             min(contact.normalized_value) FILTER (WHERE contact.type = 'EMAIL') AS email
+             min(contact.normalized_value) FILTER (
+               WHERE contact.type = 'EMAIL' AND contact.archived_at IS NULL
+             ) AS email
         FROM contact_points contact
         JOIN persons member ON member.id = contact.person_id
        WHERE member.organization_id = $1
-         AND contact.archived_at IS NULL
+         -- Архивный Telegram ID всё равно достижим: контакт прячет гигиена ФИО,
+         -- а не сам человек, и чат с ботом от этого никуда не девается. Удалить
+         -- главный Telegram ID из карточки руками нельзя, так что других причин
+         -- для архивации у него нет.
+         AND (
+           contact.archived_at IS NULL
+           OR (contact.type = 'TELEGRAM' AND contact.messenger_stable_id IS NOT NULL)
+         )
        GROUP BY 1
     ),
     consent AS (
@@ -109,7 +135,7 @@ export function buildAudienceQuery(
       JOIN addresses address ON address.person_id = person.id
       LEFT JOIN consent ON consent.person_id = person.id
      WHERE person.organization_id = $1
-       AND person.archived_at IS NULL
+       ${segment.includeHidden === true ? '' : 'AND person.archived_at IS NULL'}
        AND person.merged_into_person_id IS NULL
        AND address.${addressColumn} IS NOT NULL
        AND (consent.status IS NULL OR consent.status NOT IN ('WITHDRAWN', 'DENIED'))

@@ -1,6 +1,6 @@
 'use client';
 
-import { AtSignIcon, MailIcon, PhoneIcon, SendIcon, UserXIcon } from 'lucide-react';
+import { AtSignIcon, EyeOffIcon, MailIcon, PhoneIcon, SendIcon, UserXIcon } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
@@ -123,6 +123,15 @@ export default function AudiencePage() {
             value={data?.channels.telegramBot ?? 0}
             total={total}
             tone="ok"
+            loading={loading}
+          />
+          <ChannelRow
+            icon={EyeOffIcon}
+            label="Бот есть, карточка скрыта"
+            hint="Нажали /start, но ФИО неполное и карточку спрятала гигиена. В обычную рассылку не попадают — только в просьбу дозаполнить профиль, с галочкой «скрытые карточки»."
+            value={data?.channels.hiddenTelegramBot ?? 0}
+            total={total}
+            tone="warn"
             loading={loading}
           />
           <ChannelRow

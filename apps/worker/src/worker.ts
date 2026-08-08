@@ -2,6 +2,7 @@ import { S3Client } from '@aws-sdk/client-s3';
 import { Pool } from 'pg';
 
 import { reevaluateArtifactVersion } from './artifact-countability.js';
+import { CampaignAttachmentStore } from './campaign-attachments.js';
 import { CampaignEmailSender } from './campaign-email-sender.js';
 import { CampaignSender } from './campaign-sender.js';
 import type { WorkerConfig } from './config.js';
@@ -58,23 +59,20 @@ export class WorkerRuntime {
         }
       },
     );
-    this.#campaigns = new CampaignSender(this.#pool, {
+    const attachments = new CampaignAttachmentStore(this.#pool, s3, config.storage.privateBucket);
+    this.#campaigns = new CampaignSender(this.#pool, attachments, {
       telegramBotToken: config.campaigns.telegramBotToken,
       telegramApiUrl: config.campaigns.telegramApiUrl,
       batchSize: config.campaigns.batchSize,
     });
-    this.#campaignEmails = new CampaignEmailSender(this.#pool, {
-      host: config.campaigns.smtpHost,
-      port: config.campaigns.smtpPort,
-      user: config.campaigns.smtpUser,
-      password: config.campaigns.smtpPassword,
+    this.#campaignEmails = new CampaignEmailSender(this.#pool, attachments, {
+      apiKey: config.campaigns.unisenderApiKey,
+      apiUrl: config.campaigns.unisenderApiUrl,
       fromEmail: config.campaigns.fromEmail,
       fromName: config.campaigns.fromName,
       replyTo: config.campaigns.replyTo,
       botLink: config.campaigns.telegramBotLink,
-      publicUrl: config.campaigns.publicUrl,
-      linkSecret: config.campaigns.linkSecret,
-      dailyLimit: config.campaigns.smtpDailyLimit,
+      dailyLimit: config.campaigns.emailDailyLimit,
       batchSize: config.campaigns.batchSize,
     });
   }
@@ -121,7 +119,6 @@ export class WorkerRuntime {
     if (this.#campaignTimer) clearInterval(this.#campaignTimer);
     if (this.#activePoll) await Promise.allSettled([this.#activePoll]);
     await Promise.allSettled([...this.#tasks]);
-    await this.#campaignEmails.close();
     await this.#pool.end();
     console.info('CPI CRM worker stopped', { workerId: this.config.workerId });
   }

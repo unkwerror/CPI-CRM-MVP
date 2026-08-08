@@ -37,21 +37,16 @@ export interface WorkerConfig {
     readonly telegramApiUrl: string;
     readonly intervalMs: number;
     readonly batchSize: number;
-    /** Пустой хост выключает email-канал так же, как пустой токен — Telegram. */
-    readonly smtpHost: string;
-    readonly smtpPort: number;
-    readonly smtpUser: string;
-    readonly smtpPassword: string;
-    /** Потолок ящика Яндекса: 300 писем в сутки, превышение блокирует отправку. */
-    readonly smtpDailyLimit: number;
+    /** Пустой ключ выключает email-канал так же, как пустой токен — Telegram. */
+    readonly unisenderApiKey: string;
+    readonly unisenderApiUrl: string;
+    /** Предохранитель от случайной отправки всей базы за один день. */
+    readonly emailDailyLimit: number;
     readonly fromEmail: string;
     readonly fromName: string;
     readonly replyTo: string;
     /** Куда ведут кнопки отклика в письме: у email нет callback-кнопок. */
     readonly telegramBotLink: string;
-    /** Внешний адрес CRM: на него ведут пиксель открытия и ссылка отписки. */
-    readonly publicUrl: string;
-    readonly linkSecret: string;
   };
 }
 
@@ -91,17 +86,16 @@ export function loadConfig(): WorkerConfig {
       telegramApiUrl: value('TELEGRAM_API_URL', 'https://api.telegram.org'),
       intervalMs: integer('CAMPAIGN_INTERVAL_MS', 15_000, 1_000),
       batchSize: integer('CAMPAIGN_BATCH_SIZE', 100, 1, 1_000),
-      smtpHost: process.env.SMTP_HOST?.trim() ?? '',
-      smtpPort: integer('SMTP_PORT', 465, 1, 65_535),
-      smtpUser: process.env.SMTP_USER?.trim() ?? '',
-      smtpPassword: process.env.SMTP_PASSWORD ?? '',
-      smtpDailyLimit: integer('SMTP_DAILY_LIMIT', 300, 1, 100_000),
+      unisenderApiKey: process.env.UNISENDER_API_KEY?.trim() ?? '',
+      unisenderApiUrl: value(
+        'UNISENDER_API_URL',
+        'https://goapi.unisender.ru/ru/transactional/api/v1',
+      ).replace(/\/+$/u, ''),
+      emailDailyLimit: integer('CAMPAIGN_EMAIL_DAILY_LIMIT', 3_000, 1, 100_000),
       fromEmail: value('CAMPAIGN_FROM_EMAIL', 'no-reply@example.org'),
       fromName: value('CAMPAIGN_FROM_NAME', 'Стартап-студия ЦПИ'),
       replyTo: value('CAMPAIGN_REPLY_TO', process.env.CAMPAIGN_FROM_EMAIL ?? 'no-reply@example.org'),
       telegramBotLink: value('CAMPAIGN_BOT_LINK', 'https://t.me/cpi_artifacts_bot'),
-      publicUrl: value('CAMPAIGN_PUBLIC_URL', 'http://localhost:3000/api').replace(/\/+$/u, ''),
-      linkSecret: value('CAMPAIGN_LINK_SECRET', 'local-campaign-link-secret-change-me'),
     },
   };
 }

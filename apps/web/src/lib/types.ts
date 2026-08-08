@@ -562,6 +562,7 @@ export interface CampaignSegment {
   lastArtifactWithinDays?: number;
   incompleteProfile?: boolean;
   eventIds?: string[];
+  includeHidden?: boolean;
 }
 
 export interface Campaign {
@@ -585,7 +586,18 @@ export interface Campaign {
   version: number;
 }
 
+export interface CampaignAttachment {
+  id: string;
+  kind: 'PHOTO' | 'DOCUMENT';
+  position: number;
+  fileObjectId: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+}
+
 export interface CampaignDetail extends Campaign {
+  attachments: CampaignAttachment[];
   stats: {
     queued: number;
     sent: number;
@@ -595,6 +607,8 @@ export interface CampaignDetail extends Campaign {
     moreInfo: number;
     unsubscribed: number;
     opened: number;
+    clicked: number;
+    bounced: number;
   };
 }
 
@@ -613,6 +627,8 @@ export interface AudienceReachability {
     email: number;
     phone: number;
     unreachable: number;
+    /** Нажали /start в боте, но карточка спрятана гигиеной ФИО. */
+    hiddenTelegramBot: number;
   };
   coverage: {
     botOrEmail: number;

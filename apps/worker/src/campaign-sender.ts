@@ -1,5 +1,6 @@
 import type { Pool } from 'pg';
 
+import type { CampaignAttachment, CampaignAttachmentStore } from './campaign-attachments.js';
 import {
   claimQueue,
   finishCompletedCampaigns,
@@ -18,6 +19,10 @@ import {
  * числовой Telegram ID. Скорость ограничена настройкой кампании: Telegram
  * начинает отдавать 429 примерно после 30 сообщений в секунду, а при массовой
  * рассылке безопасный потолок ниже.
+ *
+ * Вложения уходят отдельными сообщениями после текста: подпись к фото ограничена
+ * 1024 символами против 4096 у сообщения, а кнопки отклика должны остаться на
+ * тексте, иначе человек нажмёт их в переписке дважды.
  */
 
 export interface CampaignSenderOptions {
@@ -36,6 +41,7 @@ interface TelegramResponse {
 export class CampaignSender {
   public constructor(
     private readonly pool: Pool,
+    private readonly attachments: CampaignAttachmentStore,
     private readonly options: CampaignSenderOptions,
   ) {}
 
@@ -46,11 +52,15 @@ export class CampaignSender {
     if (queued.length === 0) return 0;
 
     let sent = 0;
-    for (const recipient of queued) {
-      const delay = Math.ceil(1000 / Math.max(1, recipient.messages_per_second));
-      const outcome = await this.deliver(recipient);
-      if (outcome.sent) sent += 1;
-      await sleep(delay);
+    try {
+      for (const recipient of queued) {
+        const delay = Math.ceil(1000 / Math.max(1, recipient.messages_per_second));
+        const outcome = await this.deliver(recipient);
+        if (outcome.sent) sent += 1;
+        await sleep(delay);
+      }
+    } finally {
+      this.attachments.clear();
     }
     await finishCompletedCampaigns(this.pool);
     return sent;
@@ -77,6 +87,7 @@ export class CampaignSender {
       if (payload.ok) {
         const messageId = payload.result?.message_id;
         await markSent(this.pool, recipient, messageId === undefined ? undefined : String(messageId));
+        await this.sendAttachments(recipient);
         return { sent: true };
       }
       // 429 — временная просадка: возвращаем в очередь, следующий проход повторит.
@@ -91,6 +102,50 @@ export class CampaignSender {
       return { sent: false };
     }
   }
+
+  /**
+   * Текст уже доставлен и отмечен, поэтому сбой вложения только пишется в лог:
+   * помечать получателя неудачным нельзя — он получит сообщение второй раз.
+   */
+  private async sendAttachments(recipient: QueuedRecipient): Promise<void> {
+    const files = await this.attachments.load(recipient.campaign_id);
+    for (const file of files) {
+      const method = file.kind === 'PHOTO' ? 'sendPhoto' : 'sendDocument';
+      const field = file.kind === 'PHOTO' ? 'photo' : 'document';
+      const form = new FormData();
+      form.set('chat_id', recipient.address);
+      form.set(field, new Blob([toArrayBuffer(file)], { type: file.mimeType }), file.fileName);
+      try {
+        const response = await fetch(
+          `${this.options.telegramApiUrl}/bot${this.options.telegramBotToken}/${method}`,
+          { method: 'POST', body: form },
+        );
+        const payload = (await response.json()) as TelegramResponse;
+        if (!payload.ok) {
+          console.error('Telegram rejected a campaign attachment', {
+            recipientId: recipient.id,
+            fileName: file.fileName,
+            error: payload.description,
+          });
+        }
+      } catch (error) {
+        console.error('Telegram attachment request failed', {
+          recipientId: recipient.id,
+          fileName: file.fileName,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      await sleep(Math.ceil(1000 / Math.max(1, recipient.messages_per_second)));
+    }
+  }
+}
+
+/** Blob не принимает Buffer как есть: нужен именно его срез памяти. */
+function toArrayBuffer(file: CampaignAttachment): ArrayBuffer {
+  return file.bytes.buffer.slice(
+    file.bytes.byteOffset,
+    file.bytes.byteOffset + file.bytes.byteLength,
+  ) as ArrayBuffer;
 }
 
 /**

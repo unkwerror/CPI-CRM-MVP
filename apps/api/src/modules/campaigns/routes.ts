@@ -14,7 +14,7 @@ import {
   type CampaignChannel,
   type CampaignSegment,
 } from './audience.js';
-import { registerCampaignEmailTracking } from './email-tracking.js';
+import { registerCampaignEmailWebhook } from './email-webhook.js';
 
 /**
  * Рассылки активации базы.
@@ -29,6 +29,7 @@ const SegmentSchema = Type.Object({
   lastArtifactWithinDays: Type.Optional(Type.Integer({ minimum: 1, maximum: 3650 })),
   incompleteProfile: Type.Optional(Type.Boolean()),
   eventIds: Type.Optional(Type.Array(Type.String({ format: 'uuid' }), { maxItems: 50 })),
+  includeHidden: Type.Optional(Type.Boolean()),
 });
 
 const ButtonSchema = Type.Object({
@@ -185,7 +186,7 @@ export async function registerCampaignRoutes(app: FastifyInstance): Promise<void
     async (request) => {
       const { id } = request.params as { id: string };
       const organization = await getOrganizationContext(app.pool);
-      const [campaign, stats] = await Promise.all([
+      const [campaign, stats, attachments] = await Promise.all([
         app.pool.query<CampaignRow>(
           `SELECT ${CAMPAIGN_COLUMNS} FROM campaigns
             WHERE id = $1 AND organization_id = $2 AND archived_at IS NULL`,
@@ -200,9 +201,11 @@ export async function registerCampaignRoutes(app: FastifyInstance): Promise<void
           more_info: string;
           unsubscribed: string;
           opened: string;
+          clicked: string;
+          bounced: string;
         }>(
-          // Открытие письма — событие, а не статус получателя: статус говорит
-          // только о том, что письмо ушло в SMTP.
+          // Открытие и переход — события, а не статусы получателя: статус говорит
+          // только о том, приняли ли письмо у нас.
           `SELECT
              count(*) FILTER (WHERE recipient.status = 'QUEUED')::text AS queued,
              count(*) FILTER (WHERE recipient.status IN ('SENT', 'DELIVERED'))::text AS sent,
@@ -211,20 +214,26 @@ export async function registerCampaignRoutes(app: FastifyInstance): Promise<void
              count(*) FILTER (WHERE recipient.reply = 'INTERESTED')::text AS interested,
              count(*) FILTER (WHERE recipient.reply = 'MORE_INFO')::text AS more_info,
              count(*) FILTER (WHERE recipient.reply = 'UNSUBSCRIBED')::text AS unsubscribed,
-             count(*) FILTER (WHERE opened.recipient_id IS NOT NULL)::text AS opened
+             count(*) FILTER (WHERE events.opened)::text AS opened,
+             count(*) FILTER (WHERE events.clicked)::text AS clicked,
+             count(*) FILTER (WHERE events.bounced)::text AS bounced
            FROM campaign_recipients recipient
            LEFT JOIN LATERAL (
-             SELECT 1 AS recipient_id FROM campaign_events
-              WHERE recipient_id = recipient.id AND type = 'OPENED' LIMIT 1
-           ) opened ON true
+             SELECT bool_or(type = 'OPENED') AS opened,
+                    bool_or(type = 'CLICKED') AS clicked,
+                    bool_or(type = 'BOUNCED' AND payload->>'permanent' = 'true') AS bounced
+               FROM campaign_events WHERE recipient_id = recipient.id
+           ) events ON true
           WHERE recipient.campaign_id = $1`,
           [id],
         ),
+        loadAttachments(app, id),
       ]);
       if (!campaign.rows[0]) throw new HttpProblem(404, 'Рассылка не найдена');
       const row = stats.rows[0]!;
       return {
         ...mapCampaign(campaign.rows[0]),
+        attachments,
         stats: {
           queued: Number(row.queued),
           sent: Number(row.sent),
@@ -234,6 +243,8 @@ export async function registerCampaignRoutes(app: FastifyInstance): Promise<void
           moreInfo: Number(row.more_info),
           unsubscribed: Number(row.unsubscribed),
           opened: Number(row.opened),
+          clicked: Number(row.clicked),
+          bounced: Number(row.bounced),
         },
       };
     },
@@ -505,7 +516,206 @@ export async function registerCampaignRoutes(app: FastifyInstance): Promise<void
   );
 
   await registerCampaignReplyRoute(app);
-  registerCampaignEmailTracking(app);
+  registerAttachmentRoutes(app);
+  registerCampaignEmailWebhook(app);
+}
+
+/**
+ * Вложения рассылки.
+ *
+ * Файл сначала загружается общим механизмом (`/files/upload-intents`), проходит
+ * антивирус и только потом прикладывается сюда — иначе рассылка стала бы способом
+ * разослать по базе непроверенный файл.
+ */
+function registerAttachmentRoutes(app: FastifyInstance): void {
+  app.post(
+    '/campaigns/:id/attachments',
+    {
+      preHandler: app.requirePermission(Permissions.CAMPAIGNS_WRITE),
+      schema: {
+        tags: ['Рассылки'],
+        summary: 'Приложить файл к черновику',
+        params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
+        body: Type.Object({
+          fileObjectId: Type.String({ format: 'uuid' }),
+          kind: Type.Union([Type.Literal('PHOTO'), Type.Literal('DOCUMENT')]),
+        }),
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const body = request.body as { fileObjectId: string; kind: AttachmentKind };
+      const organization = await getOrganizationContext(app.pool);
+      const created = await transaction(app.pool, async (client) => {
+        const campaign = await client.query<{ status: string }>(
+          `SELECT status FROM campaigns
+            WHERE id = $1 AND organization_id = $2 AND archived_at IS NULL FOR UPDATE`,
+          [id, organization.id],
+        );
+        if (!campaign.rows[0]) throw new HttpProblem(404, 'Рассылка не найдена');
+        if (campaign.rows[0].status !== 'DRAFT')
+          throw new HttpProblem(
+            409,
+            'Вложения меняются только в черновике',
+            'Часть аудитории уже получила письмо с текущим набором файлов.',
+          );
+
+        const file = await client.query<{
+          status: string;
+          size_bytes: string | null;
+          declared_mime_type: string | null;
+          detected_mime_type: string | null;
+        }>(
+          `SELECT status, size_bytes, declared_mime_type, detected_mime_type
+             FROM file_objects WHERE id = $1`,
+          [body.fileObjectId],
+        );
+        const stored = file.rows[0];
+        if (!stored) throw new HttpProblem(404, 'Файл не найден');
+        if (stored.status !== 'AVAILABLE')
+          throw new HttpProblem(
+            409,
+            'Файл ещё не проверен',
+            'Вложение появится, когда антивирус закончит проверку.',
+          );
+        const size = Number(stored.size_bytes ?? '0');
+        if (size > MAX_ATTACHMENT_BYTES)
+          throw new HttpProblem(
+            400,
+            'Файл слишком большой для письма',
+            'Unisender Go принимает вложения до 7 МБ. Крупные файлы лучше отдавать ссылкой.',
+          );
+        const mime = stored.detected_mime_type ?? stored.declared_mime_type ?? '';
+        if (body.kind === 'PHOTO' && !mime.startsWith('image/'))
+          throw new HttpProblem(400, 'Фотографией может быть только изображение');
+
+        const total = await client.query<{ count: string; bytes: string }>(
+          `SELECT count(*)::text, COALESCE(sum(file.size_bytes), 0)::text AS bytes
+             FROM campaign_attachments attachment
+             JOIN file_objects file ON file.id = attachment.file_object_id
+            WHERE attachment.campaign_id = $1`,
+          [id],
+        );
+        const counters = total.rows[0]!;
+        if (Number(counters.count) >= MAX_ATTACHMENTS)
+          throw new HttpProblem(409, `Больше ${String(MAX_ATTACHMENTS)} вложений не поместится`);
+        if (Number(counters.bytes) + size > MAX_TOTAL_BYTES)
+          throw new HttpProblem(
+            400,
+            'Письмо получится слишком тяжёлым',
+            'Суммарный вес вложений не должен превышать 10 МБ, иначе письма начнут отбиваться.',
+          );
+
+        const inserted = await client.query<AttachmentRow>(
+          `INSERT INTO campaign_attachments
+             (campaign_id, file_object_id, kind, position, created_by_user_id)
+           SELECT $1, $2, $3,
+                  COALESCE((SELECT max(position) FROM campaign_attachments WHERE campaign_id = $1), 0) + 1,
+                  $4
+           ON CONFLICT (campaign_id, file_object_id) DO NOTHING
+           RETURNING id, kind, position, file_object_id`,
+          [id, body.fileObjectId, body.kind, request.authUser!.userId],
+        );
+        if (!inserted.rows[0]) throw new HttpProblem(409, 'Этот файл уже приложен');
+        await writeAudit(client, {
+          actor: request.authUser!,
+          requestId: request.id,
+          action: 'campaign.attachment_added',
+          entityType: 'campaign',
+          entityId: id,
+          after: { fileObjectId: body.fileObjectId, kind: body.kind },
+        });
+        return inserted.rows[0];
+      });
+      const attachments = await loadAttachments(app, id);
+      return reply
+        .code(201)
+        .send(attachments.find((item) => item.id === created.id) ?? attachments[0]);
+    },
+  );
+
+  app.delete(
+    '/campaigns/:id/attachments/:attachmentId',
+    {
+      preHandler: app.requirePermission(Permissions.CAMPAIGNS_WRITE),
+      schema: {
+        tags: ['Рассылки'],
+        summary: 'Убрать вложение из черновика',
+        params: Type.Object({
+          id: Type.String({ format: 'uuid' }),
+          attachmentId: Type.String({ format: 'uuid' }),
+        }),
+      },
+    },
+    async (request, reply) => {
+      const { id, attachmentId } = request.params as { id: string; attachmentId: string };
+      const organization = await getOrganizationContext(app.pool);
+      await transaction(app.pool, async (client) => {
+        const campaign = await client.query<{ status: string }>(
+          `SELECT status FROM campaigns
+            WHERE id = $1 AND organization_id = $2 AND archived_at IS NULL FOR UPDATE`,
+          [id, organization.id],
+        );
+        if (!campaign.rows[0]) throw new HttpProblem(404, 'Рассылка не найдена');
+        if (campaign.rows[0].status !== 'DRAFT')
+          throw new HttpProblem(409, 'Вложения меняются только в черновике');
+        const deleted = await client.query(
+          `DELETE FROM campaign_attachments WHERE id = $1 AND campaign_id = $2`,
+          [attachmentId, id],
+        );
+        if (deleted.rowCount === 0) throw new HttpProblem(404, 'Вложение не найдено');
+        await writeAudit(client, {
+          actor: request.authUser!,
+          requestId: request.id,
+          action: 'campaign.attachment_removed',
+          entityType: 'campaign',
+          entityId: id,
+          before: { attachmentId },
+        });
+      });
+      return reply.code(204).send();
+    },
+  );
+}
+
+type AttachmentKind = 'PHOTO' | 'DOCUMENT';
+
+interface AttachmentRow {
+  id: string;
+  kind: AttachmentKind;
+  position: number;
+  file_object_id: string;
+  original_filename?: string | null;
+  size_bytes?: string | null;
+  mime_type?: string | null;
+}
+
+/** Потолки провайдера: письмо с вложением тяжелее 7 МБ он не примет. */
+const MAX_ATTACHMENT_BYTES = 7 * 1024 * 1024;
+const MAX_TOTAL_BYTES = 10 * 1024 * 1024;
+const MAX_ATTACHMENTS = 10;
+
+async function loadAttachments(app: FastifyInstance, campaignId: string) {
+  const result = await app.pool.query<AttachmentRow>(
+    `SELECT attachment.id, attachment.kind, attachment.position, attachment.file_object_id,
+            file.original_filename,
+            file.size_bytes::text AS size_bytes,
+            COALESCE(file.detected_mime_type, file.declared_mime_type) AS mime_type
+       FROM campaign_attachments attachment
+       JOIN file_objects file ON file.id = attachment.file_object_id
+      WHERE attachment.campaign_id = $1
+      ORDER BY attachment.position`,
+    [campaignId],
+  );
+  return result.rows.map((row) => ({
+    id: row.id,
+    kind: row.kind,
+    position: row.position,
+    fileObjectId: row.file_object_id,
+    fileName: row.original_filename ?? 'файл',
+    mimeType: row.mime_type ?? 'application/octet-stream',
+    sizeBytes: Number(row.size_bytes ?? '0'),
+  }));
 }
 
 /**

@@ -105,6 +105,22 @@ export async function registerAuth(app: FastifyInstance): Promise<void> {
     }
   });
 
+  // Часть механизмов общая для нескольких разделов: загрузка файла нужна и тому,
+  // кто ведёт артефакты, и тому, кто готовит рассылку.
+  app.decorate('requireAnyPermission', (permissions: Permission[]) => async (request, reply) => {
+    await app.authenticate(request, reply);
+    const allowed =
+      request.authUser !== null &&
+      permissions.some((permission) => hasPermission(request.authUser!.roles, permission));
+    if (!allowed) {
+      throw new HttpProblem(
+        403,
+        'Доступ запрещён',
+        `Требуется одно из разрешений: ${permissions.join(', ')}.`,
+      );
+    }
+  });
+
   const issuer = new URL(app.config.oidc.issuer);
   let oidcConfiguration: Promise<oidc.Configuration> | undefined;
   const configuration = () => {

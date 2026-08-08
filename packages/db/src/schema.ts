@@ -1916,6 +1916,36 @@ export const campaignEvents = pgTable(
   ],
 );
 
+/**
+ * Вложения рассылки. Байты лежат в общем хранилище файлов, поэтому вложение
+ * проходит тот же антивирус, что и артефакты.
+ */
+export const campaignAttachments = pgTable(
+  'campaign_attachments',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    campaignId: uuid('campaign_id')
+      .notNull()
+      .references(() => campaigns.id, { onDelete: 'cascade' }),
+    fileObjectId: uuid('file_object_id')
+      .notNull()
+      .references(() => fileObjects.id, { onDelete: 'restrict' }),
+    /** PHOTO попадает в тело письма картинкой, DOCUMENT — файлом во вложении. */
+    kind: text('kind').notNull(),
+    position: integer('position').notNull().default(1),
+    createdByUserId: uuid('created_by_user_id').references(() => appUsers.id, {
+      onDelete: 'set null',
+    }),
+    createdAt: timestamptz('created_at').notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('campaign_attachments_file_uidx').on(table.campaignId, table.fileObjectId),
+    index('campaign_attachments_campaign_idx').on(table.campaignId, table.position),
+    check('campaign_attachments_kind_check', sql`${table.kind} IN ('PHOTO', 'DOCUMENT')`),
+    check('campaign_attachments_position_check', sql`${table.position} BETWEEN 1 AND 20`),
+  ],
+);
+
 export const personDeletionTombstones = pgTable(
   'person_deletion_tombstones',
   {
