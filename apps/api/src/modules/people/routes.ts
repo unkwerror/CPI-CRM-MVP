@@ -1073,13 +1073,16 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
                 messenger_stable_id: string | null;
                 is_primary: boolean;
               }>(
+                // Приведение к типу обязательно: тот же параметр стоит и слева от
+                // присваивания, и в проверке на NULL, а по «IS NOT NULL» тип не
+                // выводится — для контакта без Telegram ID запрос иначе падает.
                 `UPDATE contact_points
                     SET type = $2,
                         raw_value = $3,
                         normalized_value = $4,
-                        messenger_stable_id = $5,
+                        messenger_stable_id = $5::text,
                         is_primary = $6,
-                        is_verified = CASE WHEN $5 IS NOT NULL THEN true ELSE is_verified END,
+                        is_verified = CASE WHEN $5::text IS NOT NULL THEN true ELSE is_verified END,
                         updated_at = now(),
                         version = version + 1
                   WHERE id = $1 AND archived_at IS NULL
@@ -1521,9 +1524,10 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
                   )`,
           [memberIds],
         );
-        await client.query(`DELETE FROM merge_operations WHERE master_person_id = ANY($1::uuid[])`, [
-          memberIds,
-        ]);
+        await client.query(
+          `DELETE FROM merge_operations WHERE master_person_id = ANY($1::uuid[])`,
+          [memberIds],
+        );
         // Уцелевшие слияния могут ссылаться на пару дублей этого человека —
         // сама пара уходит, ссылка на неё необязательна.
         await client.query(

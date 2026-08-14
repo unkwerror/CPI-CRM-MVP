@@ -191,18 +191,21 @@ export class WorkerRuntime {
   }
 }
 
-function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
+// Пауза между опросами берётся на каждом витке цикла, поэтому слушатель отмены
+// обязательно снимается: иначе за сутки на сигнале копятся десятки тысяч
+// подписок и процесс упирается в предел кучи.
+export function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.resolve();
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, milliseconds);
-    signal.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, milliseconds);
+    signal.addEventListener('abort', onAbort, { once: true });
   });
 }
 
