@@ -342,6 +342,7 @@ services:
       - 443:443/udp
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./conf.d:/etc/caddy/conf.d:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
@@ -354,6 +355,9 @@ services:
         aliases:
           - ${ID_DOMAIN}
       backend: {}
+      # Этот же Caddy публикует бота сбора артефактов, а его контейнеры видны
+      # только в общей сети их стека.
+      artifacts: {}
     healthcheck:
       test: [CMD, caddy, version]
       interval: 30s
@@ -394,6 +398,11 @@ networks:
   frontend:
   backend:
     internal: true
+  # Сеть принадлежит стеку бота сбора артефактов; deploy.sh создаёт её, если
+  # бота на машине ещё нет.
+  artifacts:
+    external: true
+    name: cpi-artifacts-caddy
 
 volumes:
   postgres_data:

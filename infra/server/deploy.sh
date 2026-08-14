@@ -82,6 +82,11 @@ if [ "${swap_kib:-0}" -lt 2000000 ]; then
   exit 1
 fi
 
+# Caddy публикует и соседний стек бота сбора артефактов, поэтому его сеть нужна
+# ещё до проверки конфигурации — даже на машине, где бота пока нет.
+docker network inspect cpi-artifacts-caddy >/dev/null 2>&1 ||
+  docker network create cpi-artifacts-caddy >/dev/null
+
 compose=(docker compose --env-file "$env_file" -f "$compose_file")
 "${compose[@]}" config --quiet
 if "$check_only"; then
