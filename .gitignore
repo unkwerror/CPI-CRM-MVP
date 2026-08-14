@@ -9,6 +9,9 @@ test-results/
 .env.local
 infra/server/.env.server
 infra/server/backups/
+# Блоки соседних сайтов зависят от машины и живут только на сервере.
+infra/server/conf.d/*.caddy
+!infra/server/conf.d/00-README.caddy
 infra/server/.backup.lock
 *.log
 .DS_Store
