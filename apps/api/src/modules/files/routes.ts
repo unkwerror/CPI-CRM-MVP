@@ -8,7 +8,7 @@ import {
   type GetObjectCommandInput,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { Permissions } from '@cpi-crm/domain';
+import { incomingObjectKey, Permissions } from '@cpi-crm/domain';
 import { Type } from '@sinclair/typebox';
 import type { FastifyInstance } from 'fastify';
 
@@ -80,7 +80,10 @@ export async function registerFileRoutes(app: FastifyInstance): Promise<void> {
       ) {
         throw new HttpProblem(400, 'Тип файла не разрешён');
       }
-      const objectKey = `incoming/${new Date().toISOString().slice(0, 10)}/${randomUUID()}`;
+      const objectKey = incomingObjectKey(app.config.storage.prefix, {
+        uploadId: randomUUID(),
+        fileName: body.filename,
+      });
       const created = await transaction(app.pool, async (client) => {
         const result = await client.query<{ id: string }>(
           `INSERT INTO file_objects
@@ -88,7 +91,7 @@ export async function registerFileRoutes(app: FastifyInstance): Promise<void> {
            VALUES ($1, $2, $3, $4, $5, $6)
            RETURNING id`,
           [
-            app.config.storage.quarantineBucket,
+            app.config.storage.bucket,
             objectKey,
             body.filename,
             body.mimeType,
@@ -109,7 +112,7 @@ export async function registerFileRoutes(app: FastifyInstance): Promise<void> {
       const uploadUrl = await getSignedUrl(
         s3,
         new PutObjectCommand({
-          Bucket: app.config.storage.quarantineBucket,
+          Bucket: app.config.storage.bucket,
           Key: objectKey,
           ContentLength: body.sizeBytes,
           ContentType: body.mimeType,

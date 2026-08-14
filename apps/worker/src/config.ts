@@ -22,8 +22,10 @@ export interface WorkerConfig {
     readonly region: string;
     readonly accessKey: string;
     readonly secretKey: string;
-    readonly quarantineBucket: string;
-    readonly privateBucket: string;
+    /** Бакет один на CRM и бот: у облачного тарифа их больше одного не бывает. */
+    readonly bucket: string;
+    /** Верхняя папка владельца внутри общего бакета. */
+    readonly prefix: string;
   };
   readonly clamAv: {
     readonly host: string;
@@ -72,8 +74,8 @@ export function loadConfig(): WorkerConfig {
       region: value('S3_REGION', 'us-east-1'),
       accessKey: value('S3_ACCESS_KEY', 'cpi-minio'),
       secretKey: value('S3_SECRET_KEY', 'cpi-minio-local-secret'),
-      quarantineBucket: value('S3_QUARANTINE_BUCKET', 'cpi-quarantine'),
-      privateBucket: value('S3_PRIVATE_BUCKET', 'cpi-private'),
+      bucket: value('S3_BUCKET', 'cpi-artifacts'),
+      prefix: value('S3_PREFIX', 'crm/'),
     },
     clamAv: {
       host: value('CLAMAV_HOST', 'localhost'),

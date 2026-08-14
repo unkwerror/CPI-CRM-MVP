@@ -63,7 +63,8 @@ ssh root@62.113.105.225 'cd /opt/CPI-CRM-MVP && ./infra/server/backup.sh'
 
 В выводе последней строкой будет путь вида
 `/opt/CPI-CRM-MVP/infra/server/backups/20260807T123013Z`. Запомните его: внутри
-`crm.dump`, `keycloak.dump`, `minio/` и `SHA256SUMS`.
+`crm.dump`, `keycloak.dump` и `SHA256SUMS`. Файлов артефактов там нет: они лежат
+в облачном бакете, выгрузить его целиком можно по SFTP из панели хранилища.
 
 ## 4. Выкат одной сессией
 
@@ -85,8 +86,8 @@ ssh root@62.113.105.225 'set -e
 
 `deploy.sh` сам проверит `.env.server`, соберёт образы, прогонит одноразовые
 сервисы `migrate`, `seed` и `participant-hygiene`, а затем дождётся healthchecks.
-Контейнеры `migrate`, `seed`, `participant-hygiene` и `minio-init` завершаются с
-кодом 0 и остаются в статусе `Exited` — так и должно быть.
+Контейнеры `migrate`, `seed` и `participant-hygiene` завершаются с кодом 0 и
+остаются в статусе `Exited` — так и должно быть.
 
 Если сборка упала на середине, поднимите обратно то, что гасили:
 

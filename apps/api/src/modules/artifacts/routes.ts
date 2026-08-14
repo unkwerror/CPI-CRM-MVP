@@ -78,7 +78,7 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
       }
       // Доска приёмки: «на проверке» — отправленная версия без финального решения.
       if (query.review === 'pending')
-        where.push("latest.version_id IS NOT NULL AND latest.decision IS NULL");
+        where.push('latest.version_id IS NOT NULL AND latest.decision IS NULL');
       if (query.review === 'reviewed') where.push('latest.decision IS NOT NULL');
       values.push(query.limit ?? 50);
       const result = await app.pool.query(
@@ -479,10 +479,11 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
           const assets = await client.query<{
             asset_type: 'FILE' | 'EXTERNAL_URL';
             external_url: string | null;
+            file_object_id: string | null;
             status: string | null;
             sha256: string | null;
           }>(
-            `SELECT aa.asset_type, aa.external_url, fo.status, fo.sha256 FROM artifact_assets aa LEFT JOIN file_objects fo ON fo.id = aa.file_object_id WHERE aa.artifact_version_id = $1 ORDER BY aa.display_order`,
+            `SELECT aa.asset_type, aa.external_url, aa.file_object_id, fo.status, fo.sha256 FROM artifact_assets aa LEFT JOIN file_objects fo ON fo.id = aa.file_object_id WHERE aa.artifact_version_id = $1 ORDER BY aa.display_order`,
             [versionId],
           );
           const urls = assets.rows
@@ -532,6 +533,16 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
               JSON.stringify({ versionId, authorIds, submittedAt: submittedAt.toISOString() }),
             ],
           );
+          // Мероприятие и автор известны только сейчас, поэтому файл переезжает из
+          // служебной папки в читаемую именно после отправки версии.
+          for (const asset of fileAssets) {
+            if (!asset.file_object_id) continue;
+            await client.query(
+              `INSERT INTO outbox_events (event_type, aggregate_type, aggregate_id, payload)
+               VALUES ('file_relocation_requested', 'file_object', $1, $2::jsonb)`,
+              [asset.file_object_id, JSON.stringify({ artifactVersionId: versionId })],
+            );
+          }
           if (qualifies)
             for (const personId of authorIds)
               await recalculatePersonLifecycle(

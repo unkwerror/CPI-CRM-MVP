@@ -37,8 +37,10 @@ export interface ApiConfig {
     region: string;
     accessKey: string;
     secretKey: string;
-    quarantineBucket: string;
-    privateBucket: string;
+    /** Бакет один на CRM и бот: у облачного тарифа их больше одного не бывает. */
+    bucket: string;
+    /** Верхняя папка владельца внутри общего бакета. */
+    prefix: string;
   };
   locker: {
     baseUrl: string;
@@ -91,8 +93,8 @@ export function loadConfig(): ApiConfig {
       region: required('S3_REGION', 'us-east-1'),
       accessKey: required('S3_ACCESS_KEY', 'cpi-minio'),
       secretKey: required('S3_SECRET_KEY', 'cpi-minio-local-secret'),
-      quarantineBucket: required('S3_QUARANTINE_BUCKET', 'cpi-quarantine'),
-      privateBucket: required('S3_PRIVATE_BUCKET', 'cpi-private'),
+      bucket: required('S3_BUCKET', 'cpi-artifacts'),
+      prefix: required('S3_PREFIX', 'crm/'),
     },
     locker: {
       baseUrl: required('LOCKER_BASE_URL', 'http://localhost:8080').replace(/\/+$/u, ''),

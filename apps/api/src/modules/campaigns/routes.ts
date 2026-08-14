@@ -617,6 +617,13 @@ function registerAttachmentRoutes(app: FastifyInstance): void {
           [id, body.fileObjectId, body.kind, request.authUser!.userId],
         );
         if (!inserted.rows[0]) throw new HttpProblem(409, 'Этот файл уже приложен');
+        // Вложение переезжает в папку своей рассылки, чтобы выгрузка хранилища
+        // читалась так же, как список рассылок в интерфейсе.
+        await client.query(
+          `INSERT INTO outbox_events (event_type, aggregate_type, aggregate_id, payload)
+           VALUES ('file_relocation_requested', 'file_object', $1, $2::jsonb)`,
+          [body.fileObjectId, JSON.stringify({ campaignId: id })],
+        );
         await writeAudit(client, {
           actor: request.authUser!,
           requestId: request.id,

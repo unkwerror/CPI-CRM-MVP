@@ -60,10 +60,8 @@ services:
       - -ec
       - |
         mc alias set local http://minio:9000 cpi-minio cpi-minio-local-secret
-        mc mb --ignore-existing local/cpi-quarantine
-        mc mb --ignore-existing local/cpi-private
-        mc anonymous set none local/cpi-quarantine
-        mc anonymous set none local/cpi-private
+        mc mb --ignore-existing local/cpi-artifacts
+        mc anonymous set none local/cpi-artifacts
     restart: 'no'
 
   keycloak:

@@ -5,7 +5,7 @@ import type { Pool } from 'pg';
  * Вложения рассылки: метаданные из базы и байты из хранилища.
  *
  * Файл один, а получателей тысячи, поэтому байты читаются один раз на проход и
- * держатся в памяти: иначе каждое письмо тянуло бы вложение из MinIO заново.
+ * держатся в памяти: иначе каждое письмо тянуло бы вложение из хранилища заново.
  * Кэш живёт до конца прохода — после утверждения набор файлов не меняется, но
  * держать десятки мегабайт между проходами незачем.
  */
@@ -32,7 +32,7 @@ export class CampaignAttachmentStore {
   public constructor(
     private readonly pool: Pool,
     private readonly s3: S3Client,
-    private readonly privateBucket: string,
+    private readonly bucket: string,
   ) {}
 
   public load(campaignId: string): Promise<CampaignAttachment[]> {
@@ -65,7 +65,7 @@ export class CampaignAttachmentStore {
       // Непроверенный файл не отправляем: до рассылки он мог не пройти антивирус.
       if (row.status !== 'AVAILABLE') continue;
       const object = await this.s3.send(
-        new GetObjectCommand({ Bucket: row.bucket || this.privateBucket, Key: row.object_key }),
+        new GetObjectCommand({ Bucket: row.bucket || this.bucket, Key: row.object_key }),
       );
       if (!object.Body) continue;
       loaded.push({

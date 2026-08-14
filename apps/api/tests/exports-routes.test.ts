@@ -32,8 +32,8 @@ async function exportTestApp(query: ReturnType<typeof vi.fn>, roles: Role[]) {
       region: 'us-east-1',
       accessKey: 'test',
       secretKey: 'test-secret',
-      quarantineBucket: 'cpi-quarantine',
-      privateBucket: 'cpi-private',
+      bucket: 'cpi-artifacts',
+      prefix: 'crm/',
     },
   } as never);
   const authUser: AuthUser = {

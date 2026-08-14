@@ -27,8 +27,8 @@ const config: ApiConfig = {
     region: 'us-east-1',
     accessKey: 'test-access-key',
     secretKey: 'test-secret-key',
-    quarantineBucket: 'test-quarantine',
-    privateBucket: 'test-private',
+    bucket: 'test-artifacts',
+    prefix: 'crm/',
   },
   locker: {
     baseUrl: 'https://locker.example.test',

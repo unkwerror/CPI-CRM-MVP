@@ -4,6 +4,7 @@ import {
   GetObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
+import { checkedObjectKey, isInsideSection } from '@cpi-crm/domain';
 import type { Pool } from 'pg';
 
 import { reevaluateVersionsUsingFile } from './artifact-countability.js';
@@ -15,6 +16,7 @@ interface FileRow {
   id: string;
   bucket: string;
   object_key: string;
+  original_filename: string | null;
   declared_mime_type: string | null;
   size_bytes: string;
   status: 'PENDING' | 'SCANNING' | 'AVAILABLE' | 'REJECTED' | 'QUARANTINED';
@@ -22,8 +24,8 @@ interface FileRow {
 }
 
 export interface FileScannerOptions {
-  readonly quarantineBucket: string;
-  readonly privateBucket: string;
+  readonly bucket: string;
+  readonly prefix: string;
   readonly clamAv: ClamAvOptions;
 }
 
@@ -54,8 +56,13 @@ export class FileScanner {
     if (file.status !== 'SCANNING') {
       throw new Error(`File ${fileObjectId} is ${file.status}, expected SCANNING`);
     }
-    if (file.bucket !== this.options.quarantineBucket) {
-      await this.finishUnsafeSource(file, 'UNEXPECTED_SOURCE_BUCKET');
+    // Сканировать разрешено только непроверенные байты своего раздела: чужая папка
+    // в общем бакете принадлежит боту, и её содержимое сюда попадать не должно.
+    if (
+      file.bucket !== this.options.bucket ||
+      !isInsideSection(file.object_key, this.options.prefix, 'incoming')
+    ) {
+      await this.finishUnsafeSource(file, 'UNEXPECTED_SOURCE_LOCATION');
       return;
     }
 
@@ -75,11 +82,14 @@ export class FileScanner {
       return;
     }
 
-    const privateKey = buildPrivateObjectKey(file.id, scan.sha256);
+    const checkedKey = checkedObjectKey(this.options.prefix, {
+      fileObjectId: file.id,
+      fileName: file.original_filename ?? 'файл',
+    });
     await this.s3.send(
       new CopyObjectCommand({
-        Bucket: this.options.privateBucket,
-        Key: privateKey,
+        Bucket: this.options.bucket,
+        Key: checkedKey,
         CopySource: encodeCopySource(file.bucket, file.object_key),
         MetadataDirective: 'COPY',
       }),
@@ -101,8 +111,8 @@ export class FileScanner {
             WHERE id = $1`,
           [
             file.id,
-            this.options.privateBucket,
-            privateKey,
+            this.options.bucket,
+            checkedKey,
             scan.sha256,
             detectedMimeType,
             JSON.stringify({
@@ -146,7 +156,7 @@ export class FileScanner {
 
   private async loadFile(fileObjectId: string): Promise<FileRow | undefined> {
     const result = await this.pool.query<FileRow>(
-      `SELECT id, bucket, object_key, declared_mime_type, size_bytes::text,
+      `SELECT id, bucket, object_key, original_filename, declared_mime_type, size_bytes::text,
               status, scan_result
          FROM file_objects
         WHERE id = $1`,
@@ -207,10 +217,6 @@ export class FileScanner {
   private async deleteObject(bucket: string, key: string): Promise<void> {
     await this.s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
   }
-}
-
-export function buildPrivateObjectKey(fileObjectId: string, sha256: string): string {
-  return `files/${fileObjectId}/${sha256}`;
 }
 
 export function encodeCopySource(bucket: string, key: string): string {

@@ -5,3 +5,4 @@ export * from './normalization.js';
 export * from './person-name.js';
 export * from './permissions.js';
 export * from './quality-score.js';
+export * from './storage-layout.js';

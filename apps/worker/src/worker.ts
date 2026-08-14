@@ -7,6 +7,7 @@ import { CampaignEmailSender } from './campaign-email-sender.js';
 import { CampaignSender } from './campaign-sender.js';
 import type { WorkerConfig } from './config.js';
 import { inTransaction } from './db.js';
+import { FileRelocator } from './file-relocation.js';
 import { FileScanner } from './file-scanner.js';
 import { recalculateVersionAuthors } from './lifecycle.js';
 import { OutboxProcessor, type OutboxEvent } from './outbox.js';
@@ -15,6 +16,7 @@ import { runDueLifecycleTransitions, runNightlyReconciliation } from './reconcil
 export class WorkerRuntime {
   readonly #pool: Pool;
   readonly #scanner: FileScanner;
+  readonly #relocator: FileRelocator;
   readonly #outbox: OutboxProcessor;
   readonly #campaigns: CampaignSender;
   readonly #campaignEmails: CampaignEmailSender;
@@ -38,9 +40,13 @@ export class WorkerRuntime {
       },
     });
     this.#scanner = new FileScanner(this.#pool, s3, {
-      quarantineBucket: config.storage.quarantineBucket,
-      privateBucket: config.storage.privateBucket,
+      bucket: config.storage.bucket,
+      prefix: config.storage.prefix,
       clamAv: config.clamAv,
+    });
+    this.#relocator = new FileRelocator(this.#pool, s3, {
+      bucket: config.storage.bucket,
+      prefix: config.storage.prefix,
     });
     this.#outbox = new OutboxProcessor(
       this.#pool,
@@ -59,7 +65,7 @@ export class WorkerRuntime {
         }
       },
     );
-    const attachments = new CampaignAttachmentStore(this.#pool, s3, config.storage.privateBucket);
+    const attachments = new CampaignAttachmentStore(this.#pool, s3, config.storage.bucket);
     this.#campaigns = new CampaignSender(this.#pool, attachments, {
       telegramBotToken: config.campaigns.telegramBotToken,
       telegramApiUrl: config.campaigns.telegramApiUrl,
@@ -128,6 +134,15 @@ export class WorkerRuntime {
       case 'file_scan_requested':
         await this.#scanner.process(event.aggregateId);
         return;
+      case 'file_relocation_requested': {
+        const artifactVersionId = event.payload.artifactVersionId;
+        const campaignId = event.payload.campaignId;
+        if (typeof artifactVersionId === 'string')
+          await this.#relocator.relocateArtifactFile(event.aggregateId, artifactVersionId);
+        else if (typeof campaignId === 'string')
+          await this.#relocator.relocateCampaignAttachment(event.aggregateId, campaignId);
+        return;
+      }
       case 'artifact_version_submitted_pending_scan':
         await inTransaction(this.#pool, (client) =>
           reevaluateArtifactVersion(client, event.aggregateId).then(() => undefined),

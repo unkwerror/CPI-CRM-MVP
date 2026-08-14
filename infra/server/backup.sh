@@ -42,15 +42,9 @@ compose=(docker compose --env-file "$env_file" -f "$compose_file")
 "${compose[@]}" exec -T postgres \
   pg_dump -U "$POSTGRES_USER" -d "$KEYCLOAK_DB_NAME" -Fc > "$target/keycloak.dump"
 
-mkdir -m 0700 "$target/minio"
-"${compose[@]}" run --rm --no-deps \
-  --entrypoint /bin/sh \
-  -v "$target/minio:/backup" \
-  minio-init -ec '
-    mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
-    mc mirror --overwrite "local/$S3_QUARANTINE_BUCKET" /backup/quarantine
-    mc mirror --overwrite "local/$S3_PRIVATE_BUCKET" /backup/private
-  '
+# Файлы артефактов живут в облачном бакете и на сервере не хранятся, поэтому в
+# резервную копию попадают только базы. Выгрузить сам бакет можно по SFTP из
+# панели хранилища — там же лежат файлы бота сбора артефактов.
 
 (
   cd "$target"
