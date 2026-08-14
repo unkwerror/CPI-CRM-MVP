@@ -7,7 +7,20 @@
 
 {$CRM_DOMAIN} {
 	encode zstd gzip
-	reverse_proxy web:3000
+
+	# Файлы артефактов лежат в облаке, но браузер ходит к ним через наш домен:
+	# часть адресов провайдера недоступна из пользовательских сетей, а запрос
+	# со своего же адреса ещё и обходится без CORS. Подпись считается для хоста
+	# хранилища, поэтому его же подставляем в Host при передаче наверх.
+	handle_path /storage/* {
+		reverse_proxy https://{$S3_UPSTREAM} {
+			header_up Host {$S3_UPSTREAM}
+		}
+	}
+
+	handle {
+		reverse_proxy web:3000
+	}
 
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"

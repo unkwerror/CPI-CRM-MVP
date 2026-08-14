@@ -34,6 +34,7 @@ async function exportTestApp(query: ReturnType<typeof vi.fn>, roles: Role[]) {
       secretKey: 'test-secret',
       bucket: 'cpi-artifacts',
       prefix: 'crm/',
+      publicBase: '',
     },
   } as never);
   const authUser: AuthUser = {

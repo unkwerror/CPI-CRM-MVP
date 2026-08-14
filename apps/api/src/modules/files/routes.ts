@@ -26,6 +26,23 @@ const allowedMimePrefixes = [
   'application/vnd.openxmlformats-officedocument',
 ];
 
+/**
+ * Подписанная ссылка для браузера.
+ *
+ * Хранилище провайдера отвечает не со всех своих адресов: из сетей пользователей
+ * часть из них молча отваливается по таймауту, и загрузка падает с сетевой
+ * ошибкой. Поэтому браузеру отдаётся адрес на нашем домене, а до облака запрос
+ * доводит reverse proxy. Подпись при этом не трогаем: она посчитана для хоста
+ * хранилища, и прокси подставляет этот же хост.
+ */
+export function toBrowserUrl(signedUrl: string, publicBase: string): string {
+  if (!publicBase) return signedUrl;
+  const signed = new URL(signedUrl);
+  const base = new URL(publicBase);
+  const prefix = base.pathname.replace(/\/+$/u, '');
+  return `${base.origin}${prefix}${signed.pathname}${signed.search}`;
+}
+
 export function privateDownloadRequest(input: {
   bucket: string;
   objectKey: string;
@@ -109,7 +126,7 @@ export async function registerFileRoutes(app: FastifyInstance): Promise<void> {
         });
         return result.rows[0]!;
       });
-      const uploadUrl = await getSignedUrl(
+      const signedUpload = await getSignedUrl(
         s3,
         new PutObjectCommand({
           Bucket: app.config.storage.bucket,
@@ -119,6 +136,7 @@ export async function registerFileRoutes(app: FastifyInstance): Promise<void> {
         }),
         { expiresIn: 10 * 60 },
       );
+      const uploadUrl = toBrowserUrl(signedUpload, app.config.storage.publicBase);
       return reply.code(201).send({ ...created, uploadUrl, expiresInSeconds: 600 });
     },
   );
@@ -235,16 +253,19 @@ export async function registerFileRoutes(app: FastifyInstance): Promise<void> {
       const remoteDownload = remote ? await requestLockerDownloadUrl(app, file.external_id!) : null;
       const downloadUrl = remoteDownload
         ? remoteDownload.url
-        : await getSignedUrl(
-            s3,
-            new GetObjectCommand(
-              privateDownloadRequest({
-                bucket: file.bucket,
-                objectKey: file.object_key,
-                originalFilename: file.original_filename,
-              }),
+        : toBrowserUrl(
+            await getSignedUrl(
+              s3,
+              new GetObjectCommand(
+                privateDownloadRequest({
+                  bucket: file.bucket,
+                  objectKey: file.object_key,
+                  originalFilename: file.original_filename,
+                }),
+              ),
+              { expiresIn: 5 * 60 },
             ),
-            { expiresIn: 5 * 60 },
+            app.config.storage.publicBase,
           );
       await app.pool.query(
         `INSERT INTO audit_log

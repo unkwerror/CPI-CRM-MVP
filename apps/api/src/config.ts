@@ -41,6 +41,12 @@ export interface ApiConfig {
     bucket: string;
     /** Верхняя папка владельца внутри общего бакета. */
     prefix: string;
+    /**
+     * Адрес, по которому за файлом ходит браузер. Пусто — значит напрямую в
+     * хранилище; иначе подписанная ссылка переписывается на наш домен, а до
+     * облака запрос доводит reverse proxy.
+     */
+    publicBase: string;
   };
   locker: {
     baseUrl: string;
@@ -95,6 +101,7 @@ export function loadConfig(): ApiConfig {
       secretKey: required('S3_SECRET_KEY', 'cpi-minio-local-secret'),
       bucket: required('S3_BUCKET', 'cpi-artifacts'),
       prefix: required('S3_PREFIX', 'crm/'),
+      publicBase: (process.env.S3_PUBLIC_BASE ?? '').trim().replace(/\/+$/u, ''),
     },
     locker: {
       baseUrl: required('LOCKER_BASE_URL', 'http://localhost:8080').replace(/\/+$/u, ''),

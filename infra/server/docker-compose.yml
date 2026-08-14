@@ -32,6 +32,7 @@ x-api-environment: &api-environment
   S3_SECRET_KEY: ${S3_SECRET_KEY}
   S3_BUCKET: ${S3_BUCKET}
   S3_PREFIX: ${S3_PREFIX:-crm/}
+  S3_PUBLIC_BASE: https://${CRM_DOMAIN}/storage
   IMPORT_WORKBOOK: /imports/participants.xlsx
   CPI_IMPORT_ORGANIZATION_ID: 00000000-0000-4000-8000-000000000010
   CPI_IMPORT_USER_ID: 00000000-0000-4000-8000-000000000001
@@ -334,6 +335,7 @@ services:
       CRM_DOMAIN: ${CRM_DOMAIN}
       ID_DOMAIN: ${ID_DOMAIN}
       ACME_EMAIL: ${ACME_EMAIL}
+      S3_UPSTREAM: ${S3_UPSTREAM}
     ports:
       - 80:80
       - 443:443

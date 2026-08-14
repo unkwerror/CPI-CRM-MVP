@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import type { ApiConfig } from '../src/config.js';
 import { buildServer, isMutationOriginAllowed, shouldUsePrivateNoStore } from '../src/server.js';
-import { privateDownloadRequest } from '../src/modules/files/routes.js';
+import { privateDownloadRequest, toBrowserUrl } from '../src/modules/files/routes.js';
 
 const WEB_ORIGIN = 'https://crm.example.test';
 
@@ -29,6 +29,7 @@ const config: ApiConfig = {
     secretKey: 'test-secret-key',
     bucket: 'test-artifacts',
     prefix: 'crm/',
+    publicBase: '',
   },
   locker: {
     baseUrl: 'https://locker.example.test',
@@ -226,5 +227,20 @@ describe('cache policy routing', () => {
         "attachment; filename*=UTF-8''%D0%9E%D1%82%D1%87%D1%91%D1%82%202026.pdf",
       ResponseCacheControl: 'private, no-store, max-age=0',
     });
+  });
+
+  it('уводит ссылку на файл на свой домен, сохраняя путь и подпись', () => {
+    // Кириллица в ключе приходит уже закодированной: подпись считается ровно по
+    // такому пути, и повторно кодировать его нельзя.
+    const signed =
+      'https://s3.ru1.storage.beget.cloud/bucket/crm/checked/id/%D0%BE%D1%82%D1%87%D1%91%D1%82.pdf?X-Amz-Signature=abc&X-Amz-Expires=300';
+    expect(toBrowserUrl(signed, 'https://crm.example.test/storage')).toBe(
+      'https://crm.example.test/storage/bucket/crm/checked/id/%D0%BE%D1%82%D1%87%D1%91%D1%82.pdf?X-Amz-Signature=abc&X-Amz-Expires=300',
+    );
+  });
+
+  it('оставляет прямую ссылку, если прокси не настроен', () => {
+    const signed = 'http://127.0.0.1:9000/bucket/key?X-Amz-Signature=abc';
+    expect(toBrowserUrl(signed, '')).toBe(signed);
   });
 });
