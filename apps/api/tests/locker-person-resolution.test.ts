@@ -109,6 +109,12 @@ describe('resolving a Locker participant', () => {
     expect(query.mock.calls.some(([sql]) => String(sql).includes('WHERE telegram_user_id <> $2'))).toBe(
       true,
     );
+    const telegramContactLookup = query.mock.calls.find(([sql]) =>
+      String(sql).includes('SELECT id FROM contact_points'),
+    );
+    expect(String(telegramContactLookup?.[0])).toContain(
+      '(messenger_stable_id = $2) DESC NULLS LAST',
+    );
   });
 
   it('brings back a card hidden by the full-name hygiene instead of duplicating it', async () => {

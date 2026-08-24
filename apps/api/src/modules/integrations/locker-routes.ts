@@ -1047,7 +1047,7 @@ async function upsertLockerContacts(
           OR (messenger_stable_id IS NULL AND normalized_value = $3)
         )
         AND archived_at IS NULL
-      ORDER BY (messenger_stable_id = $2) DESC, is_verified DESC,
+      ORDER BY (messenger_stable_id = $2) DESC NULLS LAST, is_verified DESC,
                is_primary DESC, created_at, id
       LIMIT 1`,
     [personId, user.telegramUserId, telegramNormalized],
