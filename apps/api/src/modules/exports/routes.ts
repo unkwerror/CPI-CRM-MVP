@@ -47,6 +47,7 @@ interface EventParticipantExportRow {
   attended: boolean | null;
   decisions: string[];
   result: string | null;
+  projects: { name: string; role: string }[];
 }
 
 type PeriodQueryInput = { weeks?: number; from?: string; to?: string };
@@ -91,8 +92,9 @@ const EVENT_PARTICIPANTS_EXPORT_SQL = `
            WHEN participation.no_show THEN false
            ELSE NULL
          END AS attended,
-         participation.decisions
-         , participation.result
+         participation.decisions,
+         participation.result,
+         COALESCE(project_data.items, '[]'::jsonb) AS projects
     FROM canonical_participants canonical
     JOIN persons person ON person.id = canonical.person_id
     LEFT JOIN LATERAL (
@@ -142,6 +144,27 @@ const EVENT_PARTICIPANTS_EXPORT_SQL = `
             WHERE id = person.id OR merged_into_person_id = person.id
          )
     ) participation ON true
+    LEFT JOIN LATERAL (
+      SELECT jsonb_agg(
+               jsonb_build_object('name', linked.name, 'role', linked.role)
+               ORDER BY linked.normalized_name, linked.project_id
+             ) AS items
+        FROM (
+          SELECT DISTINCT project.id AS project_id, project.name, project.normalized_name,
+                          membership.role
+            FROM project_memberships membership
+            JOIN projects project ON project.id = membership.project_id
+            JOIN event_project_participations event_project
+              ON event_project.project_id = project.id
+             AND event_project.event_id = $1
+             AND event_project.archived_at IS NULL
+           WHERE membership.archived_at IS NULL AND project.archived_at IS NULL
+             AND membership.person_id IN (
+               SELECT id FROM persons
+                WHERE id = person.id OR merged_into_person_id = person.id
+             )
+        ) linked
+    ) project_data ON true
    WHERE person.organization_id = $2 AND person.archived_at IS NULL
    ORDER BY person.last_name, person.first_name, person.patronymic, person.id
 `;
@@ -530,6 +553,7 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
           decision: exportDecisionLabel(row.decisions),
           result: row.result,
           eventName: event.name,
+          projects: row.projects,
         })),
       });
       await app.pool.query(

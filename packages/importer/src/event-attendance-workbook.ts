@@ -60,6 +60,7 @@ export interface EventParticipantWorkbookRow {
   readonly decision?: string | null;
   readonly result?: string | null;
   readonly eventName: string;
+  readonly projects?: readonly { readonly name: string; readonly role: string }[];
   readonly artifacts?: readonly EventParticipantWorkbookArtifact[];
 }
 
@@ -254,6 +255,8 @@ export async function createEventParticipantsWorkbook(input: {
     'Статус заявки',
     'Результат участия',
     'Мероприятия',
+    'Проекты в мероприятии',
+    'Роли в проектах',
     'Артефакты',
     'Оценка',
     'Решение',
@@ -262,6 +265,7 @@ export async function createEventParticipantsWorkbook(input: {
   worksheet.addRow(headers);
   for (const row of input.rows) {
     const artifacts = row.artifacts ?? [];
+    const projects = row.projects ?? [];
     const linkable = artifacts.find((artifact) => artifact.archivePath);
     const added = worksheet.addRow([
       row.number,
@@ -277,6 +281,8 @@ export async function createEventParticipantsWorkbook(input: {
       safeSpreadsheetText(row.decision),
       safeSpreadsheetText(row.result),
       safeSpreadsheetText(row.eventName),
+      projects.map((project) => safeSpreadsheetText(project.name)).join('\n'),
+      projects.map((project) => safeSpreadsheetText(project.role)).join('\n'),
       artifactSummary(artifacts),
       scoreSummary(artifacts),
       decisionSummary(artifacts),
@@ -285,10 +291,13 @@ export async function createEventParticipantsWorkbook(input: {
         : '',
     ]);
     if (linkable?.archivePath) {
-      added.getCell(17).font = { color: { argb: 'FF1F5FBF' }, underline: true };
+      added.getCell(19).font = { color: { argb: 'FF1F5FBF' }, underline: true };
     }
   }
-  styleSheet(worksheet, [8, 38, 22, 20, 24, 30, 22, 24, 18, 24, 20, 44, 42, 40, 12, 18, 34]);
+  styleSheet(
+    worksheet,
+    [8, 38, 22, 20, 24, 30, 22, 24, 18, 24, 20, 44, 42, 34, 28, 40, 12, 18, 34],
+  );
 
   const allArtifacts = input.rows.flatMap((row) =>
     (row.artifacts ?? []).map((artifact) => ({ row, artifact })),

@@ -43,6 +43,7 @@ import { PersonContactDialog } from '@/components/person-contact-dialog';
 import { PersonInteractionDialog } from '@/components/person-interaction-dialog';
 import { PersonInteractionsTab } from '@/components/person-interactions-tab';
 import { PersonEventLinkDialog } from '@/components/person-event-link-dialog';
+import { PersonProjectLinkDialog } from '@/components/person-project-link-dialog';
 import { PersonRemovalDialog } from '@/components/person-removal-dialog';
 import { TaskDialog } from '@/components/task-dialog';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -79,7 +80,7 @@ const ARTIFACT_STATUS_OPTIONS = [
   { value: 'DRAFT', label: 'Черновики' },
 ];
 
-export function PersonPageClient({ id }: { id: string }) {
+export function PersonPageClient({ id, returnTo }: { id: string; returnTo: string }) {
   const [person, setPerson] = useState<PersonDetail | null>(null);
   const [tab, setTab] = useState<Tab>('overview');
   const [showArtifact, setShowArtifact] = useState(false);
@@ -88,6 +89,7 @@ export function PersonPageClient({ id }: { id: string }) {
   const [showContact, setShowContact] = useState(false);
   const [showInteraction, setShowInteraction] = useState(false);
   const [showEventLink, setShowEventLink] = useState(false);
+  const [showProjectLink, setShowProjectLink] = useState(false);
   const [showTask, setShowTask] = useState(false);
   const [showRemoval, setShowRemoval] = useState(false);
   const [timelineRefreshKey, setTimelineRefreshKey] = useState(0);
@@ -149,7 +151,7 @@ export function PersonPageClient({ id }: { id: string }) {
   return (
     <PageStack>
       <PageHeader
-        backHref="/participants"
+        backHref={returnTo}
         backLabel="К списку участников"
         eyebrow="Карточка участника"
         title={
@@ -198,6 +200,11 @@ export function PersonPageClient({ id }: { id: string }) {
                 <CalendarDaysIcon /> В мероприятие
               </Button>
             )}
+            {canEditPerson && (
+              <Button onClick={() => setShowProjectLink(true)} variant="outline">
+                <FolderKanbanIcon /> В проект
+              </Button>
+            )}
             {canAddArtifact && (
               <Button
                 onClick={() => {
@@ -225,7 +232,7 @@ export function PersonPageClient({ id }: { id: string }) {
         <PersonRemovalDialog
           canDelete={canDeletePerson}
           onOpenChange={setShowRemoval}
-          onRemoved={() => router.push('/participants')}
+          onRemoved={() => router.push(returnTo)}
           open={showRemoval}
           personId={person.id}
           personName={person.canonicalFullName}
@@ -591,6 +598,17 @@ export function PersonPageClient({ id }: { id: string }) {
           onLinked={async () => {
             await reload();
             setTab('events');
+          }}
+          personId={person.id}
+        />
+      )}
+      {showProjectLink && (
+        <PersonProjectLinkDialog
+          existingProjectIds={person.projects.map((project) => project.id)}
+          onClose={() => setShowProjectLink(false)}
+          onLinked={async () => {
+            await reload();
+            setTab('projects');
           }}
           personId={person.id}
         />
@@ -972,7 +990,7 @@ function ProjectsTab({ person }: { person: PersonDetail }) {
         <EmptyState
           icon={FolderKanbanIcon}
           title="Проектов пока нет"
-          text="Добавьте участника в состав проекта из карточки проекта."
+          text="Нажмите «В проект» в верхней части карточки или откройте реестр проектов."
           action={
             <Button asChild variant="outline">
               <a href="/projects">Открыть проекты</a>

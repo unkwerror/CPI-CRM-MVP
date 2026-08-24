@@ -5,6 +5,7 @@ import {
   artifactContentType,
   hashLockerSubmissionPayload,
   hashPayload,
+  mapCrmEventStatus,
   mapLockerEventStatus,
 } from '../src/modules/integrations/locker-routes.js';
 
@@ -29,6 +30,14 @@ describe('Locker integration contract', () => {
     expect(mapLockerEventStatus('running')).toBe('ACTIVE');
     expect(mapLockerEventStatus('finished')).toBe('COMPLETED');
     expect(mapLockerEventStatus('archived')).toBe('COMPLETED');
+  });
+
+  it('maps CRM event states to the Locker event contract', () => {
+    expect(mapCrmEventStatus('UNKNOWN')).toBe('draft');
+    expect(mapCrmEventStatus('PLANNED')).toBe('draft');
+    expect(mapCrmEventStatus('ACTIVE')).toBe('running');
+    expect(mapCrmEventStatus('COMPLETED')).toBe('finished');
+    expect(mapCrmEventStatus('CANCELLED')).toBe('archived');
   });
 
   it('keeps retries idempotent when mutable profile data changes', () => {

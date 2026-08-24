@@ -131,6 +131,7 @@ function ParticipantsContent() {
     if (value) exportParams.set(key, value);
   }
   const exportHref = `/api/exports/participants.csv${exportParams.size ? `?${exportParams}` : ''}`;
+  const returnTo = `/participants${searchParams.size ? `?${searchParams.toString()}` : ''}`;
 
   return (
     <PageStack>
@@ -231,7 +232,7 @@ function ParticipantsContent() {
                         <TableCell>
                           <Link
                             className="hover:text-primary flex items-center gap-2.5 transition-colors"
-                            href={`/participants/${person.id}`}
+                            href={`/participants/${person.id}?returnTo=${encodeURIComponent(returnTo)}`}
                           >
                             <Avatar>
                               <AvatarFallback>{initials(person.canonicalFullName)}</AvatarFallback>

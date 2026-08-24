@@ -46,9 +46,16 @@ describe('event attendance workbook', () => {
           attended: true,
           decision: 'Принят',
           eventName: 'Демо-день',
+          projects: [{ name: 'Робот-садовник', role: 'Основатель' }],
         },
       ],
     });
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(bytes as unknown as Parameters<typeof workbook.xlsx.load>[0]);
+    const exported = workbook.getWorksheet('Участники')!;
+    expect(exported.getRow(1).getCell(14).text).toBe('Проекты в мероприятии');
+    expect(exported.getRow(2).getCell(14).text).toBe('Робот-садовник');
+    expect(exported.getRow(2).getCell(15).text).toBe('Основатель');
     const parsed = await readEventAttendanceWorkbook(bytes);
     expect(parsed.people[0]).toMatchObject({
       lastName: 'Иванов',

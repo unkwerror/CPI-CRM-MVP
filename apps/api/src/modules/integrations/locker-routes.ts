@@ -80,6 +80,25 @@ const LockerEvent = Type.Object(
     ]),
     startsAt: Type.String({ format: 'date-time' }),
     endsAt: Type.String({ format: 'date-time' }),
+    managedByCrm: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: false },
+);
+
+const LockerEventSyncBody = Type.Object(
+  {
+    schemaVersion: Type.Literal(1),
+    event: LockerEvent,
+  },
+  { additionalProperties: false },
+);
+
+const LockerParticipationBody = Type.Object(
+  {
+    schemaVersion: Type.Literal(1),
+    user: LockerUser,
+    event: LockerEvent,
+    registeredAt: Type.Optional(Type.String({ format: 'date-time' })),
   },
   { additionalProperties: false },
 );
@@ -138,6 +157,7 @@ type LockerEventInput = {
   status: 'draft' | 'published' | 'running' | 'finished' | 'archived';
   startsAt: string;
   endsAt: string;
+  managedByCrm?: boolean;
 };
 
 type LockerFileInput = {
@@ -196,6 +216,163 @@ export async function registerLockerIntegrationRoutes(app: FastifyInstance): Pro
         }
         throw error;
       }
+    },
+  );
+
+  app.post(
+    '/integrations/locker/v1/events/resolve',
+    {
+      preHandler: authorize,
+      config: { rateLimit: { max: 300, timeWindow: '1 minute' } },
+      schema: { tags: ['Интеграции'], body: LockerEventSyncBody },
+    },
+    async (request) => {
+      const body = request.body as { schemaVersion: 1; event: LockerEventInput };
+      const organization = await getOrganizationContext(app.pool);
+      const eventId = await transaction(app.pool, (client) =>
+        resolveLockerEvent(client, organization, body.event, request.id),
+      );
+      return { eventId };
+    },
+  );
+
+  app.post(
+    '/integrations/locker/v1/participations',
+    {
+      preHandler: authorize,
+      config: { rateLimit: { max: 300, timeWindow: '1 minute' } },
+      schema: { tags: ['Интеграции'], body: LockerParticipationBody },
+    },
+    async (request) => {
+      const body = request.body as {
+        schemaVersion: 1;
+        user: LockerUserInput;
+        event: LockerEventInput;
+        registeredAt?: string;
+      };
+      const organization = await getOrganizationContext(app.pool);
+      try {
+        return await transaction(app.pool, async (client) => {
+          await lockLockerUser(client, body.user.telegramUserId);
+          const person = await resolveLockerPerson(client, organization, body.user, request.id);
+          const eventId = await resolveLockerEvent(client, organization, body.event, request.id);
+          const inserted = await client.query<{ id: string }>(
+            `INSERT INTO event_participations
+               (person_id, event_id, registered_at, decision, attendance, data_origin)
+             SELECT $1, $2, $3, 'UNKNOWN', 'UNKNOWN', 'LIVE'
+              WHERE NOT EXISTS (
+                SELECT 1
+                  FROM event_participations participation
+                  JOIN persons observed ON observed.id = participation.person_id
+                 WHERE participation.event_id = $2
+                   AND participation.archived_at IS NULL
+                   AND COALESCE(observed.merged_into_person_id, observed.id) = $1
+              )
+             ON CONFLICT (person_id, event_id) WHERE archived_at IS NULL DO NOTHING
+             RETURNING id`,
+            [
+              person.personId,
+              eventId,
+              body.registeredAt ? new Date(body.registeredAt) : new Date(),
+            ],
+          );
+          if (inserted.rows[0]) {
+            await writeAudit(client, {
+              actor: LOCKER_ACTOR,
+              requestId: request.id,
+              action: 'locker.event_participation_created',
+              entityType: 'event_participation',
+              entityId: inserted.rows[0].id,
+              after: {
+                lockerEventId: body.event.lockerEventId,
+                lockerUserId: body.user.lockerUserId,
+                personId: person.personId,
+                eventId,
+              },
+            });
+          }
+          return {
+            personId: person.personId,
+            personResolution: person.resolution,
+            eventId,
+            participantAdded: Boolean(inserted.rows[0]),
+          };
+        });
+      } catch (error) {
+        if (error instanceof LockerReviewRequired) {
+          throw new HttpProblem(error.reasonCode === 'FIO_REQUIRED' ? 422 : 409, error.detail);
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.get(
+    '/integrations/locker/v1/events',
+    {
+      preHandler: authorize,
+      config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
+      schema: {
+        tags: ['Интеграции'],
+        querystring: Type.Object({
+          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })),
+        }),
+      },
+    },
+    async (request) => {
+      const organization = await getOrganizationContext(app.pool);
+      const limit = (request.query as { limit?: number }).limit ?? 1000;
+      const result = await app.pool.query<{
+        id: string;
+        name: string;
+        status: string;
+        starts_at: Date | null;
+        ends_at: Date | null;
+        created_at: Date;
+        updated_at: Date;
+        archived_at: Date | null;
+        locker_event_id: string | null;
+      }>(
+        `SELECT event.id, event.name, event.status, event.starts_at, event.ends_at,
+                event.created_at, event.updated_at, event.archived_at,
+                link.locker_event_id
+           FROM events event
+           LEFT JOIN LATERAL (
+             SELECT candidate.locker_event_id
+               FROM locker_event_links candidate
+              WHERE candidate.event_id = event.id
+              ORDER BY (candidate.locker_event_id = event.id) DESC,
+                       candidate.created_at, candidate.locker_event_id
+              LIMIT 1
+           ) link ON true
+          WHERE event.organization_id = $1
+          ORDER BY event.updated_at, event.id
+          LIMIT $2`,
+        [organization.id, limit],
+      );
+      return {
+        items: result.rows.map((row) => {
+          const startsAt = row.starts_at ?? row.created_at;
+          const endsAt =
+            row.ends_at && row.ends_at > startsAt
+              ? row.ends_at
+              : new Date(startsAt.getTime() + 60 * 60 * 1000);
+          const lockerEventId = row.locker_event_id ?? row.id;
+          const origin = lockerEventId === row.id ? 'CRM' : 'LOCKER';
+          return {
+            crmEventId: row.id,
+            lockerEventId,
+            title: row.name,
+            status: mapCrmEventStatus(row.status),
+            startsAt: startsAt.toISOString(),
+            endsAt: endsAt.toISOString(),
+            updatedAt: row.updated_at.toISOString(),
+            datesInferred: row.starts_at === null || row.ends_at === null,
+            archived: row.archived_at !== null,
+            origin,
+          };
+        }),
+      };
     },
   );
 
@@ -990,15 +1167,41 @@ async function resolveLockerEvent(
     `SELECT event_id FROM locker_event_links WHERE locker_event_id = $1`,
     [event.lockerEventId],
   );
-  if (linked.rows[0]) return linked.rows[0].event_id;
+  if (linked.rows[0]) {
+    if (!event.managedByCrm) {
+      await updateResolvedLockerEvent(client, linked.rows[0].event_id, organization.id, event);
+    }
+    return linked.rows[0].event_id;
+  }
+
+  // События, пришедшие из CRM в админку Locker, сохраняют CRM UUID. При
+  // обратной доставке участия их нельзя создавать повторно или затирать
+  // техническим статусом draft, который скрывает их из пользовательского каталога.
+  if (event.managedByCrm) {
+    const crmEvent = await client.query<{ id: string }>(
+      `SELECT id FROM events WHERE id = $1 AND organization_id = $2 LIMIT 1`,
+      [event.lockerEventId, organization.id],
+    );
+    if (crmEvent.rows[0]) {
+      await client.query(
+        `INSERT INTO locker_event_links (locker_event_id, event_id)
+         VALUES ($1, $1)
+         ON CONFLICT (locker_event_id) DO NOTHING`,
+        [event.lockerEventId],
+      );
+      return crmEvent.rows[0].id;
+    }
+  }
 
   const name = cleanText(event.title, 500);
   const normalizedName = normalizeFullName(name);
   const existing = await client.query<{ id: string }>(
     `SELECT id FROM events
-      WHERE organization_id = $1 AND normalized_name = $2 AND archived_at IS NULL
+      WHERE organization_id = $1
+        AND (id = $3 OR (normalized_name = $2 AND archived_at IS NULL))
+      ORDER BY (id = $3) DESC
       LIMIT 1`,
-    [organization.id, normalizedName],
+    [organization.id, normalizedName, event.lockerEventId],
   );
   let eventId = existing.rows[0]?.id;
   const startsAt = new Date(event.startsAt);
@@ -1032,14 +1235,7 @@ async function resolveLockerEvent(
       after: { lockerEventId: event.lockerEventId, name },
     });
   } else {
-    await client.query(
-      `UPDATE events
-          SET starts_at = COALESCE(starts_at, $2), ends_at = COALESCE(ends_at, $3),
-              status = CASE WHEN status IN ('UNKNOWN', 'PLANNED') THEN $4 ELSE status END,
-              updated_at = now()
-        WHERE id = $1`,
-      [eventId, startsAt, endsAt, mapLockerEventStatus(event.status)],
-    );
+    await updateResolvedLockerEvent(client, eventId, organization.id, event);
   }
   await client.query(
     `INSERT INTO locker_event_links (locker_event_id, event_id)
@@ -1048,6 +1244,47 @@ async function resolveLockerEvent(
     [event.lockerEventId, eventId],
   );
   return eventId;
+}
+
+async function updateResolvedLockerEvent(
+  client: PoolClient,
+  eventId: string,
+  organizationId: string,
+  event: LockerEventInput,
+): Promise<void> {
+  const name = cleanText(event.title, 500);
+  const normalizedName = normalizeFullName(name);
+  const startsAt = new Date(event.startsAt);
+  const rawEndsAt = new Date(event.endsAt);
+  const endsAt = rawEndsAt > startsAt ? rawEndsAt : null;
+  await client.query(
+    `UPDATE events target
+        SET name = CASE WHEN NOT EXISTS (
+                     SELECT 1 FROM events duplicate
+                      WHERE duplicate.organization_id = $2
+                        AND duplicate.normalized_name = $4
+                        AND duplicate.archived_at IS NULL
+                        AND duplicate.id <> target.id
+                   ) THEN $3 ELSE target.name END,
+            normalized_name = CASE WHEN NOT EXISTS (
+                     SELECT 1 FROM events duplicate
+                      WHERE duplicate.organization_id = $2
+                        AND duplicate.normalized_name = $4
+                        AND duplicate.archived_at IS NULL
+                        AND duplicate.id <> target.id
+                   ) THEN $4 ELSE target.normalized_name END,
+            status = $5, starts_at = $6, ends_at = $7, updated_at = now()
+      WHERE target.id = $1 AND target.organization_id = $2`,
+    [
+      eventId,
+      organizationId,
+      name,
+      normalizedName,
+      mapLockerEventStatus(event.status),
+      startsAt,
+      endsAt,
+    ],
+  );
 }
 
 async function createLockerArtifact(
@@ -1235,6 +1472,13 @@ export function mapLockerEventStatus(
   if (status === 'finished') return 'COMPLETED';
   if (status === 'archived') return 'COMPLETED';
   return 'PLANNED';
+}
+
+export function mapCrmEventStatus(status: string): LockerEventInput['status'] {
+  if (status === 'ACTIVE') return 'running';
+  if (status === 'COMPLETED') return 'finished';
+  if (status === 'CANCELLED') return 'archived';
+  return 'draft';
 }
 
 export function artifactContentType(
