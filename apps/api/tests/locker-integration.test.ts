@@ -5,6 +5,7 @@ import {
   artifactContentType,
   hashLockerSubmissionPayload,
   hashPayload,
+  lockerArtifactIdentity,
   mapCrmEventStatus,
   mapLockerEventStatus,
 } from '../src/modules/integrations/locker-routes.js';
@@ -88,5 +89,44 @@ describe('Locker integration contract', () => {
     expect(artifactContentType(false, true, false)).toBe('EXTERNAL_URL');
     expect(artifactContentType(true, false, false)).toBe('TEXT');
     expect(artifactContentType(true, false, true)).toBe('MIXED');
+  });
+
+  it('recognizes an unchanged artifact when a legacy submission becomes an event request', () => {
+    const base = {
+      schemaVersion: 1 as const,
+      user: {
+        lockerUserId: '11111111-1111-4111-8111-111111111111',
+        telegramUserId: '123456789',
+        fullName: 'Иван Иванов',
+      },
+      event: {
+        lockerEventId: '22222222-2222-4222-8222-222222222222',
+        title: 'Demo Day',
+        status: 'finished' as const,
+        startsAt: '2026-08-01T03:00:00.000Z',
+        endsAt: '2026-08-01T08:00:00.000Z',
+      },
+      submission: {
+        lockerSubmissionId: '33333333-3333-4333-8333-333333333333',
+        title: 'Вопрос по мероприятию: Demo Day',
+        text: 'Где загрузить презентацию?',
+        link: null,
+        createdAt: '2026-08-01T07:00:00.000Z',
+        submittedAt: '2026-08-01T07:30:00.000Z',
+        files: [],
+      },
+    };
+    const legacy = lockerArtifactIdentity(base);
+    const eventRequest = lockerArtifactIdentity({
+      ...base,
+      submission: { ...base.submission, sourceKind: 'event_request' },
+    });
+    expect(eventRequest).toEqual(legacy);
+    expect(
+      lockerArtifactIdentity({
+        ...base,
+        submission: { ...base.submission, text: 'Другой вопрос' },
+      }).fingerprint,
+    ).not.toBe(legacy.fingerprint);
   });
 });

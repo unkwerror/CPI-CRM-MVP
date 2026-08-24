@@ -427,22 +427,56 @@ export async function ingestLockerSubmission(
   );
   const payloadHash = hashLockerSubmissionPayload(body);
   const existing = await client.query<{
+    locker_user_id: string;
+    telegram_user_id: string;
+    locker_event_id: string;
     person_id: string;
     event_id: string;
     artifact_id: string;
     artifact_version_id: string;
     payload_hash: string;
   }>(
-    `SELECT person_id, event_id, artifact_id, artifact_version_id, payload_hash
+    `SELECT locker_user_id, telegram_user_id, locker_event_id,
+            person_id, event_id, artifact_id, artifact_version_id, payload_hash
        FROM locker_submission_links
       WHERE locker_submission_id = $1`,
     [body.submission.lockerSubmissionId],
   );
   if (existing.rows[0]) {
-    if (existing.rows[0].payload_hash !== payloadHash) {
+    const existingLink = existing.rows[0];
+    const isCompatibleLegacyEventRequest =
+      existingLink.payload_hash !== payloadHash &&
+      body.submission.sourceKind === 'event_request' &&
+      (await existingLockerArtifactMatchesBody(client, existingLink, body));
+    if (existingLink.payload_hash !== payloadHash && !isCompatibleLegacyEventRequest) {
       throw new HttpProblem(409, 'Отправка Locker уже синхронизирована с другим содержимым');
     }
-    const mapped = mapExisting(existing.rows[0]);
+    if (isCompatibleLegacyEventRequest) {
+      await client.query(
+        `UPDATE locker_submission_links
+            SET payload_hash = $2, updated_at = now()
+          WHERE locker_submission_id = $1`,
+        [body.submission.lockerSubmissionId, payloadHash],
+      );
+      await client.query(
+        `UPDATE artifacts
+            SET description = 'Вопрос участника из Telegram-бота', updated_at = now()
+          WHERE id = $1`,
+        [existingLink.artifact_id],
+      );
+      await writeAudit(client, {
+        actor: LOCKER_ACTOR,
+        requestId,
+        action: 'locker.event_request_legacy_upgraded',
+        entityType: 'artifact_version',
+        entityId: existingLink.artifact_version_id,
+        after: {
+          lockerEventRequestId: body.submission.lockerSubmissionId,
+          payloadHash,
+        },
+      });
+    }
+    const mapped = mapExisting(existingLink);
     const taskId =
       body.submission.sourceKind === 'event_request'
         ? await ensureLockerEventRequestTask(
@@ -1484,6 +1518,64 @@ async function ensureLockerEventRequestTask(
   return taskId;
 }
 
+async function existingLockerArtifactMatchesBody(
+  client: PoolClient,
+  existing: {
+    locker_user_id: string;
+    telegram_user_id: string;
+    locker_event_id: string;
+    artifact_id: string;
+    artifact_version_id: string;
+  },
+  body: LockerSyncInput,
+): Promise<boolean> {
+  if (
+    existing.locker_user_id !== body.user.lockerUserId ||
+    existing.telegram_user_id !== body.user.telegramUserId ||
+    existing.locker_event_id !== body.event.lockerEventId
+  ) {
+    return false;
+  }
+  const expected = lockerArtifactIdentity(body);
+  const stored = await client.query<{ title: string; content_fingerprint: string | null }>(
+    `SELECT artifact.title, version.content_fingerprint
+       FROM artifacts artifact
+       JOIN artifact_versions version
+         ON version.id = $2 AND version.artifact_id = artifact.id
+      WHERE artifact.id = $1`,
+    [existing.artifact_id, existing.artifact_version_id],
+  );
+  return (
+    stored.rows[0]?.title === expected.title &&
+    stored.rows[0]?.content_fingerprint === expected.fingerprint
+  );
+}
+
+export function lockerArtifactIdentity(body: LockerSyncInput): {
+  title: string;
+  textContent: string | null;
+  normalizedLink: string | null;
+  fingerprint: string;
+} {
+  const title = cleanText(body.submission.title || `Материалы: ${body.event.title}`, 500);
+  const normalizedLink = body.submission.link?.trim() || null;
+  const textContent =
+    body.submission.text?.trim() ||
+    (!normalizedLink && body.submission.files.length === 0
+      ? body.submission.title?.trim() || title
+      : null);
+  return {
+    title,
+    textContent,
+    normalizedLink,
+    fingerprint: createContentFingerprint({
+      text: textContent,
+      urls: normalizedLink ? [normalizedLink] : [],
+      fileSha256s: body.submission.files.map((file) => file.checksumSha256),
+    }),
+  };
+}
+
 async function createLockerArtifact(
   client: PoolClient,
   organization: OrganizationContext,
@@ -1497,7 +1589,7 @@ async function createLockerArtifact(
     `SELECT id FROM artifact_types WHERE code = 'OTHER' AND archived_at IS NULL`,
   );
   if (!type.rows[0]) throw new HttpProblem(503, 'Тип артефакта OTHER не настроен');
-  const title = cleanText(body.submission.title || `Материалы: ${body.event.title}`, 500);
+  const { title, textContent, normalizedLink, fingerprint } = lockerArtifactIdentity(body);
   const artifact = await client.query<{ id: string }>(
     `INSERT INTO artifacts
        (organization_id, type_id, title, description, event_id, created_by_user_id)
@@ -1515,22 +1607,11 @@ async function createLockerArtifact(
     ],
   );
   const artifactId = artifact.rows[0]!.id;
-  const normalizedLink = body.submission.link?.trim() || null;
-  const textContent =
-    body.submission.text?.trim() ||
-    (!normalizedLink && body.submission.files.length === 0
-      ? body.submission.title?.trim() || title
-      : null);
   const contentType = artifactContentType(
     Boolean(textContent),
     Boolean(normalizedLink),
     body.submission.files.length > 0,
   );
-  const fingerprint = createContentFingerprint({
-    text: textContent,
-    urls: normalizedLink ? [normalizedLink] : [],
-    fileSha256s: body.submission.files.map((file) => file.checksumSha256),
-  });
   const version = await client.query<{ id: string }>(
     `INSERT INTO artifact_versions
        (artifact_id, version_number, content_type, text_content, content_fingerprint,
