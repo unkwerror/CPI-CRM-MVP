@@ -2,7 +2,7 @@
  * Оценка артефакта ЦПИ.
  *
  * Ревьюер принимает одно решение — «принят» или «не принят» — и ставит
- * балл Q_artifact от 0 до 10. Качественным считается принятый артефакт;
+ * субъективный балл качества от 1 до 10. Качественным считается принятый артефакт;
  * балл используется как метрика уровня, а не как порог приёмки.
  *
  * Рубрикатор из пяти критериев по 0–2 больше не заполняется, но остаётся
@@ -11,7 +11,7 @@
 
 export type ArtifactReviewDecision = 'ACCEPTED' | 'REJECTED' | 'NEEDS_REVISION';
 
-export const ARTIFACT_SCORE_MIN = 0;
+export const ARTIFACT_SCORE_MIN = 1;
 export const ARTIFACT_SCORE_MAX = 10;
 
 /** Принятый артефакт — качественный. Балл на приёмку не влияет. */
@@ -105,53 +105,4 @@ export function parseArtifactCriteria(value: unknown): ArtifactCriteriaScores {
  */
 export function computeArtifactScore(criteria: ArtifactCriteriaScores): number {
   return ARTIFACT_QUALITY_CRITERIA.reduce((sum, criterion) => sum + criteria[criterion.code], 0);
-}
-
-/**
- * Индекс качества головы: Q_head = 0.35 × качество артефактов +
- * 0.25 × регулярность + 0.20 × проектная включённость +
- * 0.20 × коммерческая применимость. Все компоненты нормированы к 100.
- */
-export interface HeadQualityComponents {
-  /** Средний Q_artifact за 90 дней, нормированный к 100. */
-  readonly artifactQuality: number;
-  /** Доля 30-дневных окон за последние 90 дней с качественным артефактом (0–100). */
-  readonly regularity: number;
-  /** Есть роль в команде/проекте, продукте, партнёрском запросе или продаже (0 или 100). */
-  readonly projectInvolvement: number;
-  /** Результат можно связать с партнёрским спросом или продуктом (0 или 100). */
-  readonly commercialApplicability: number;
-}
-
-export const HEAD_QUALITY_WEIGHTS = {
-  artifactQuality: 0.35,
-  regularity: 0.25,
-  projectInvolvement: 0.2,
-  commercialApplicability: 0.2,
-} as const;
-
-export function computeHeadQuality(components: HeadQualityComponents): number {
-  const clamp = (value: number) => Math.max(0, Math.min(100, value));
-  return (
-    HEAD_QUALITY_WEIGHTS.artifactQuality * clamp(components.artifactQuality) +
-    HEAD_QUALITY_WEIGHTS.regularity * clamp(components.regularity) +
-    HEAD_QUALITY_WEIGHTS.projectInvolvement * clamp(components.projectInvolvement) +
-    HEAD_QUALITY_WEIGHTS.commercialApplicability * clamp(components.commercialApplicability)
-  );
-}
-
-export type HeadQualityBand = 'READY' | 'ACTIVATED' | 'WEAK' | 'REACTIVATE';
-
-export const HEAD_QUALITY_BAND_LABELS: Readonly<Record<HeadQualityBand, string>> = {
-  READY: 'Готов к продаже или лидерству в проекте',
-  ACTIVATED: 'Активирован, нужен трекинг',
-  WEAK: 'Слабая активация',
-  REACTIVATE: 'Кандидат на реактивацию или списание',
-};
-
-export function interpretHeadQuality(score: number): HeadQualityBand {
-  if (score >= 80) return 'READY';
-  if (score >= 60) return 'ACTIVATED';
-  if (score >= 40) return 'WEAK';
-  return 'REACTIVATE';
 }

@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { Permissions } from '@cpi-crm/domain';
 import { Type } from '@sinclair/typebox';
 import type { FastifyInstance } from 'fastify';
+import type { PoolClient } from 'pg';
 
 import { writeAudit } from '../../lib/audit.js';
 import { beginIdempotentRequest } from '../../lib/idempotency.js';
@@ -82,7 +83,7 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
       );
       const scores = await app.pool.query<{ score: number; count: string }>(
         `SELECT series.score, count(ar.id)::text AS count
-           FROM generate_series(0, 10) AS series(score)
+           FROM generate_series(1, 10) AS series(score)
            LEFT JOIN artifact_reviews ar ON ar.score = series.score AND ar.status = 'FINAL' AND ar.voided_at IS NULL
            LEFT JOIN artifact_review_selections ars ON ars.current_final_review_id = ar.id
           GROUP BY series.score ORDER BY series.score`,
@@ -105,6 +106,31 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
         scoreDistribution: scores.rows.map((item) => ({
           score: item.score,
           count: Number(item.count),
+        })),
+      };
+    },
+  );
+
+  app.get(
+    '/task-assignees',
+    {
+      preHandler: app.requirePermission(Permissions.TASKS_MANAGE),
+      schema: { tags: ['Задачи'], summary: 'Активные пользователи CRM для назначения задач' },
+    },
+    async (request) => {
+      const result = await app.pool.query(
+        `SELECT id, display_name, email
+           FROM app_users
+          WHERE status = 'ACTIVE' AND archived_at IS NULL
+            AND oidc_subject NOT IN ('local-importer', 'locker-integration')
+          ORDER BY display_name, id`,
+      );
+      return {
+        currentUserId: request.authUser!.userId,
+        items: result.rows.map((row) => ({
+          id: row.id,
+          displayName: row.display_name,
+          email: row.email,
         })),
       };
     },
@@ -139,10 +165,22 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
                 t.due_at, t.completed_at, t.result, t.is_next_step, t.version, t.created_at,
                 p.canonical_full_name AS person_name,
                 u.display_name AS assignee_name,
-                t.assignee_user_id
+                t.assignee_user_id,
+                COALESCE(attachments.items, '[]'::jsonb) AS attachments
            FROM tasks t
            LEFT JOIN persons p ON p.id = t.person_id
            LEFT JOIN app_users u ON u.id = t.assignee_user_id
+           LEFT JOIN LATERAL (
+             SELECT jsonb_agg(jsonb_build_object(
+                      'id', file.id,
+                      'fileName', file.original_filename,
+                      'sizeBytes', file.size_bytes,
+                      'status', file.status
+                    ) ORDER BY attachment.created_at, attachment.id) AS items
+               FROM task_attachments attachment
+               JOIN file_objects file ON file.id = attachment.file_object_id
+              WHERE attachment.task_id = t.id
+           ) attachments ON true
           WHERE t.archived_at IS NULL
             AND (NOT $1::boolean OR (t.status <> 'DONE' AND t.status <> 'CANCELLED' AND t.due_at < now()))
             AND ($2::text IS NULL OR t.status = $2::task_status)
@@ -177,6 +215,7 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
           personName: item.person_name,
           assigneeUserId: item.assignee_user_id,
           assigneeName: item.assignee_name,
+          attachments: item.attachments,
         })),
       };
     },
@@ -194,11 +233,16 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
           status: Type.Optional(TaskStatusSchema),
           title: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
           description: Type.Optional(Type.Union([Type.String({ maxLength: 10_000 }), Type.Null()])),
-          dueAt: Type.Optional(
-            Type.Union([Type.String({ format: 'date-time' }), Type.Null()]),
-          ),
+          dueAt: Type.Optional(Type.Union([Type.String({ format: 'date-time' }), Type.Null()])),
           isNextStep: Type.Optional(Type.Boolean()),
           result: Type.Optional(Type.Union([Type.String({ maxLength: 10_000 }), Type.Null()])),
+          assigneeUserId: Type.Optional(Type.Union([Type.String({ format: 'uuid' }), Type.Null()])),
+          fileObjectIds: Type.Optional(
+            Type.Array(Type.String({ format: 'uuid' }), {
+              maxItems: 10,
+              uniqueItems: true,
+            }),
+          ),
         }),
       },
     },
@@ -212,6 +256,8 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
         dueAt?: string | null;
         isNextStep?: boolean;
         result?: string | null;
+        assigneeUserId?: string | null;
+        fileObjectIds?: string[];
       };
       return transaction(app.pool, async (client) => {
         const current = await client.query(
@@ -223,6 +269,8 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
         const row = current.rows[0];
         if (!row) throw new HttpProblem(404, 'Задача не найдена');
         if (row.version !== body.version) throw new HttpProblem(409, 'Задача уже изменена');
+
+        if (body.assigneeUserId) await assertActiveAssignee(client, body.assigneeUserId);
 
         const nextStatus: TaskStatus = body.status ?? row.status;
         const nextIsNextStep = body.isNextStep ?? row.is_next_step;
@@ -247,6 +295,7 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
                   is_next_step = CASE WHEN $8::task_status IN ('DONE', 'CANCELLED')
                                       THEN false ELSE $9::boolean END,
                   result = CASE WHEN $10::boolean THEN $11 ELSE result END,
+                  assignee_user_id = CASE WHEN $12::boolean THEN $13::uuid ELSE assignee_user_id END,
                   completed_at = CASE WHEN $8::task_status = 'DONE'
                                       THEN COALESCE(completed_at, now()) ELSE NULL END,
                   version = version + 1, updated_at = now()
@@ -264,8 +313,13 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
             nextIsNextStep,
             body.result !== undefined,
             body.result === undefined ? null : body.result?.trim() || null,
+            body.assigneeUserId !== undefined,
+            body.assigneeUserId ?? null,
           ],
         );
+        if (body.fileObjectIds !== undefined) {
+          await replaceTaskAttachments(client, id, body.fileObjectIds, request.authUser!.userId);
+        }
         await writeAudit(client, {
           actor: request.authUser!,
           requestId: request.id,
@@ -298,6 +352,13 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
           description: Type.Optional(Type.String({ maxLength: 10_000 })),
           dueAt: Type.Optional(Type.String({ format: 'date-time' })),
           isNextStep: Type.Optional(Type.Boolean()),
+          assigneeUserId: Type.Optional(Type.String({ format: 'uuid' })),
+          fileObjectIds: Type.Optional(
+            Type.Array(Type.String({ format: 'uuid' }), {
+              maxItems: 10,
+              uniqueItems: true,
+            }),
+          ),
         }),
       },
     },
@@ -308,6 +369,8 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
         description?: string;
         dueAt?: string;
         isNextStep?: boolean;
+        assigneeUserId?: string;
+        fileObjectIds?: string[];
       };
       const result = await transaction(app.pool, async (client) => {
         const requested = await client.query<{ id: string }>(
@@ -321,6 +384,8 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
         );
         const canonicalPersonId = canonical.rows[0]?.id;
         if (!canonicalPersonId) throw new HttpProblem(404, 'Участник не найден');
+        const assigneeUserId = body.assigneeUserId ?? request.authUser!.userId;
+        await assertActiveAssignee(client, assigneeUserId);
         if (canonicalPersonId !== body.personId) {
           await client.query('SELECT id FROM persons WHERE id = $1 FOR UPDATE', [
             canonicalPersonId,
@@ -340,15 +405,22 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
         }
         const task = await client.query<{ id: string }>(
           `INSERT INTO tasks (person_id, title, description, created_by_user_id, assignee_user_id, due_at, is_next_step)
-           VALUES ($1, $2, $3, $4, $4, $5, $6) RETURNING id`,
+           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
           [
             canonicalPersonId,
             body.title.trim(),
             body.description?.trim() || null,
             request.authUser!.userId,
+            assigneeUserId,
             body.dueAt ? new Date(body.dueAt) : null,
             body.isNextStep ?? false,
           ],
+        );
+        await replaceTaskAttachments(
+          client,
+          task.rows[0]!.id,
+          body.fileObjectIds ?? [],
+          request.authUser!.userId,
         );
         await writeAudit(client, {
           actor: request.authUser!,
@@ -356,7 +428,13 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
           action: 'task.created',
           entityType: 'task',
           entityId: task.rows[0]!.id,
-          after: { personId: canonicalPersonId, title: body.title, dueAt: body.dueAt },
+          after: {
+            personId: canonicalPersonId,
+            title: body.title,
+            dueAt: body.dueAt,
+            assigneeUserId,
+            attachmentCount: body.fileObjectIds?.length ?? 0,
+          },
         });
         return task.rows[0];
       });
@@ -578,10 +656,10 @@ async function registerDuplicateRoutes(app: FastifyInstance) {
           [first, second, fingerprint, JSON.stringify(['MANUAL'])],
         );
         const id = created.rows[0]!.id;
-        await client.query('DELETE FROM not_duplicate_pairs WHERE person_a_id = $1 AND person_b_id = $2', [
-          first,
-          second,
-        ]);
+        await client.query(
+          'DELETE FROM not_duplicate_pairs WHERE person_a_id = $1 AND person_b_id = $2',
+          [first, second],
+        );
         await writeAudit(client, {
           actor: request.authUser!,
           requestId: request.id,
@@ -861,6 +939,59 @@ async function registerDuplicateRoutes(app: FastifyInstance) {
   );
 }
 
+async function assertActiveAssignee(client: PoolClient, userId: string): Promise<void> {
+  const user = await client.query<{ id: string }>(
+    `SELECT id FROM app_users
+      WHERE id = $1 AND status = 'ACTIVE' AND archived_at IS NULL
+        AND oidc_subject NOT IN ('local-importer', 'locker-integration')`,
+    [userId],
+  );
+  if (!user.rows[0]) throw new HttpProblem(400, 'Исполнитель CRM не найден');
+}
+
+async function replaceTaskAttachments(
+  client: PoolClient,
+  taskId: string,
+  requestedIds: readonly string[],
+  actorUserId: string,
+): Promise<void> {
+  const fileIds = [...new Set(requestedIds)];
+  if (fileIds.length > 10)
+    throw new HttpProblem(400, 'К задаче можно приложить не более 10 файлов');
+  if (fileIds.length > 0) {
+    const files = await client.query<{ id: string }>(
+      `SELECT file.id
+         FROM file_objects file
+        WHERE file.id = ANY($1::uuid[])
+          AND file.status = 'AVAILABLE'
+          AND (
+            file.uploaded_by_user_id = $2
+            OR EXISTS (
+              SELECT 1 FROM task_attachments attachment
+               WHERE attachment.task_id = $3 AND attachment.file_object_id = file.id
+            )
+          )`,
+      [fileIds, actorUserId, taskId],
+    );
+    if (files.rows.length !== fileIds.length) {
+      throw new HttpProblem(400, 'Один из файлов задачи недоступен или ещё проверяется');
+    }
+  }
+  await client.query(
+    `DELETE FROM task_attachments
+      WHERE task_id = $1 AND NOT (file_object_id = ANY($2::uuid[]))`,
+    [taskId, fileIds],
+  );
+  for (const fileId of fileIds) {
+    await client.query(
+      `INSERT INTO task_attachments (task_id, file_object_id, uploaded_by_user_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (task_id, file_object_id) DO NOTHING`,
+      [taskId, fileId, actorUserId],
+    );
+  }
+}
+
 function compactPerson(
   id: string,
   name: string,
@@ -877,6 +1008,7 @@ function compactPerson(
     countableArtifactCount: 0,
     latestArtifactScore: null,
     hasDuplicateCandidate: true,
+    fromBot: false,
   };
 }
 

@@ -21,6 +21,7 @@ export interface ReconciliationResult {
   readonly recoveredFileEvents: number;
   readonly artifactVersions: number;
   readonly persons: number;
+  readonly archivedArtifacts: number;
 }
 
 export async function runDueLifecycleTransitions(pool: Pool, batchSize: number): Promise<number> {
@@ -65,14 +66,47 @@ export async function runDueLifecycleTransitions(pool: Pool, batchSize: number):
 export async function runNightlyReconciliation(
   pool: Pool,
   batchSize: number,
+  archiveAfterWeeks = 12,
 ): Promise<ReconciliationResult> {
   const result = await withAdvisoryLock(pool, RECONCILIATION_LOCK, async () => {
     const recoveredFileEvents = await recoverMissingFileScanEvents(pool);
     const artifactVersions = await reconcileArtifactVersions(pool, batchSize);
     const persons = await reconcilePersons(pool, batchSize);
-    return { acquired: true, recoveredFileEvents, artifactVersions, persons };
+    const archivedArtifacts = await archiveOldArtifacts(pool, archiveAfterWeeks);
+    return { acquired: true, recoveredFileEvents, artifactVersions, persons, archivedArtifacts };
   });
-  return result ?? { acquired: false, recoveredFileEvents: 0, artifactVersions: 0, persons: 0 };
+  return (
+    result ?? {
+      acquired: false,
+      recoveredFileEvents: 0,
+      artifactVersions: 0,
+      persons: 0,
+      archivedArtifacts: 0,
+    }
+  );
+}
+
+async function archiveOldArtifacts(pool: Pool, archiveAfterWeeks: number): Promise<number> {
+  const result = await pool.query(
+    `WITH old_artifacts AS (
+       SELECT artifact.id, max(version.submitted_at) AS latest_submitted_at
+         FROM artifacts artifact
+         JOIN artifact_versions version ON version.artifact_id = artifact.id
+        WHERE artifact.status = 'ACTIVE' AND artifact.archived_at IS NULL
+          AND version.status = 'SUBMITTED' AND version.submitted_at IS NOT NULL
+        GROUP BY artifact.id
+       HAVING max(version.submitted_at) < now() - make_interval(weeks => $1)
+     )
+     UPDATE artifacts artifact
+        SET status = 'ARCHIVED', auto_archived_at = now(),
+            archive_reason = 'Автоматически: нет новых отправок ' || $1::text || ' недель',
+            updated_at = now(), version = artifact.version + 1
+       FROM old_artifacts old
+      WHERE artifact.id = old.id
+      RETURNING artifact.id`,
+    [archiveAfterWeeks],
+  );
+  return result.rowCount ?? 0;
 }
 
 async function recoverMissingFileScanEvents(pool: Pool): Promise<number> {

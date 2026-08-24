@@ -1,6 +1,6 @@
 'use client';
 
-import { CheckIcon, ListChecksIcon, PlusIcon, StarIcon } from 'lucide-react';
+import { CheckIcon, ListChecksIcon, PaperclipIcon, PlusIcon, StarIcon } from 'lucide-react';
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
@@ -131,7 +131,10 @@ export default function TasksPage() {
             {task.title}
           </button>
           {task.isNextStep && (
-            <StarIcon className="text-warning mt-0.5 size-3.5 shrink-0" aria-label="Следующий шаг" />
+            <StarIcon
+              className="text-warning mt-0.5 size-3.5 shrink-0"
+              aria-label="Следующий шаг"
+            />
           )}
         </div>
         {task.personId && task.personName && (
@@ -158,6 +161,11 @@ export default function TasksPage() {
             <Badge variant="soft-muted" className="ml-auto">
               {task.assigneeName}
             </Badge>
+          )}
+          {(task.attachments?.length ?? 0) > 0 && (
+            <span className="text-muted-foreground inline-flex items-center gap-1 text-xs">
+              <PaperclipIcon className="size-3" /> {task.attachments!.length}
+            </span>
           )}
         </div>
       </div>

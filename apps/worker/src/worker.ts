@@ -193,6 +193,7 @@ export class WorkerRuntime {
       const result = await runNightlyReconciliation(
         this.#pool,
         this.config.reconciliationBatchSize,
+        this.config.artifactArchiveAfterWeeks,
       );
       console.info('Lifecycle reconciliation completed', result);
     } catch (error) {

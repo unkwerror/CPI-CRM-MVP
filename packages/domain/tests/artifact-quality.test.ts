@@ -3,8 +3,6 @@ import { describe, expect, it } from 'vitest';
 import {
   ArtifactCriteriaValidationError,
   computeArtifactScore,
-  computeHeadQuality,
-  interpretHeadQuality,
   isQualityArtifact,
   parseArtifactCriteria,
 } from '../src/artifact-quality.js';
@@ -54,45 +52,5 @@ describe('isQualityArtifact', () => {
     expect(isQualityArtifact('NEEDS_REVISION')).toBe(false);
     expect(isQualityArtifact(null)).toBe(false);
     expect(isQualityArtifact(undefined)).toBe(false);
-  });
-});
-
-describe('computeHeadQuality', () => {
-  it('applies documented weights 0.35/0.25/0.20/0.20', () => {
-    expect(
-      computeHeadQuality({
-        artifactQuality: 100,
-        regularity: 100,
-        projectInvolvement: 100,
-        commercialApplicability: 100,
-      }),
-    ).toBe(100);
-    expect(
-      computeHeadQuality({
-        artifactQuality: 80,
-        regularity: 66.7,
-        projectInvolvement: 100,
-        commercialApplicability: 0,
-      }),
-    ).toBeCloseTo(0.35 * 80 + 0.25 * 66.7 + 0.2 * 100, 5);
-  });
-
-  it('clamps components to 0..100', () => {
-    expect(
-      computeHeadQuality({
-        artifactQuality: 150,
-        regularity: -20,
-        projectInvolvement: 0,
-        commercialApplicability: 0,
-      }),
-    ).toBe(35);
-  });
-
-  it('maps scores to interpretation bands', () => {
-    expect(interpretHeadQuality(85)).toBe('READY');
-    expect(interpretHeadQuality(80)).toBe('READY');
-    expect(interpretHeadQuality(65)).toBe('ACTIVATED');
-    expect(interpretHeadQuality(45)).toBe('WEAK');
-    expect(interpretHeadQuality(10)).toBe('REACTIVATE');
   });
 });

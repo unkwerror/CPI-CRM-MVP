@@ -44,16 +44,17 @@ interface ArtifactReviewDialogProps {
 type Decision = 'ACCEPTED' | 'REJECTED';
 
 const SCORE_HINTS: Record<number, string> = {
-  0: 'Нет полезного содержания',
-  3: 'Есть заготовка, но использовать нельзя',
-  5: 'Рабочий минимум',
-  7: 'Сильный артефакт',
-  10: 'Эталон, можно показывать партнёру',
+  1: 'Содержательного результата почти нет',
+  3: 'Сырой и существенно неполный результат',
+  5: 'Минимально завершённый результат',
+  7: 'Добротный и практически применимый результат',
+  9: 'Готов к внешнему использованию',
+  10: 'Эталонный результат',
 };
 
 function scoreHint(score: number): string {
-  const thresholds = [10, 7, 5, 3, 0];
-  const match = thresholds.find((threshold) => score >= threshold) ?? 0;
+  const thresholds = [10, 9, 7, 5, 3, 1];
+  const match = thresholds.find((threshold) => score >= threshold) ?? 1;
   return SCORE_HINTS[match] ?? '';
 }
 
@@ -152,9 +153,7 @@ export function ArtifactReviewDialog({
                 <Badge variant="soft-muted">{detail.typeName}</Badge>
                 <span>Версия {detail.versionNumber}</span>
                 <span>·</span>
-                <span>
-                  {ARTIFACT_VERSION_STATUS_LABELS[detail.status] ?? detail.status}
-                </span>
+                <span>{ARTIFACT_VERSION_STATUS_LABELS[detail.status] ?? detail.status}</span>
                 <span>·</span>
                 <span>{formatDate(detail.submittedAt, true)}</span>
               </div>
@@ -287,11 +286,11 @@ export function ArtifactReviewDialog({
                     </div>
                     <Slider
                       id="artifact-score"
-                      min={0}
+                      min={1}
                       max={10}
                       step={1}
                       value={[score]}
-                      onValueChange={([next]) => setScore(next ?? 0)}
+                      onValueChange={([next]) => setScore(next ?? 1)}
                     />
                     <p className="text-muted-foreground text-xs">{scoreHint(score)}</p>
                   </div>

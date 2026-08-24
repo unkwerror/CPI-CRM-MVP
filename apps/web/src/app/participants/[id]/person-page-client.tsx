@@ -14,6 +14,7 @@ import {
   PlusIcon,
   TagIcon,
   UserMinusIcon,
+  BotIcon,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import {
@@ -39,7 +40,9 @@ import { EmptyState } from '@/components/empty-state';
 import { PageHeader, PageStack } from '@/components/page-header';
 import { PersonContactDialog } from '@/components/person-contact-dialog';
 import { PersonInteractionDialog } from '@/components/person-interaction-dialog';
+import { PersonEventLinkDialog } from '@/components/person-event-link-dialog';
 import { PersonRemovalDialog } from '@/components/person-removal-dialog';
+import { PersonProgramResults } from '@/components/person-program-results';
 import { StatusBadge } from '@/components/status-badge';
 import { TaskDialog } from '@/components/task-dialog';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -83,6 +86,7 @@ export function PersonPageClient({ id }: { id: string }) {
   const [showEdit, setShowEdit] = useState(false);
   const [showContact, setShowContact] = useState(false);
   const [showInteraction, setShowInteraction] = useState(false);
+  const [showEventLink, setShowEventLink] = useState(false);
   const [showTask, setShowTask] = useState(false);
   const [showRemoval, setShowRemoval] = useState(false);
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
@@ -171,6 +175,11 @@ export function PersonPageClient({ id }: { id: string }) {
               {person.organization ?? 'Организация не указана'}
               {person.faculty ? ` · ${person.faculty}` : ''}
             </span>
+            {person.fromBot && (
+              <Badge variant="soft-primary">
+                <BotIcon /> Из Telegram-бота
+              </Badge>
+            )}
             {person.tags?.map((tag) => (
               <Badge key={tag} variant="soft-muted">
                 <TagIcon /> {tag}
@@ -188,6 +197,11 @@ export function PersonPageClient({ id }: { id: string }) {
             {canManageTasks && (
               <Button onClick={() => setShowInteraction(true)} variant="outline">
                 <MessageCircleIcon /> Взаимодействие
+              </Button>
+            )}
+            {canEditPerson && (
+              <Button onClick={() => setShowEventLink(true)} variant="outline">
+                <CalendarDaysIcon /> В мероприятие
               </Button>
             )}
             {canAddArtifact && (
@@ -262,49 +276,7 @@ export function PersonPageClient({ id }: { id: string }) {
 
         <TabsContent value="overview">
           <div className="grid gap-4 lg:grid-cols-2">
-            {person.headQuality && (
-              <Card className="lg:col-span-2">
-                <CardHeader>
-                  <div>
-                    <p className="text-muted-foreground text-xs font-semibold tracking-wider uppercase">
-                      Индекс качества головы (0–100)
-                    </p>
-                    <CardTitle className="mt-1.5">
-                      Q_head: {person.headQuality.score} — {person.headQuality.bandLabel}
-                    </CardTitle>
-                  </div>
-                </CardHeader>
-                <CardContent className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                  {(
-                    [
-                      [
-                        person.headQuality.components.artifactQuality,
-                        'качество артефактов за 90 дней (вес 35 %)',
-                      ],
-                      [
-                        person.headQuality.components.regularity,
-                        'регулярность качественных артефактов (вес 25 %)',
-                      ],
-                      [
-                        person.headQuality.components.projectInvolvement,
-                        'проектная включённость (вес 20 %)',
-                      ],
-                      [
-                        person.headQuality.components.commercialApplicability,
-                        'коммерческая применимость (вес 20 %)',
-                      ],
-                    ] as const
-                  ).map(([value, caption]) => (
-                    <div key={caption} className="space-y-1">
-                      <strong className="tabular block text-xl font-semibold">{value}</strong>
-                      <span className="text-muted-foreground block text-xs leading-snug">
-                        {caption}
-                      </span>
-                    </div>
-                  ))}
-                </CardContent>
-              </Card>
-            )}
+            <PersonProgramResults personId={person.id} canEdit={canEditPerson} />
 
             <Card>
               <CardHeader>
@@ -543,7 +515,12 @@ export function PersonPageClient({ id }: { id: string }) {
         </TabsContent>
 
         <TabsContent value="events">
-          <EventsTab person={person} onOpenArtifact={setSelectedVersionId} />
+          <EventsTab
+            canLink={canEditPerson}
+            onLink={() => setShowEventLink(true)}
+            person={person}
+            onOpenArtifact={setSelectedVersionId}
+          />
         </TabsContent>
 
         <TabsContent value="artifacts">
@@ -592,6 +569,17 @@ export function PersonPageClient({ id }: { id: string }) {
       )}
       {showInteraction && (
         <PersonInteractionDialog onClose={() => setShowInteraction(false)} personId={person.id} />
+      )}
+      {showEventLink && (
+        <PersonEventLinkDialog
+          existingEventIds={person.events.map((event) => event.id)}
+          onClose={() => setShowEventLink(false)}
+          onLinked={async () => {
+            await reload();
+            setTab('events');
+          }}
+          personId={person.id}
+        />
       )}
       <TaskDialog
         onOpenChange={setShowTask}
@@ -663,7 +651,11 @@ function MarketingConsent({
               <span className="text-[13px]">
                 {channel.label}
                 <Badge className="ml-2" variant={optedOut ? 'soft-warning' : 'soft-success'}>
-                  {optedOut ? 'не писать' : status === 'GRANTED' ? 'согласие есть' : 'не спрашивали'}
+                  {optedOut
+                    ? 'не писать'
+                    : status === 'GRANTED'
+                      ? 'согласие есть'
+                      : 'не спрашивали'}
                 </Badge>
               </span>
               {canEdit && (
@@ -719,9 +711,13 @@ function formatEventPeriod(startsAt?: string | null, endsAt?: string | null): st
 function EventsTab({
   person,
   onOpenArtifact,
+  canLink,
+  onLink,
 }: {
   person: PersonDetail;
   onOpenArtifact: (versionId: string) => void;
+  canLink: boolean;
+  onLink: () => void;
 }) {
   if (!person.events.length) {
     return (
@@ -730,6 +726,13 @@ function EventsTab({
           icon={CalendarDaysIcon}
           title="Мероприятия не найдены"
           text="В импортных и текущих данных пока нет подтверждённых записей участия."
+          action={
+            canLink ? (
+              <Button onClick={onLink} size="sm">
+                <PlusIcon /> Добавить в мероприятие
+              </Button>
+            ) : undefined
+          }
         />
       </Card>
     );
@@ -737,6 +740,13 @@ function EventsTab({
 
   return (
     <div className="space-y-4">
+      {canLink && (
+        <div className="flex justify-end">
+          <Button onClick={onLink} size="sm" variant="outline">
+            <PlusIcon /> Добавить в мероприятие
+          </Button>
+        </div>
+      )}
       {person.events.map((event) => (
         <Card key={event.id}>
           <CardHeader>

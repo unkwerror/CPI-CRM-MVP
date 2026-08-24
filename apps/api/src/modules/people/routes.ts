@@ -3,13 +3,10 @@ import { createHash } from 'node:crypto';
 import { CreatePersonBody, PatchPersonBody } from '@cpi-crm/contracts';
 import { autoResolveDuplicateCandidatesInTransaction } from '@cpi-crm/db';
 import {
-  HEAD_QUALITY_BAND_LABELS,
   Permissions,
   assessParticipantComment,
   buildRussianFullName,
-  computeHeadQuality,
   hasPermission,
-  interpretHeadQuality,
   normalizeEmail,
   normalizeFullName,
   normalizePhone,
@@ -24,42 +21,6 @@ import { hashIdentityKey } from '../../lib/identity-hash.js';
 import { getOrganizationContext } from '../../lib/organization.js';
 import { HttpProblem } from '../../lib/problem.js';
 import { decodeCursor, encodeCursor, transaction } from '../../lib/sql.js';
-
-/**
- * Q_head = 0.35 × средний Q_artifact (90 дней, к 100) + 0.25 × регулярность
- * (доля 30-дневных окон с качественным артефактом) + 0.20 × проектная
- * включённость + 0.20 × коммерческая применимость (связь со сделкой).
- */
-function buildHeadQuality(
-  row:
-    | {
-        avg_score: string | null;
-        quality_windows: string;
-        involved: boolean;
-        commercial: boolean;
-      }
-    | undefined,
-) {
-  const components = {
-    artifactQuality: row?.avg_score === null || row === undefined ? 0 : Number(row.avg_score) * 10,
-    regularity: row === undefined ? 0 : (Math.min(3, Number(row.quality_windows)) / 3) * 100,
-    projectInvolvement: row?.involved ? 100 : 0,
-    commercialApplicability: row?.commercial ? 100 : 0,
-  };
-  const score = computeHeadQuality(components);
-  const band = interpretHeadQuality(score);
-  return {
-    score: Math.round(score * 10) / 10,
-    band,
-    bandLabel: HEAD_QUALITY_BAND_LABELS[band],
-    components: {
-      artifactQuality: Math.round(components.artifactQuality * 10) / 10,
-      regularity: Math.round(components.regularity * 10) / 10,
-      projectInvolvement: components.projectInvolvement,
-      commercialApplicability: components.commercialApplicability,
-    },
-  };
-}
 
 const MARKETING_PURPOSES = ['MARKETING_TELEGRAM', 'MARKETING_EMAIL'] as const;
 type MarketingPurpose = (typeof MARKETING_PURPOSES)[number];
@@ -95,6 +56,7 @@ interface PersonListRow {
   artifact_count: string;
   latest_score: number | null;
   has_duplicate: boolean;
+  from_bot: boolean;
   total_count: string;
 }
 
@@ -237,6 +199,12 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
                 COALESCE(artifact_agg.artifact_count, 0)::text AS artifact_count,
                 latest.score AS latest_score,
                 COALESCE(duplicates.has_duplicate, false) AS has_duplicate,
+                EXISTS (
+                  SELECT 1 FROM external_identities identity
+                   WHERE identity.person_id IN ${clusterMemberIdsSql}
+                     AND identity.source_namespace IN ('locker.user', 'locker.telegram')
+                     AND identity.archived_at IS NULL
+                ) AS from_bot,
                 count(*) OVER()::text AS total_count
            FROM persons p
            JOIN organization_settings os ON os.organization_id = p.organization_id
@@ -521,6 +489,12 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
                 COALESCE(artifact_agg.artifact_count, 0)::text AS artifact_count,
                 latest.score AS latest_score,
                 COALESCE(duplicates.has_duplicate, false) AS has_duplicate,
+                EXISTS (
+                  SELECT 1 FROM external_identities identity
+                   WHERE identity.person_id IN (SELECT id FROM persons WHERE id = p.id OR merged_into_person_id = p.id)
+                     AND identity.source_namespace IN ('locker.user', 'locker.telegram')
+                     AND identity.archived_at IS NULL
+                ) AS from_bot,
                 '1'::text AS total_count
            FROM persons p
            JOIN organization_settings os ON os.organization_id = p.organization_id
@@ -548,7 +522,6 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
         sources,
         tags,
         participations,
-        headQualityRows,
         marketingConsent,
       ] = await Promise.all([
         app.pool.query(
@@ -641,39 +614,6 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
               AND e.archived_at IS NULL
             ORDER BY COALESCE(e.starts_at, ep.attended_at, ep.registered_at, e.created_at) DESC,
                      e.name, ep.id`,
-          [canonical],
-        ),
-        // Q_head: компоненты индекса качества головы за последние 90 дней.
-        app.pool.query<{
-          avg_score: string | null;
-          quality_windows: string;
-          involved: boolean;
-          commercial: boolean;
-        }>(
-          `WITH reviewed AS (
-               SELECT DISTINCT ar.id, ar.score, ar.decision, av.submitted_at
-                 FROM artifact_version_contributors avc
-                 JOIN artifact_versions av ON av.id = avc.artifact_version_id
-                 JOIN artifact_review_selections sel ON sel.artifact_version_id = av.id
-                 JOIN artifact_reviews ar ON ar.id = sel.current_final_review_id
-                WHERE avc.person_id IN ${clusterSql}
-                  AND av.qualifies_for_activity
-                  AND av.submitted_at IS NOT NULL
-                  AND av.submitted_at > now() - interval '90 days'
-                  AND ar.voided_at IS NULL AND ar.status = 'FINAL' AND ar.score IS NOT NULL
-             ),
-             quality AS (
-               SELECT submitted_at FROM reviewed WHERE decision = 'ACCEPTED'
-             )
-             SELECT
-               (SELECT avg(score)::text FROM reviewed) AS avg_score,
-               (SELECT count(DISTINCT floor(extract(epoch FROM (now() - submitted_at)) / 2592000))
-                  FROM quality)::text AS quality_windows,
-               EXISTS (SELECT 1 FROM team_memberships tm
-                        WHERE tm.person_id IN ${clusterSql}
-                          AND tm.archived_at IS NULL AND tm.valid_to IS NULL) AS involved,
-               EXISTS (SELECT 1 FROM deals d
-                        WHERE d.person_id IN ${clusterSql} AND d.archived_at IS NULL) AS commercial`,
           [canonical],
         ),
         // Действует последняя запись по каждой цели: отзыв согласия перекрывает выданное.
@@ -774,7 +714,6 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
         })),
         tags: tags.rows.map((item) => item.name),
         notes: row.notes ?? null,
-        headQuality: buildHeadQuality(headQualityRows.rows[0]),
         marketingConsent: {
           telegram: consentStatus(marketingConsent.rows, 'MARKETING_TELEGRAM'),
           email: consentStatus(marketingConsent.rows, 'MARKETING_EMAIL'),
@@ -1689,6 +1628,7 @@ function mapPersonSummary(row: PersonListRow, includeContact = true) {
     countableArtifactCount: Number(row.artifact_count),
     latestArtifactScore: row.latest_score,
     hasDuplicateCandidate: row.has_duplicate,
+    fromBot: row.from_bot,
   };
 }
 

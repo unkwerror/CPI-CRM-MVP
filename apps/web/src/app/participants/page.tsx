@@ -4,6 +4,7 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
   DownloadIcon,
+  BotIcon,
   MailIcon,
   PhoneIcon,
   PlusIcon,
@@ -244,9 +245,16 @@ function ParticipantsContent() {
                               <strong className="block text-[13px] font-medium">
                                 {person.canonicalFullName}
                               </strong>
-                              <small className="text-muted-foreground block text-xs">
-                                ID {person.id.slice(0, 8)}
-                              </small>
+                              <span className="flex items-center gap-1.5">
+                                <small className="text-muted-foreground text-xs">
+                                  ID {person.id.slice(0, 8)}
+                                </small>
+                                {person.fromBot && (
+                                  <Badge variant="soft-primary" className="px-1 py-0 text-[10px]">
+                                    <BotIcon /> Бот
+                                  </Badge>
+                                )}
+                              </span>
                             </span>
                           </Link>
                         </TableCell>

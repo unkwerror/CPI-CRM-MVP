@@ -36,6 +36,7 @@ export default function ReviewPage() {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [scope, setScope] = useState('all');
+  const [archive, setArchive] = useState<'active' | 'archived'>('active');
   const [reviewVersionId, setReviewVersionId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -43,6 +44,7 @@ export default function ReviewPage() {
     setError(null);
     const params = new URLSearchParams({ limit: '300' });
     if (scope !== 'all') params.set('review', scope);
+    params.set('archive', archive);
     try {
       const response = await api<{ items: ArtifactSummary[] }>(`/artifacts?${params}`);
       setItems(response.items);
@@ -51,7 +53,7 @@ export default function ReviewPage() {
     } finally {
       setLoading(false);
     }
-  }, [scope]);
+  }, [archive, scope]);
 
   useEffect(() => {
     void load();
@@ -77,9 +79,7 @@ export default function ReviewPage() {
             type="button"
             className="min-w-0 flex-1 text-left text-[13px] leading-snug font-medium hover:underline disabled:cursor-default disabled:no-underline"
             disabled={!artifact.latestVersionId}
-            onClick={() =>
-              artifact.latestVersionId && setReviewVersionId(artifact.latestVersionId)
-            }
+            onClick={() => artifact.latestVersionId && setReviewVersionId(artifact.latestVersionId)}
           >
             {artifact.title}
           </button>
@@ -114,7 +114,7 @@ export default function ReviewPage() {
         title="Приёмка"
         description={
           pendingCount > 0
-            ? `${pendingCount} артефактов ждут решения «принят / не принят» и оценки 0–10`
+            ? `${pendingCount} артефактов ждут решения и субъективной оценки 1–10`
             : 'Очередь приёмки пуста'
         }
       />
@@ -134,6 +134,16 @@ export default function ReviewPage() {
             { value: 'all', label: 'Все артефакты' },
             { value: 'pending', label: 'Только на проверке' },
             { value: 'reviewed', label: 'Только с решением' },
+          ]}
+        />
+        <ToolbarSelect
+          label="Раздел"
+          value={archive}
+          onChange={(value) => setArchive(value as 'active' | 'archived')}
+          width="w-48"
+          options={[
+            { value: 'active', label: 'Текущие' },
+            { value: 'archived', label: 'Архив (старше 12 недель)' },
           ]}
         />
       </DataToolbar>

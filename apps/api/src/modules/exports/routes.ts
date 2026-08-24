@@ -6,13 +6,20 @@ import {
 } from '@cpi-crm/importer';
 import { Type } from '@sinclair/typebox';
 import { ZipArchive } from 'archiver';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { Readable } from 'node:stream';
 
 import { EVENT_ARTIFACTS_SQL, mapEventArtifactRow } from '../../lib/event-artifacts.js';
 import { createConcurrencyGuard, heavyOperationRateLimit } from '../../lib/heavy-operations.js';
 import { requestLockerDownloadUrl } from '../../lib/locker.js';
 import { getOrganizationContext } from '../../lib/organization.js';
+import {
+  loadOperationalPeriodReport,
+  operationalReportSvg,
+  resolvePeriod,
+  type PeriodBounds,
+} from '../../lib/period-report.js';
+import { HttpProblem } from '../../lib/problem.js';
 
 const LIVE_ACTIVITY_SQL = `CASE
   WHEN p.activation_state <> 'ACTIVATED' OR p.last_artifact_at IS NULL THEN 'UNKNOWN'
@@ -23,8 +30,14 @@ END`;
 
 const EXPORT_BATCH_SIZE = 25;
 
-/** Параллельная выдача подписанных ссылок; сами файлы качаются по очереди. */
+/** Параллельная подготовка источников; сами файлы качаются по очереди. */
 const ARTIFACT_LINK_CONCURRENCY = 4;
+
+const PeriodQuery = Type.Object({
+  weeks: Type.Optional(Type.Integer({ minimum: 1, maximum: 52 })),
+  from: Type.Optional(Type.String({ format: 'date-time' })),
+  to: Type.Optional(Type.String({ format: 'date-time' })),
+});
 
 interface EventParticipantExportRow {
   person_id: string;
@@ -38,6 +51,28 @@ interface EventParticipantExportRow {
   telegram_user_id: string | null;
   attended: boolean | null;
   decisions: string[];
+}
+
+type PeriodQueryInput = { weeks?: number; from?: string; to?: string };
+
+interface PeriodArtifactRow {
+  version_id: string;
+  artifact_id: string;
+  submitted_at: Date;
+  title: string;
+  type_name: string;
+  event_name: string | null;
+  source: 'BOT' | 'CRM';
+  score: number | null;
+  decision: string | null;
+  authors: string[];
+  external_urls: string[];
+  files: {
+    id: string;
+    fileName: string;
+    status: string;
+    storageProvider: 'CRM' | 'LOCKER';
+  }[];
 }
 
 /** Ожидает $1 = eventId, $2 = organizationId. */
@@ -539,6 +574,249 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
   };
 
   app.get(
+    '/exports/period/summary.json',
+    {
+      config: { rateLimit: heavyOperationRateLimit(6, '1 minute') },
+      preHandler: [app.requirePermission(Permissions.EXPORTS_BULK), guardExportConcurrency],
+      schema: {
+        tags: ['Экспорт'],
+        summary: 'Сводка CRM за выбранный период',
+        querystring: PeriodQuery,
+      },
+    },
+    async (request, reply) => {
+      const period = periodFromQuery(request.query as PeriodQueryInput);
+      const organization = await getOrganizationContext(app.pool);
+      const report = await loadOperationalPeriodReport(app.pool, organization.id, period);
+      await auditPeriodExport(app, request, 'period.summary_exported', report, 'JSON');
+      return reply
+        .header('Content-Type', 'application/json; charset=utf-8')
+        .header('Content-Disposition', `attachment; filename="${periodFileStem(period)}.json"`)
+        .send(report);
+    },
+  );
+
+  app.get(
+    '/exports/period/report.svg',
+    {
+      config: { rateLimit: heavyOperationRateLimit(6, '1 minute') },
+      preHandler: [app.requirePermission(Permissions.EXPORTS_BULK), guardExportConcurrency],
+      schema: {
+        tags: ['Экспорт'],
+        summary: 'Изображение дашборда за выбранный период',
+        querystring: PeriodQuery,
+      },
+    },
+    async (request, reply) => {
+      const period = periodFromQuery(request.query as PeriodQueryInput);
+      const organization = await getOrganizationContext(app.pool);
+      const report = await loadOperationalPeriodReport(app.pool, organization.id, period);
+      await auditPeriodExport(app, request, 'period.dashboard_image_exported', report, 'SVG');
+      return reply
+        .header('Content-Type', 'image/svg+xml; charset=utf-8')
+        .header('Content-Disposition', `attachment; filename="${periodFileStem(period)}.svg"`)
+        .send(operationalReportSvg(report));
+    },
+  );
+
+  app.get(
+    '/exports/period/package.zip',
+    {
+      config: { rateLimit: heavyOperationRateLimit(2, '1 minute') },
+      preHandler: [app.requirePermission(Permissions.EXPORTS_BULK), guardExportConcurrency],
+      schema: {
+        tags: ['Экспорт'],
+        summary: 'Полный ZIP: отчёт, таблицы и файлы артефактов за период',
+        querystring: PeriodQuery,
+      },
+    },
+    async (request, reply) => {
+      const period = periodFromQuery(request.query as PeriodQueryInput);
+      const organization = await getOrganizationContext(app.pool);
+      const [report, data] = await Promise.all([
+        loadOperationalPeriodReport(app.pool, organization.id, period),
+        loadPeriodExportData(app, organization.id, period),
+      ]);
+
+      const usedPaths = new Set<string>();
+      const downloads: {
+        archivePath: string;
+        fileId: string;
+        storageProvider: 'CRM' | 'LOCKER';
+      }[] = [];
+      const skipped: { artifact: string; file: string; reason: string }[] = [];
+      const versionFiles = new Map<string, string[]>();
+      for (const artifact of data.artifacts) {
+        const author = artifact.authors[0] ?? 'Без автора';
+        const folder = `${artifact.submitted_at.toISOString().slice(0, 10)}_${sanitizeArchiveSegment(author)}`;
+        for (const file of artifact.files) {
+          if (file.status !== 'AVAILABLE') {
+            skipped.push({ artifact: artifact.title, file: file.fileName, reason: file.status });
+            continue;
+          }
+          const archivePath = uniqueArchivePath(
+            usedPaths,
+            `artifacts/${folder}/${sanitizeArchiveSegment(artifact.title)}/${sanitizeArchiveSegment(file.fileName)}`,
+          );
+          downloads.push({
+            archivePath,
+            fileId: file.id,
+            storageProvider: file.storageProvider,
+          });
+          const paths = versionFiles.get(artifact.version_id) ?? [];
+          paths.push(archivePath);
+          versionFiles.set(artifact.version_id, paths);
+        }
+      }
+      const sources = await resolveDownloadSources(app, getS3(), downloads);
+      skipped.push(...sources.failures);
+
+      const artifactsCsv = csvDocument(
+        [
+          'ID версии',
+          'ID артефакта',
+          'Дата отправки',
+          'Название',
+          'Тип',
+          'Авторы',
+          'Мероприятие',
+          'Источник',
+          'Оценка 1–10',
+          'Решение',
+          'Внешние ссылки',
+          'Файлы в архиве',
+        ],
+        data.artifacts.map((artifact) => [
+          artifact.version_id,
+          artifact.artifact_id,
+          artifact.submitted_at.toISOString(),
+          artifact.title,
+          artifact.type_name,
+          artifact.authors.join(' | '),
+          artifact.event_name ?? '',
+          artifact.source,
+          artifact.score ?? '',
+          artifact.decision ?? '',
+          artifact.external_urls.join(' | '),
+          (versionFiles.get(artifact.version_id) ?? []).join(' | '),
+        ]),
+      );
+      const peopleCsv = csvDocument(
+        ['ID', 'ФИО', 'Создан', 'Источник', 'Активация', 'Активность', 'Ответственный'],
+        data.people.map((person) => [
+          person.id,
+          person.canonical_full_name,
+          person.created_at.toISOString(),
+          person.from_bot ? 'BOT' : 'CRM / IMPORT',
+          person.activation_state,
+          person.activity_status,
+          person.owner_name ?? '',
+        ]),
+      );
+      const tasksCsv = csvDocument(
+        [
+          'ID',
+          'Создана',
+          'Завершена',
+          'Статус',
+          'Задача',
+          'Участник',
+          'Исполнитель',
+          'Срок',
+          'Файлы',
+        ],
+        data.tasks.map((task) => [
+          task.id,
+          task.created_at.toISOString(),
+          task.completed_at?.toISOString() ?? '',
+          task.status,
+          task.title,
+          task.person_name ?? '',
+          task.assignee_name ?? '',
+          task.due_at?.toISOString() ?? '',
+          task.attachments.join(' | '),
+        ]),
+      );
+      const eventsCsv = csvDocument(
+        ['ID участия', 'Мероприятие', 'Участник', 'Создано', 'Решение', 'Посещение', 'Источник'],
+        data.events.map((item) => [
+          item.id,
+          item.event_name,
+          item.person_name,
+          item.created_at.toISOString(),
+          item.decision,
+          item.attendance,
+          item.data_origin,
+        ]),
+      );
+      const programsCsv = csvDocument(
+        ['ID', 'Участник', 'Программа', 'Статус', 'Результат', 'Дата события', 'Обновлено'],
+        data.programs.map((item) => [
+          item.id,
+          item.person_name,
+          item.program_code,
+          item.status,
+          item.result ?? '',
+          item.occurred_at?.toISOString() ?? '',
+          item.updated_at.toISOString(),
+        ]),
+      );
+
+      await auditPeriodExport(app, request, 'period.package_zip_exported', report, 'ZIP', {
+        files: sources.entries.length,
+        skipped: skipped.length,
+      });
+
+      const archive = new ZipArchive({ zlib: { level: 6 } });
+      archive.on('warning', (error: Error) => app.log.warn({ err: error }, 'period zip warning'));
+      archive.on('error', (error: Error) => archive.destroy(error));
+      archive.append(
+        JSON.stringify({ ...report, files: sources.entries.length, skipped }, null, 2),
+        {
+          name: 'report/summary.json',
+        },
+      );
+      archive.append(operationalReportSvg(report), { name: 'report/dashboard.svg' });
+      archive.append(artifactsCsv, { name: 'tables/artifacts.csv' });
+      archive.append(peopleCsv, { name: 'tables/new-people.csv' });
+      archive.append(tasksCsv, { name: 'tables/tasks.csv' });
+      archive.append(eventsCsv, { name: 'tables/event-participations.csv' });
+      archive.append(programsCsv, { name: 'tables/program-results.csv' });
+      archive.append(
+        `Выгрузка ЦПИ за ${period.from.toISOString()} — ${period.to.toISOString()}\n\n` +
+          'report/dashboard.svg — изображение отчёта\n' +
+          'report/summary.json — машиночитаемая сводка\n' +
+          'tables/ — таблицы CRM в UTF-8 CSV\n' +
+          'artifacts/ — доступные файлы отправленных версий\n' +
+          'Недоступные или непроверенные файлы перечислены в summary.json и не теряются из CRM.\n',
+        { name: 'README.txt' },
+      );
+
+      void (async () => {
+        for (const entry of sources.entries) {
+          if (request.raw.aborted) break;
+          try {
+            archive.append(await entry.open(), { name: entry.archivePath });
+          } catch (error) {
+            app.log.warn({ err: error, file: entry.archivePath }, 'period zip skipped file');
+          }
+        }
+        await archive.finalize();
+      })().catch((error: unknown) => {
+        app.log.error({ err: error }, 'period zip stream failed');
+        archive.destroy(error instanceof Error ? error : new Error('period zip failed'));
+      });
+
+      return reply
+        .header('Content-Type', 'application/zip')
+        .header('Content-Disposition', `attachment; filename="${periodFileStem(period)}.zip"`)
+        .header('Cache-Control', 'private, no-store, max-age=0')
+        .header('X-Content-Type-Options', 'nosniff')
+        .send(archive);
+    },
+  );
+
+  app.get(
     '/exports/events/:id/package.zip',
     {
       config: { rateLimit: heavyOperationRateLimit(2, '1 minute') },
@@ -775,14 +1053,242 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
   );
 }
 
+function periodFromQuery(query: PeriodQueryInput): PeriodBounds {
+  try {
+    return resolvePeriod(query);
+  } catch (error) {
+    throw new HttpProblem(400, error instanceof Error ? error.message : 'Некорректный период');
+  }
+}
+
+function periodFileStem(period: PeriodBounds): string {
+  return `cpi-report-${period.from.toISOString().slice(0, 10)}-${period.to.toISOString().slice(0, 10)}`;
+}
+
+async function auditPeriodExport(
+  app: FastifyInstance,
+  request: FastifyRequest,
+  action: string,
+  report: { period: unknown; artifacts: { submittedVersions: number } },
+  format: string,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
+  await app.pool.query(
+    `INSERT INTO audit_log
+       (actor_user_id, actor_subject, request_id, action, entity_type, after, reason)
+     VALUES ($1, $2, $3, $4, 'export', $5::jsonb, $6)`,
+    [
+      request.authUser!.userId,
+      request.authUser!.sub,
+      request.id,
+      action,
+      JSON.stringify({
+        period: report.period,
+        format,
+        artifacts: report.artifacts.submittedVersions,
+        ...extra,
+      }),
+      `Выгрузка операционного отчёта в формате ${format}`,
+    ],
+  );
+}
+
+async function loadPeriodExportData(
+  app: FastifyInstance,
+  organizationId: string,
+  period: PeriodBounds,
+) {
+  const parameters = [organizationId, period.from, period.to];
+  const [artifacts, people, tasks, events, programs] = await Promise.all([
+    app.pool.query<PeriodArtifactRow>(
+      `SELECT version.id AS version_id, artifact.id AS artifact_id,
+              version.submitted_at, artifact.title, type.name AS type_name,
+              event.name AS event_name,
+              CASE WHEN locker.artifact_version_id IS NULL THEN 'CRM' ELSE 'BOT' END AS source,
+              review.score, review.decision,
+              COALESCE(authors.items, '[]'::jsonb) AS authors,
+              COALESCE(urls.items, '[]'::jsonb) AS external_urls,
+              COALESCE(files.items, '[]'::jsonb) AS files
+         FROM artifact_versions version
+         JOIN artifacts artifact ON artifact.id = version.artifact_id
+         JOIN artifact_types type ON type.id = artifact.type_id
+         LEFT JOIN events event ON event.id = artifact.event_id
+         LEFT JOIN locker_submission_links locker ON locker.artifact_version_id = version.id
+         LEFT JOIN artifact_review_selections selection ON selection.artifact_version_id = version.id
+         LEFT JOIN artifact_reviews review ON review.id = selection.current_final_review_id
+         LEFT JOIN LATERAL (
+           SELECT jsonb_agg(DISTINCT canonical.canonical_full_name
+                            ORDER BY canonical.canonical_full_name) AS items
+             FROM artifact_version_contributors contributor
+             JOIN persons member ON member.id = contributor.person_id
+             JOIN persons canonical ON canonical.id = COALESCE(member.merged_into_person_id, member.id)
+            WHERE contributor.artifact_version_id = version.id
+              AND contributor.contribution_role = 'AUTHOR'
+         ) authors ON true
+         LEFT JOIN LATERAL (
+           SELECT jsonb_agg(asset.external_url ORDER BY asset.display_order) AS items
+             FROM artifact_assets asset
+            WHERE asset.artifact_version_id = version.id
+              AND asset.asset_type = 'EXTERNAL_URL' AND asset.external_url IS NOT NULL
+         ) urls ON true
+         LEFT JOIN LATERAL (
+           SELECT jsonb_agg(jsonb_build_object(
+                    'id', file.id,
+                    'fileName', file.original_filename,
+                    'status', file.status,
+                    'storageProvider', file.storage_provider
+                  ) ORDER BY asset.display_order, asset.id) AS items
+             FROM artifact_assets asset
+             JOIN file_objects file ON file.id = asset.file_object_id
+            WHERE asset.artifact_version_id = version.id AND asset.asset_type = 'FILE'
+         ) files ON true
+        WHERE artifact.organization_id = $1 AND artifact.archived_at IS NULL
+          AND artifact.status <> 'VOIDED' AND version.status = 'SUBMITTED'
+          AND version.submitted_at >= $2 AND version.submitted_at < $3
+        ORDER BY version.submitted_at, artifact.id, version.version_number`,
+      parameters,
+    ),
+    app.pool.query<{
+      id: string;
+      canonical_full_name: string;
+      created_at: Date;
+      activation_state: string;
+      activity_status: string;
+      owner_name: string | null;
+      from_bot: boolean;
+    }>(
+      `SELECT person.id, person.canonical_full_name, person.created_at,
+              person.activation_state,
+              CASE
+                WHEN person.activation_state <> 'ACTIVATED' OR person.last_artifact_at IS NULL THEN 'UNKNOWN'
+                WHEN now() <= person.last_artifact_at + make_interval(hours => rules.active_window_hours) THEN 'ACTIVE'
+                WHEN now() <= person.last_artifact_at + make_interval(hours => rules.inactive_after_hours) THEN 'MEDIUM'
+                ELSE 'INACTIVE'
+              END AS activity_status,
+              owner.display_name AS owner_name,
+              EXISTS (
+                SELECT 1 FROM external_identities identity
+                 WHERE identity.person_id IN (
+                         SELECT member.id FROM persons member
+                          WHERE member.id = person.id OR member.merged_into_person_id = person.id
+                       )
+                   AND identity.source_namespace IN ('locker.user', 'locker.telegram')
+                   AND identity.archived_at IS NULL
+              ) AS from_bot
+         FROM persons person
+         JOIN organization_settings settings ON settings.organization_id = person.organization_id
+         JOIN lifecycle_rule_sets rules ON rules.id = settings.current_lifecycle_rule_set_id
+         LEFT JOIN app_users owner ON owner.id = person.owner_user_id
+        WHERE person.organization_id = $1 AND person.archived_at IS NULL
+          AND person.merged_into_person_id IS NULL
+          AND person.created_at >= $2 AND person.created_at < $3
+        ORDER BY person.normalized_full_name, person.id`,
+      parameters,
+    ),
+    app.pool.query<{
+      id: string;
+      created_at: Date;
+      completed_at: Date | null;
+      status: string;
+      title: string;
+      person_name: string | null;
+      assignee_name: string | null;
+      due_at: Date | null;
+      attachments: string[];
+    }>(
+      `SELECT task.id, task.created_at, task.completed_at, task.status, task.title,
+              person.canonical_full_name AS person_name,
+              assignee.display_name AS assignee_name, task.due_at,
+              COALESCE(attachments.items, '[]'::jsonb) AS attachments
+         FROM tasks task
+         LEFT JOIN persons person ON person.id = task.person_id
+         LEFT JOIN projects project ON project.id = task.project_id
+         LEFT JOIN app_users assignee ON assignee.id = task.assignee_user_id
+         LEFT JOIN LATERAL (
+           SELECT jsonb_agg(file.original_filename ORDER BY attachment.created_at) AS items
+             FROM task_attachments attachment
+             JOIN file_objects file ON file.id = attachment.file_object_id
+            WHERE attachment.task_id = task.id
+         ) attachments ON true
+        WHERE task.archived_at IS NULL
+          AND COALESCE(person.organization_id, project.organization_id) = $1
+          AND ((task.created_at >= $2 AND task.created_at < $3)
+               OR (task.completed_at >= $2 AND task.completed_at < $3))
+        ORDER BY task.created_at, task.id`,
+      parameters,
+    ),
+    app.pool.query<{
+      id: string;
+      event_name: string;
+      person_name: string;
+      created_at: Date;
+      decision: string;
+      attendance: string;
+      data_origin: string;
+    }>(
+      `SELECT participation.id, event.name AS event_name,
+              canonical.canonical_full_name AS person_name,
+              participation.created_at, participation.decision,
+              participation.attendance, participation.data_origin
+         FROM event_participations participation
+         JOIN events event ON event.id = participation.event_id
+         JOIN persons member ON member.id = participation.person_id
+         JOIN persons canonical ON canonical.id = COALESCE(member.merged_into_person_id, member.id)
+        WHERE event.organization_id = $1 AND participation.archived_at IS NULL
+          AND participation.created_at >= $2 AND participation.created_at < $3
+        ORDER BY participation.created_at, participation.id`,
+      parameters,
+    ),
+    app.pool.query<{
+      id: string;
+      person_name: string;
+      program_code: string;
+      status: string;
+      result: string | null;
+      occurred_at: Date | null;
+      updated_at: Date;
+    }>(
+      `WITH current_results AS (
+         SELECT DISTINCT ON (canonical.id, result.program_code)
+                result.id, canonical.canonical_full_name AS person_name,
+                result.program_code, result.status, result.result,
+                result.occurred_at, result.updated_at
+           FROM person_program_results result
+           JOIN persons member ON member.id = result.person_id
+           JOIN persons canonical
+             ON canonical.id = COALESCE(member.merged_into_person_id, member.id)
+          WHERE canonical.organization_id = $1 AND canonical.archived_at IS NULL
+            AND member.archived_at IS NULL AND result.archived_at IS NULL
+          ORDER BY canonical.id, result.program_code, result.updated_at DESC, result.id DESC
+       )
+       SELECT * FROM current_results
+        WHERE updated_at >= $2 AND updated_at < $3
+        ORDER BY updated_at, id`,
+      parameters,
+    ),
+  ]);
+  return {
+    artifacts: artifacts.rows,
+    people: people.rows,
+    tasks: tasks.rows,
+    events: events.rows,
+    programs: programs.rows,
+  };
+}
+
+function csvDocument(headers: readonly unknown[], rows: readonly (readonly unknown[])[]): string {
+  return `\uFEFF${[headers, ...rows].map((row) => csvRow(row)).join('\r\n')}\r\n`;
+}
+
 interface ResolvedDownload {
   archivePath: string;
   open: () => Promise<Readable>;
 }
 
 /**
- * Подписанные ссылки берутся параллельно: у Locker это сетевой round-trip
- * на каждый файл. Недоступный файл не роняет выгрузку — он уходит в manifest.
+ * Метаданные проверяются параллельно, но короткоживущая ссылка Locker запрашивается
+ * непосредственно перед чтением файла. Так она не протухнет в большом периодическом ZIP.
+ * Недоступный файл не роняет всю выгрузку.
  */
 async function resolveDownloadSources(
   app: FastifyInstance,
@@ -827,10 +1333,10 @@ async function resolveDownloadSources(
       try {
         if (file.storage_provider === 'LOCKER') {
           if (!file.external_id) throw new Error('нет внешнего идентификатора');
-          const link = await requestLockerDownloadUrl(app, file.external_id);
           entries.push({
             archivePath: download.archivePath,
             open: async () => {
+              const link = await requestLockerDownloadUrl(app, file.external_id!);
               const response = await fetch(link.url, { signal: AbortSignal.timeout(60_000) });
               if (!response.ok || !response.body)
                 throw new Error(`Locker вернул ${response.status}`);
@@ -864,7 +1370,9 @@ async function resolveDownloadSources(
   );
   // Параллельные воркеры перемешивают порядок — возвращаем исходный.
   const order = new Map(downloads.map((item, index) => [item.archivePath, index]));
-  entries.sort((left, right) => (order.get(left.archivePath) ?? 0) - (order.get(right.archivePath) ?? 0));
+  entries.sort(
+    (left, right) => (order.get(left.archivePath) ?? 0) - (order.get(right.archivePath) ?? 0),
+  );
   return { entries, failures };
 }
 

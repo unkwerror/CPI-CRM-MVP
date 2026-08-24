@@ -34,6 +34,8 @@ export interface PersonSummary {
   countableArtifactCount: number;
   latestArtifactScore?: number | null;
   hasDuplicateCandidate: boolean;
+  /** Карточка связана с Telegram-ботом через стабильный Locker/Telegram ID. */
+  fromBot: boolean;
   tags?: string[];
 }
 
@@ -56,10 +58,32 @@ export interface PersonDetail extends PersonSummary {
   sources: SourceSummary[];
   /** Free-form editable notes; initially collated from imported source data. */
   notes?: string | null;
-  /** Индекс качества головы Q_head. */
-  headQuality?: HeadQuality;
   /** Согласие на рассылки по каналам: отписка исключает из аудиторий, но не из базы. */
   marketingConsent?: { telegram: ConsentStatus; email: ConsentStatus };
+}
+
+export type ProgramResultCode = 'SVYA' | 'BI_ACADEMPARK';
+export type ProgramResultStatus =
+  | 'PLANNED'
+  | 'APPLIED'
+  | 'INTERVIEW'
+  | 'PARTICIPATED'
+  | 'FINALIST'
+  | 'WINNER'
+  | 'RESIDENT'
+  | 'NOT_SELECTED'
+  | 'REJECTED'
+  | 'WITHDRAWN';
+
+export interface PersonProgramResult {
+  id: string;
+  programCode: ProgramResultCode;
+  status: ProgramResultStatus;
+  result?: string | null;
+  occurredAt?: string | null;
+  version: number;
+  recordedByName?: string | null;
+  updatedAt: string;
 }
 
 export type ConsentStatus = 'GRANTED' | 'DENIED' | 'UNKNOWN' | 'WITHDRAWN';
@@ -257,6 +281,18 @@ export interface TaskSummary {
   createdAt?: string | null;
   assigneeUserId?: string | null;
   assigneeName?: string | null;
+  attachments?: {
+    id: string;
+    fileName: string;
+    sizeBytes: number;
+    status: string;
+  }[];
+}
+
+export interface TaskAssignee {
+  id: string;
+  displayName: string;
+  email: string;
 }
 
 export interface TasksResponse {
@@ -485,71 +521,55 @@ export interface ExpenseSummary {
   ownerName?: string | null;
 }
 
-/** Панель метрик ЦПИ (документ «ЦПИ: метрики и рабочие определения»). */
-export interface CpiMetrics {
-  period: { from: string; to: string };
-  economics: {
-    revenue: number;
-    paidDeals: number;
-    variableExpenses: number;
-    flow: number;
-    averageCheck: number | null;
-    opexExpenses: number;
-    backOfficeExpenses: number;
-    opexPercent: number | null;
-    backOfficePercent: number | null;
-    activeHeadsStart: number;
-    activeHeadsEnd: number;
-    revenuePerActiveHead: number | null;
-  };
-  funnel: {
+/** Единый операционный отчёт: используется дашбордом и периодическими выгрузками. */
+export interface OperationalPeriodReport {
+  period: { from: string; to: string; weeks: number | null };
+  people: {
     newPeople: number;
-    acquisitionExpenses: number;
-    costPerNewPerson: number | null;
-    actualParticipants: number;
-    qualityArtifactAuthors: number;
-    artifactConversion: number | null;
-    directExpenses: number;
-    costPerQualityAuthor: number | null;
-    reviewedArtifacts: number;
-    averageQArtifact: number | null;
+    newFromBot: number;
+    activated: number;
+    total: number;
+    totalFromBot: number;
+    active: number;
+    medium: number;
+    inactive: number;
+    unknown: number;
   };
-  activation: {
-    firstQualityAuthors: number;
-    newActivatedHeads: number;
-    activationRate: number | null;
-    activationExpenses: number;
-    activationCost: number | null;
-    activeAtStart: number;
-    churnedFromStart: number;
-    churn90: number | null;
-    retention: number | null;
+  artifacts: {
+    submittedVersions: number;
+    uniqueArtifacts: number;
+    uniqueAuthors: number;
+    files: number;
+    availableFiles: number;
+    bytes: number;
+    reviewed: number;
+    accepted: number;
+    rejected: number;
+    averageScore: number | null;
+    awaitingReview: number;
+    archivedDuringPeriod: number;
+    byType: { name: string; count: number }[];
+    bySource: { source: 'BOT' | 'CRM'; count: number }[];
   };
-  monetization: {
-    activatedHeads: number;
-    monetizedHeads: number;
-    monetizationRate: number | null;
-    partnerRevenue: number;
-    activePartners: number;
-    revenuePerActivePartner: number | null;
-    products: {
-      productId: string;
-      name: string;
-      revenue: number;
-      variableExpenses: number;
-      flow: number;
-    }[];
+  events: {
+    created: number;
+    participations: number;
+    uniqueParticipants: number;
+    attended: number;
+  };
+  tasks: { created: number; completed: number; overdueNow: number };
+  programs: {
+    svya: { tracked: number; successful: number; byStatus: { status: string; count: number }[] };
+    biAcadempark: {
+      tracked: number;
+      successful: number;
+      byStatus: { status: string; count: number }[];
+    };
   };
 }
 
 export type CampaignChannel = 'TELEGRAM' | 'EMAIL';
-export type CampaignStatus =
-  | 'DRAFT'
-  | 'APPROVED'
-  | 'SENDING'
-  | 'PAUSED'
-  | 'SENT'
-  | 'CANCELLED';
+export type CampaignStatus = 'DRAFT' | 'APPROVED' | 'SENDING' | 'PAUSED' | 'SENT' | 'CANCELLED';
 
 export interface CampaignButton {
   text: string;
@@ -638,19 +658,6 @@ export interface AudienceReachability {
   pilotCandidates: number;
   optedOut: { telegram: number; email: number };
   deletedForever: number;
-}
-
-/** Индекс качества головы Q_head (0–100) с компонентами. */
-export interface HeadQuality {
-  score: number;
-  band: 'READY' | 'ACTIVATED' | 'WEAK' | 'REACTIVATE';
-  bandLabel: string;
-  components: {
-    artifactQuality: number;
-    regularity: number;
-    projectInvolvement: number;
-    commercialApplicability: number;
-  };
 }
 
 export interface DuplicateCandidate {

@@ -1,6 +1,7 @@
 'use client';
 
-import { type FormEvent, useEffect, useState } from 'react';
+import { DownloadIcon, PaperclipIcon, TrashIcon } from 'lucide-react';
+import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import { PersonPicker, type PersonOption } from '@/components/person-picker';
@@ -25,9 +26,12 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
-import { api, apiErrorMessage } from '@/lib/api';
+import { api, apiErrorMessage, formatBytes } from '@/lib/api';
 import { TASK_STATUS_LABELS, TASK_STATUS_ORDER } from '@/lib/status-labels';
-import type { TaskStatus, TaskSummary } from '@/lib/types';
+import type { TaskAssignee, TaskStatus, TaskSummary } from '@/lib/types';
+import { UPLOAD_ACCEPT, uploadFile } from '@/lib/upload';
+
+const DEFAULT_ASSIGNEE = 'CURRENT_USER';
 
 function toDateInput(value?: string | null): string {
   return value ? new Date(value).toISOString().slice(0, 10) : '';
@@ -59,7 +63,13 @@ export function TaskDialog({
   const [status, setStatus] = useState<TaskStatus>('OPEN');
   const [isNextStep, setIsNextStep] = useState(false);
   const [selectedPerson, setSelectedPerson] = useState<PersonOption | null>(null);
+  const [assignees, setAssignees] = useState<TaskAssignee[]>([]);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [assigneeUserId, setAssigneeUserId] = useState(DEFAULT_ASSIGNEE);
+  const [files, setFiles] = useState<NonNullable<TaskSummary['attachments']>>([]);
+  const [uploading, setUploading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -74,7 +84,44 @@ export function TaskDialog({
           ? { id: task.personId, canonicalFullName: task.personName }
           : null),
     );
+    setAssigneeUserId(task?.assigneeUserId ?? DEFAULT_ASSIGNEE);
+    setFiles(task?.attachments ?? []);
+    void api<{ currentUserId: string; items: TaskAssignee[] }>('/task-assignees')
+      .then((response) => {
+        setCurrentUserId(response.currentUserId);
+        setAssignees(response.items);
+      })
+      .catch(() => setAssignees([]));
   }, [open, person, task]);
+
+  async function attachFiles(selected: FileList | null) {
+    const chosen = Array.from(selected ?? []);
+    if (!chosen.length) return;
+    setUploading(true);
+    try {
+      for (const file of chosen) {
+        const id = await uploadFile(file);
+        setFiles((current) => [
+          ...current,
+          { id, fileName: file.name, sizeBytes: file.size, status: 'AVAILABLE' },
+        ]);
+      }
+    } catch (caught) {
+      toast.error(apiErrorMessage(caught, 'Не удалось приложить файл'));
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  }
+
+  async function downloadFile(fileId: string) {
+    try {
+      const response = await api<{ downloadUrl: string }>(`/files/${fileId}/download-url`);
+      window.open(response.downloadUrl, '_blank', 'noopener,noreferrer');
+    } catch (caught) {
+      toast.error(apiErrorMessage(caught, 'Не удалось скачать файл'));
+    }
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -92,6 +139,11 @@ export function TaskDialog({
             dueAt,
             status,
             isNextStep,
+            assigneeUserId:
+              assigneeUserId === DEFAULT_ASSIGNEE
+                ? (currentUserId ?? task.assigneeUserId)
+                : assigneeUserId,
+            fileObjectIds: files.map((file) => file.id),
           }),
         });
         toast.success('Задача обновлена');
@@ -109,6 +161,8 @@ export function TaskDialog({
             ...(description.trim() ? { description: description.trim() } : {}),
             ...(dueAt ? { dueAt } : {}),
             isNextStep,
+            ...(assigneeUserId === DEFAULT_ASSIGNEE ? {} : { assigneeUserId }),
+            fileObjectIds: files.map((file) => file.id),
           }),
         });
         toast.success('Задача создана');
@@ -159,17 +213,6 @@ export function TaskDialog({
               />
             </div>
 
-            <div className="space-y-1.5">
-              <Label htmlFor="task-description">Детали</Label>
-              <Textarea
-                id="task-description"
-                maxLength={10_000}
-                onChange={(event) => setDescription(event.target.value)}
-                rows={3}
-                value={description}
-              />
-            </div>
-
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label htmlFor="task-due">Срок</Label>
@@ -197,6 +240,92 @@ export function TaskDialog({
                   </Select>
                 </div>
               )}
+              {!editing && <div />}
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label>Исполнитель</Label>
+                <Select value={assigneeUserId} onValueChange={setAssigneeUserId}>
+                  <SelectTrigger aria-label="Исполнитель задачи">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={DEFAULT_ASSIGNEE}>Я (по умолчанию)</SelectItem>
+                    {assignees
+                      .filter((assignee) => assignee.id !== currentUserId)
+                      .map((assignee) => (
+                        <SelectItem key={assignee.id} value={assignee.id}>
+                          {assignee.displayName}
+                        </SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="task-description">Комментарий</Label>
+              <Textarea
+                id="task-description"
+                maxLength={10_000}
+                onChange={(event) => setDescription(event.target.value)}
+                rows={2}
+                placeholder="Необязательно"
+                value={description}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Вложение</Label>
+              <input
+                ref={fileInputRef}
+                className="sr-only"
+                type="file"
+                accept={UPLOAD_ACCEPT}
+                multiple
+                disabled={saving || uploading || files.length >= 10}
+                onChange={(event) => void attachFiles(event.target.files)}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                disabled={saving || uploading || files.length >= 10}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <PaperclipIcon /> {uploading ? 'Загружаем…' : 'Прикрепить файл'}
+              </Button>
+              {files.length > 0 && (
+                <ul className="space-y-1.5">
+                  {files.map((file) => (
+                    <li
+                      key={file.id}
+                      className="flex items-center gap-2 rounded-md border px-2.5 py-2 text-[13px]"
+                    >
+                      <button
+                        type="button"
+                        className="min-w-0 flex-1 truncate text-left hover:underline"
+                        onClick={() => void downloadFile(file.id)}
+                      >
+                        <DownloadIcon className="mr-1.5 inline size-3.5" />
+                        {file.fileName}
+                        <span className="text-muted-foreground">
+                          {' '}
+                          · {formatBytes(file.sizeBytes)}
+                        </span>
+                      </button>
+                      <Button
+                        type="button"
+                        size="icon-sm"
+                        variant="ghost"
+                        aria-label={`Убрать ${file.fileName}`}
+                        onClick={() =>
+                          setFiles((current) => current.filter((item) => item.id !== file.id))
+                        }
+                      >
+                        <TrashIcon />
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
 
             <label className="flex items-start gap-2.5">
@@ -222,7 +351,7 @@ export function TaskDialog({
             >
               Отмена
             </Button>
-            <Button type="submit" disabled={saving || title.trim().length === 0}>
+            <Button type="submit" disabled={saving || uploading || title.trim().length === 0}>
               {saving ? 'Сохраняем…' : editing ? 'Сохранить' : 'Создать задачу'}
             </Button>
           </DialogFooter>

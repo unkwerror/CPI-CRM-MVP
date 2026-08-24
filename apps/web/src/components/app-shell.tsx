@@ -5,6 +5,7 @@ import {
   BarChart3Icon,
   CalendarDaysIcon,
   DatabaseIcon,
+  DownloadIcon,
   FileCheck2Icon,
   GaugeIcon,
   HandCoinsIcon,
@@ -57,6 +58,7 @@ const SALES_NAV = [
 ];
 
 const SYSTEM_NAV = [
+  { href: '/exports', label: 'Выгрузки', icon: DownloadIcon, permission: 'exports.bulk' },
   { href: '/imports', label: 'Импорт', icon: DatabaseIcon, permission: 'imports.run' },
   { href: '/settings', label: 'Настройки', icon: SettingsIcon, permission: 'people.read' },
   { href: '/audit', label: 'Журнал действий', icon: ArchiveIcon, permission: 'audit.read' },
@@ -83,7 +85,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!user?.permissions.includes('people.read')) return;
-    void api<DashboardMetrics>('/metrics/dashboard')
+    void api<DashboardMetrics>('/dashboard/participants')
       .then((metrics) => setOverdue(metrics.overdueTasks))
       .catch(() => setOverdue(0));
     void api<{ pendingCount: number }>('/locker/pending?status=PENDING')
@@ -174,7 +176,9 @@ export function AppShell({ children }: { children: ReactNode }) {
             aria-label="Основная навигация"
           >
             {groups.map((group) => {
-              const items = group.items.filter((item) => user?.permissions.includes(item.permission));
+              const items = group.items.filter((item) =>
+                user?.permissions.includes(item.permission),
+              );
               if (items.length === 0) return null;
               return (
                 <div key={group.caption} className="space-y-0.5">

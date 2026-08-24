@@ -17,6 +17,8 @@ export interface WorkerConfig {
   readonly dueIntervalMs: number;
   readonly reconciliationIntervalMs: number;
   readonly reconciliationBatchSize: number;
+  /** Активные артефакты старше этого срока скрываются из текущей приёмки, но не удаляются. */
+  readonly artifactArchiveAfterWeeks: number;
   readonly storage: {
     readonly endpoint: string;
     readonly region: string;
@@ -69,6 +71,7 @@ export function loadConfig(): WorkerConfig {
       60_000,
     ),
     reconciliationBatchSize: integer('WORKER_RECONCILIATION_BATCH_SIZE', 250, 1),
+    artifactArchiveAfterWeeks: integer('ARTIFACT_ARCHIVE_AFTER_WEEKS', 12, 1, 520),
     storage: {
       endpoint: value('S3_ENDPOINT', 'http://localhost:9000'),
       region: value('S3_REGION', 'us-east-1'),
@@ -96,7 +99,10 @@ export function loadConfig(): WorkerConfig {
       emailDailyLimit: integer('CAMPAIGN_EMAIL_DAILY_LIMIT', 3_000, 1, 100_000),
       fromEmail: value('CAMPAIGN_FROM_EMAIL', 'no-reply@example.org'),
       fromName: value('CAMPAIGN_FROM_NAME', 'Стартап-студия ЦПИ'),
-      replyTo: value('CAMPAIGN_REPLY_TO', process.env.CAMPAIGN_FROM_EMAIL ?? 'no-reply@example.org'),
+      replyTo: value(
+        'CAMPAIGN_REPLY_TO',
+        process.env.CAMPAIGN_FROM_EMAIL ?? 'no-reply@example.org',
+      ),
       telegramBotLink: value('CAMPAIGN_BOT_LINK', 'https://t.me/cpi_artifacts_bot'),
     },
   };

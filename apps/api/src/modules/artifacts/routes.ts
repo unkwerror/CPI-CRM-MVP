@@ -51,6 +51,9 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
         querystring: Type.Object({
           q: Type.Optional(Type.String()),
           review: Type.Optional(Type.String()),
+          archive: Type.Optional(
+            Type.Union([Type.Literal('active'), Type.Literal('archived'), Type.Literal('all')]),
+          ),
           eventId: Type.Optional(Type.String({ format: 'uuid' })),
           limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })),
         }),
@@ -60,12 +63,15 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
       const query = request.query as {
         q?: string;
         review?: string;
+        archive?: 'active' | 'archived' | 'all';
         eventId?: string;
         limit?: number;
       };
       const organization = await getOrganizationContext(app.pool);
       const values: unknown[] = [organization.id];
-      const where = ["a.status <> 'VOIDED'", 'a.organization_id = $1'];
+      const where = ["a.status <> 'VOIDED'", 'a.organization_id = $1', 'a.archived_at IS NULL'];
+      if (query.archive === 'archived') where.push("a.status = 'ARCHIVED'");
+      else if (query.archive !== 'all') where.push("a.status = 'ACTIVE'");
       if (query.q?.trim()) {
         values.push(`%${query.q.trim()}%`);
         where.push(
@@ -523,6 +529,14 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
               JSON.stringify(fileCheckPending ? { pending: 'FILE_SCAN' } : { countable: true }),
             ],
           );
+          // Новая содержательная отправка возвращает контейнер из архива в текущую работу.
+          await client.query(
+            `UPDATE artifacts
+                SET status = 'ACTIVE', auto_archived_at = NULL, archive_reason = NULL,
+                    updated_at = now(), version = version + 1
+              WHERE id = $1 AND status = 'ARCHIVED'`,
+            [row.artifact_id],
+          );
           await client.query(
             `INSERT INTO outbox_events (event_type, aggregate_type, aggregate_id, payload) VALUES ($1, 'artifact_version', $2, $3::jsonb)`,
             [
@@ -588,7 +602,7 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
       preHandler: app.requirePermission(Permissions.ARTIFACTS_REVIEW),
       schema: {
         tags: ['Артефакты'],
-        summary: 'Приёмка артефакта: принят или не принят, балл 0–10',
+        summary: 'Приёмка артефакта: принят или не принят, субъективный балл 1–10',
         params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
         body: ReviewArtifactVersionBody,
       },

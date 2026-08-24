@@ -144,10 +144,10 @@ export const ArtifactReviewCriteria = Type.Object(
   { additionalProperties: false },
 );
 
-/** Приёмка артефакта: принят или не принят, плюс балл 0–10. */
+/** Приёмка артефакта: принят или не принят, плюс субъективный балл 1–10. */
 export const ReviewArtifactVersionBody = Type.Object(
   {
-    score: Type.Integer({ minimum: 0, maximum: 10 }),
+    score: Type.Integer({ minimum: 1, maximum: 10 }),
     decision: Type.Union([Type.Literal('ACCEPTED'), Type.Literal('REJECTED')]),
     comment: Type.Optional(Type.String({ maxLength: 10_000 })),
   },

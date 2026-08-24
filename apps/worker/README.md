@@ -20,7 +20,8 @@ pnpm --filter @cpi-crm/worker dev
 - `CLAMAV_HOST`, `CLAMAV_PORT`, `CLAMAV_TIMEOUT_MS`
 - `WORKER_POLL_INTERVAL_MS`, `WORKER_OUTBOX_BATCH_SIZE`, `WORKER_MAX_ATTEMPTS`
 - `WORKER_LEASE_MS`, `WORKER_DUE_INTERVAL_MS`, `WORKER_RECONCILIATION_INTERVAL_MS`
+- `ARTIFACT_ARCHIVE_AFTER_WEEKS` — срок безопасного архива без удаления версий и файлов
 
 На старте выполняются восстановление потерянных scan-событий, сверка отправленных
 версий и полный lifecycle reconciliation. Затем due-переходы проверяются не реже
-раза в час, а полная сверка повторяется раз в сутки.
+раза в час, а полная сверка и архивирование старых артефактов повторяются раз в сутки.

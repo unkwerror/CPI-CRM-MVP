@@ -67,9 +67,10 @@ export async function registerFileRoutes(app: FastifyInstance): Promise<void> {
     },
   });
 
-  // Загрузка файла нужна двум разделам: артефактам и вложениям рассылки.
+  // Один и тот же приватный файловый контур обслуживает артефакты, задачи и рассылки.
   const canUpload = app.requireAnyPermission([
     Permissions.ARTIFACTS_WRITE,
+    Permissions.TASKS_MANAGE,
     Permissions.CAMPAIGNS_WRITE,
   ]);
 
@@ -196,22 +197,28 @@ export async function registerFileRoutes(app: FastifyInstance): Promise<void> {
       // открыт тем же разрешениям, что и сама загрузка.
       preHandler: app.requireAnyPermission([
         Permissions.ARTIFACTS_READ,
+        Permissions.TASKS_MANAGE,
         Permissions.CAMPAIGNS_WRITE,
       ]),
       schema: { tags: ['Файлы'], params: Type.Object({ id: Type.String({ format: 'uuid' }) }) },
     },
     async (request) => {
       const id = (request.params as { id: string }).id;
+      const canReadArtifacts = request.authUser!.permissions.includes(Permissions.ARTIFACTS_READ);
+      const canManageTasks = request.authUser!.permissions.includes(Permissions.TASKS_MANAGE);
       const result = await app.pool.query(
         `SELECT id, original_filename, declared_mime_type, detected_mime_type,
                 size_bytes::text, status, available_at, rejected_at
            FROM file_objects fo
           WHERE fo.id = $1
-            AND (fo.uploaded_by_user_id = $2 OR EXISTS (
+            AND (fo.uploaded_by_user_id = $2 OR ($3::boolean AND EXISTS (
               SELECT 1 FROM artifact_assets aa
                WHERE aa.file_object_id = fo.id
-            ))`,
-        [id, request.authUser!.userId],
+            )) OR ($4::boolean AND EXISTS (
+              SELECT 1 FROM task_attachments attachment
+               WHERE attachment.file_object_id = fo.id
+            )))`,
+        [id, request.authUser!.userId, canReadArtifacts, canManageTasks],
       );
       if (!result.rows[0]) throw new HttpProblem(404, 'Файл не найден');
       return result.rows[0];
@@ -221,11 +228,17 @@ export async function registerFileRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/files/:id/download-url',
     {
-      preHandler: app.requirePermission(Permissions.ARTIFACTS_READ),
+      preHandler: app.requireAnyPermission([
+        Permissions.ARTIFACTS_READ,
+        Permissions.TASKS_MANAGE,
+        Permissions.CAMPAIGNS_WRITE,
+      ]),
       schema: { tags: ['Файлы'], params: Type.Object({ id: Type.String({ format: 'uuid' }) }) },
     },
     async (request) => {
       const id = (request.params as { id: string }).id;
+      const canReadArtifacts = request.authUser!.permissions.includes(Permissions.ARTIFACTS_READ);
+      const canManageTasks = request.authUser!.permissions.includes(Permissions.TASKS_MANAGE);
       const result = await app.pool.query<{
         bucket: string;
         object_key: string;
@@ -238,11 +251,14 @@ export async function registerFileRoutes(app: FastifyInstance): Promise<void> {
                 storage_provider, external_id
            FROM file_objects fo
           WHERE fo.id = $1
-            AND (fo.uploaded_by_user_id = $2 OR EXISTS (
+            AND (fo.uploaded_by_user_id = $2 OR ($3::boolean AND EXISTS (
               SELECT 1 FROM artifact_assets aa
                WHERE aa.file_object_id = fo.id
-            ))`,
-        [id, request.authUser!.userId],
+            )) OR ($4::boolean AND EXISTS (
+              SELECT 1 FROM task_attachments attachment
+               WHERE attachment.file_object_id = fo.id
+            )))`,
+        [id, request.authUser!.userId, canReadArtifacts, canManageTasks],
       );
       const file = result.rows[0];
       if (!file) throw new HttpProblem(404, 'Файл не найден');

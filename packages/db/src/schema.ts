@@ -145,12 +145,7 @@ export const interactionDirectionEnum = pgEnum('interaction_direction', [
   'OUTBOUND',
   'INTERNAL',
 ]);
-export const taskStatusEnum = pgEnum('task_status', [
-  'OPEN',
-  'IN_PROGRESS',
-  'DONE',
-  'CANCELLED',
-]);
+export const taskStatusEnum = pgEnum('task_status', ['OPEN', 'IN_PROGRESS', 'DONE', 'CANCELLED']);
 export const importRunModeEnum = pgEnum('import_run_mode', ['DRY_RUN', 'COMMIT', 'REVERT']);
 export const importRunStatusEnum = pgEnum('import_run_status', [
   'QUEUED',
@@ -942,12 +937,17 @@ export const artifacts = pgTable(
     }),
     voidedAt: timestamptz('voided_at'),
     voidReason: text('void_reason'),
+    autoArchivedAt: timestamptz('auto_archived_at'),
+    archiveReason: text('archive_reason'),
     ...editable(),
   },
   (table) => [
     index('artifacts_organization_idx').on(table.organizationId),
     index('artifacts_project_idx').on(table.projectId),
     index('artifacts_type_idx').on(table.typeId),
+    index('artifacts_archive_queue_idx')
+      .on(table.status, table.autoArchivedAt, table.updatedAt)
+      .where(sql`${table.archivedAt} is null and ${table.status} <> 'VOIDED'`),
   ],
 );
 
@@ -1104,6 +1104,8 @@ export const artifactReviews = pgTable(
       .notNull()
       .references(() => rubricVersions.id, { onDelete: 'restrict' }),
     score: smallint('score'),
+    /** Только для сохранения исторических оценок 0; новые ревью всегда 1–10. */
+    legacyZeroScore: boolean('legacy_zero_score').notNull().default(false),
     /** Рубрикатор ЦПИ: 5 критериев по 0–2; score = сумма. NULL для старых ревью. */
     criteria: jsonb('criteria').$type<Record<string, number>>(),
     comment: text('comment'),
@@ -1127,7 +1129,7 @@ export const artifactReviews = pgTable(
       .where(sql`${table.supersedesReviewId} is not null`),
     check(
       'artifact_reviews_score_check',
-      sql`${table.score} is null or (${table.score} between 0 and 10)`,
+      sql`${table.score} is null or (${table.score} between 1 and 10) or (${table.score} = 0 and ${table.legacyZeroScore})`,
     ),
     check(
       'artifact_reviews_final_fields_check',
@@ -1261,6 +1263,69 @@ export const tasks = pgTable(
     check(
       'tasks_no_self_parent_check',
       sql`${table.parentTaskId} is null or ${table.parentTaskId} <> ${table.id}`,
+    ),
+  ],
+);
+
+export const taskAttachments = pgTable(
+  'task_attachments',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    fileObjectId: uuid('file_object_id')
+      .notNull()
+      .references(() => fileObjects.id, { onDelete: 'restrict' }),
+    uploadedByUserId: uuid('uploaded_by_user_id').references(() => appUsers.id, {
+      onDelete: 'set null',
+    }),
+    ...timestamps(),
+  },
+  (table) => [
+    uniqueIndex('task_attachments_task_file_uidx').on(table.taskId, table.fileObjectId),
+    index('task_attachments_task_idx').on(table.taskId, table.createdAt),
+  ],
+);
+
+export const personProgramResults = pgTable(
+  'person_program_results',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    personId: uuid('person_id')
+      .notNull()
+      .references(() => persons.id, { onDelete: 'cascade' }),
+    programCode: text('program_code').notNull(),
+    status: text('status').notNull(),
+    result: text('result'),
+    occurredAt: timestamptz('occurred_at'),
+    recordedByUserId: uuid('recorded_by_user_id').references(() => appUsers.id, {
+      onDelete: 'set null',
+    }),
+    ...editable(),
+  },
+  (table) => [
+    uniqueIndex('person_program_results_person_program_uidx')
+      .on(table.personId, table.programCode)
+      .where(sql`${table.archivedAt} is null`),
+    index('person_program_results_program_status_idx')
+      .on(table.programCode, table.status, table.updatedAt)
+      .where(sql`${table.archivedAt} is null`),
+    check(
+      'person_program_results_program_check',
+      sql`${table.programCode} in ('SVYA', 'BI_ACADEMPARK')`,
+    ),
+    check(
+      'person_program_results_status_check',
+      sql`${table.status} in ('PLANNED', 'APPLIED', 'INTERVIEW', 'PARTICIPATED', 'FINALIST', 'WINNER', 'RESIDENT', 'NOT_SELECTED', 'REJECTED', 'WITHDRAWN')`,
+    ),
+    check(
+      'person_program_results_compatibility_check',
+      sql`(${table.programCode} = 'SVYA' and ${table.status} in ('PLANNED', 'PARTICIPATED', 'FINALIST', 'WINNER', 'NOT_SELECTED', 'WITHDRAWN')) or (${table.programCode} = 'BI_ACADEMPARK' and ${table.status} in ('PLANNED', 'APPLIED', 'INTERVIEW', 'RESIDENT', 'REJECTED', 'WITHDRAWN'))`,
+    ),
+    check(
+      'person_program_results_result_check',
+      sql`${table.result} is null or (${table.result} = btrim(${table.result}) and char_length(${table.result}) between 1 and 10000)`,
     ),
   ],
 );

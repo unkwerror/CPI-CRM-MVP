@@ -3,8 +3,11 @@
 import {
   AlertCircleIcon,
   ArrowRightIcon,
+  BotIcon,
   CalendarDaysIcon,
   Clock3Icon,
+  FileUpIcon,
+  StarIcon,
   type LucideIcon,
   UsersIcon,
 } from 'lucide-react';
@@ -18,12 +21,11 @@ import { Button } from '@/components/ui/button';
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { api } from '@/lib/api';
-import type { DashboardMetrics, PeopleResponse } from '@/lib/types';
+import type { DashboardMetrics, OperationalPeriodReport, PeopleResponse } from '@/lib/types';
 
 type BadgeVariant = NonNullable<ComponentProps<typeof Badge>['variant']>;
 
-/** Гистограмма оценок строится по всему диапазону рубрикатора, включая ноль. */
-const SCORE_RANGE = Array.from({ length: 11 }, (_, index) => ({ score: index, count: 0 }));
+const SCORE_RANGE = Array.from({ length: 10 }, (_, index) => ({ score: index + 1, count: 0 }));
 
 const emptyMetrics: DashboardMetrics = {
   totalPeople: 0,
@@ -126,6 +128,7 @@ function QueueItem({
 export default function DashboardPage() {
   const [metrics, setMetrics] = useState<DashboardMetrics>(emptyMetrics);
   const [attention, setAttention] = useState<PeopleResponse['items']>([]);
+  const [period, setPeriod] = useState<OperationalPeriodReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -133,10 +136,12 @@ export default function DashboardPage() {
     void Promise.all([
       api<DashboardMetrics>('/dashboard/participants'),
       api<PeopleResponse>('/people?activityStatus=MEDIUM&limit=5'),
+      api<OperationalPeriodReport>('/dashboard/cpi?weeks=4').catch(() => null),
     ])
-      .then(([nextMetrics, people]) => {
+      .then(([nextMetrics, people, periodReport]) => {
         setMetrics(nextMetrics);
         setAttention(people.items);
+        setPeriod(periodReport);
       })
       .catch((caught) => setError(caught instanceof Error ? caught.message : 'Дашборд недоступен'))
       .finally(() => setLoading(false));
@@ -207,6 +212,58 @@ export default function DashboardPage() {
           hint="Нужен новый содержательный результат"
         />
       </section>
+
+      {period && (
+        <section>
+          <div className="mb-2 flex items-end justify-between gap-3">
+            <div>
+              <p className="text-muted-foreground text-xs font-semibold tracking-wider uppercase">
+                Последние 4 недели
+              </p>
+              <h2 className="mt-1 text-lg font-semibold">Что реально произошло в CRM</h2>
+            </div>
+            <Button asChild size="sm" variant="ghost">
+              <Link href="/metrics">
+                Подробнее <ArrowRightIcon />
+              </Link>
+            </Button>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <MetricTile
+              href="/participants"
+              icon={UsersIcon}
+              label="Новые участники"
+              loading={false}
+              value={period.people.newPeople.toLocaleString('ru-RU')}
+              hint={`${period.people.activated} активированы за период`}
+            />
+            <MetricTile
+              href="/participants"
+              icon={BotIcon}
+              label="Новые из бота"
+              loading={false}
+              value={period.people.newFromBot.toLocaleString('ru-RU')}
+              hint={`${period.people.totalFromBot} всего связаны с ботом`}
+            />
+            <MetricTile
+              href="/review"
+              icon={FileUpIcon}
+              label="Отправленные артефакты"
+              loading={false}
+              value={period.artifacts.submittedVersions.toLocaleString('ru-RU')}
+              hint={`${period.artifacts.uniqueAuthors} уникальных авторов`}
+            />
+            <MetricTile
+              href="/review"
+              icon={StarIcon}
+              label="Оценено"
+              loading={false}
+              value={period.artifacts.reviewed.toLocaleString('ru-RU')}
+              hint={`средний балл ${period.artifacts.averageScore?.toFixed(1) ?? '—'} из 10`}
+            />
+          </div>
+        </section>
+      )}
 
       <section className="grid items-start gap-4 xl:grid-cols-[minmax(0,1.75fr)_minmax(280px,0.85fr)]">
         <Card>
