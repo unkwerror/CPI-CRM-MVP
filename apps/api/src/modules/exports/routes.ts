@@ -669,7 +669,7 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
         storageProvider: 'CRM' | 'LOCKER';
       }[] = [];
       const skipped: { artifact: string; file: string; reason: string }[] = [];
-      const versionFiles = new Map<string, string[]>();
+      const versionFiles = new Map<string, { archivePath: string; fileName: string }[]>();
       for (const artifact of data.artifacts) {
         const author = artifact.authors[0] ?? 'Без автора';
         const folder = `${artifact.submitted_at.toISOString().slice(0, 10)}_${sanitizeArchiveSegment(author)}`;
@@ -688,12 +688,13 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
             storageProvider: file.storageProvider,
           });
           const paths = versionFiles.get(artifact.version_id) ?? [];
-          paths.push(archivePath);
+          paths.push({ archivePath, fileName: file.fileName });
           versionFiles.set(artifact.version_id, paths);
         }
       }
       const sources = await resolveDownloadSources(app, getS3(), downloads);
       skipped.push(...sources.failures);
+      const downloadablePaths = new Set(sources.entries.map((entry) => entry.archivePath));
 
       const workbookBytes = await createOperationalPeriodWorkbook({
         period: { from: report.period.from, to: report.period.to },
@@ -744,7 +745,17 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
           score: artifact.score,
           decision: artifact.decision,
           externalUrls: artifact.external_urls.join(' | '),
-          archivePaths: (versionFiles.get(artifact.version_id) ?? []).join(' | '),
+          archivePaths: (versionFiles.get(artifact.version_id) ?? [])
+            .filter((file) => downloadablePaths.has(file.archivePath))
+            .map((file) => file.archivePath)
+            .join(' | '),
+          archiveFiles: (versionFiles.get(artifact.version_id) ?? [])
+            .filter((file) => downloadablePaths.has(file.archivePath))
+            .map((file) => ({
+              fileName: file.fileName,
+              archivePath: file.archivePath,
+              relativePath: `../${file.archivePath}`,
+            })),
         })),
         people: data.people.map((person) => ({
           id: person.id,
@@ -855,6 +866,8 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
           'report/dashboard.svg — изображение отчёта\n' +
           'report/summary.json — машиночитаемая сводка\n' +
           'tables/Отчёт.xlsx — сводка и таблицы CRM на отдельных листах\n' +
+          'Сначала распакуйте ZIP целиком: ссылки из XLSX открывают файлы в папке artifacts/.\n' +
+          'На листе «Файлы артефактов» дана отдельная ссылка на каждый доступный файл.\n' +
           'В XLSX проекты раскрыты по участникам, артефактам и мероприятиям.\n' +
           'artifacts/ — доступные файлы отправленных версий\n' +
           'Недоступные или непроверенные файлы перечислены в summary.json и не теряются из CRM.\n',

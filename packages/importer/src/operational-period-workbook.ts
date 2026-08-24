@@ -21,6 +21,13 @@ export interface OperationalPeriodWorkbookInput {
     decision?: string | null;
     externalUrls?: string | null;
     archivePaths?: string | null;
+    archiveFiles?: readonly {
+      fileName: string;
+      /** Путь от XLSX до файла внутри распакованного ZIP-пакета. */
+      relativePath: string;
+      /** Путь от корня ZIP для отображения в таблице. */
+      archivePath: string;
+    }[];
   }[];
   readonly people: readonly {
     id: string;
@@ -156,6 +163,103 @@ function addTable(
   styleSheet(sheet, widths);
 }
 
+/**
+ * В XLSX разделитель аргументов формулы всегда запятая, в том числе в русской
+ * версии Excel. Кавычки удваиваются, чтобы имена файлов не меняли формулу.
+ */
+function hyperlinkCell(relativePath: string, label: string): ExcelJS.CellFormulaValue {
+  const escape = (value: string) => value.replaceAll('"', '""');
+  return {
+    formula: `HYPERLINK("${escape(relativePath)}","${escape(label)}")`,
+    result: label,
+  };
+}
+
+function addArtifactsTable(
+  workbook: ExcelJS.Workbook,
+  artifacts: OperationalPeriodWorkbookInput['artifacts'],
+): void {
+  const sheet = workbook.addWorksheet('Артефакты');
+  sheet.addRow([
+    'ID версии',
+    'ID артефакта',
+    'Дата отправки',
+    'Название',
+    'Тип',
+    'Авторы',
+    'Проект',
+    'Мероприятие',
+    'Источник',
+    'Оценка 1–10',
+    'Решение',
+    'Внешние ссылки',
+    'Файлы в ZIP',
+  ]);
+
+  for (const item of artifacts) {
+    const archiveFiles = item.archiveFiles ?? [];
+    const firstFile = archiveFiles[0];
+    const linkLabel = firstFile
+      ? archiveFiles.length === 1
+        ? firstFile.fileName
+        : `${firstFile.fileName} (+${archiveFiles.length - 1})`
+      : null;
+    const row = sheet.addRow([
+      safe(item.versionId),
+      safe(item.artifactId),
+      safe(item.submittedAt),
+      safe(item.title),
+      safe(item.typeName),
+      safe(item.authors),
+      safe(item.projectName),
+      safe(item.eventName),
+      safe(item.source),
+      safe(item.score),
+      safe(item.decision),
+      safe(item.externalUrls),
+      firstFile && linkLabel
+        ? hyperlinkCell(firstFile.relativePath, linkLabel)
+        : safe(item.archivePaths),
+    ]);
+    if (firstFile) row.getCell(13).font = { color: { argb: 'FF1F5FBF' }, underline: true };
+  }
+
+  styleSheet(sheet, [38, 38, 24, 42, 24, 38, 34, 34, 14, 14, 18, 44, 58]);
+
+  const files = artifacts.flatMap((artifact) =>
+    (artifact.archiveFiles ?? []).map((file) => ({ artifact, file })),
+  );
+  if (files.length === 0) return;
+
+  const fileSheet = workbook.addWorksheet('Файлы артефактов');
+  fileSheet.addRow([
+    'ID версии',
+    'ID артефакта',
+    'Дата отправки',
+    'Артефакт',
+    'Авторы',
+    'Проект',
+    'Мероприятие',
+    'Файл (ссылка)',
+    'Путь внутри ZIP',
+  ]);
+  for (const { artifact, file } of files) {
+    const row = fileSheet.addRow([
+      safe(artifact.versionId),
+      safe(artifact.artifactId),
+      safe(artifact.submittedAt),
+      safe(artifact.title),
+      safe(artifact.authors),
+      safe(artifact.projectName),
+      safe(artifact.eventName),
+      hyperlinkCell(file.relativePath, file.fileName),
+      safe(file.archivePath),
+    ]);
+    row.getCell(8).font = { color: { argb: 'FF1F5FBF' }, underline: true };
+  }
+  styleSheet(fileSheet, [38, 38, 24, 42, 38, 34, 34, 44, 72]);
+}
+
 /** Один XLSX вместо набора CSV: каждый набор данных остаётся на отдельном листе. */
 export async function createOperationalPeriodWorkbook(
   input: OperationalPeriodWorkbookInput,
@@ -175,41 +279,7 @@ export async function createOperationalPeriodWorkbook(
     ],
     [42, 24, 58],
   );
-  addTable(
-    workbook,
-    'Артефакты',
-    [
-      'ID версии',
-      'ID артефакта',
-      'Дата отправки',
-      'Название',
-      'Тип',
-      'Авторы',
-      'Проект',
-      'Мероприятие',
-      'Источник',
-      'Оценка 1–10',
-      'Решение',
-      'Внешние ссылки',
-      'Файлы в ZIP',
-    ],
-    input.artifacts.map((item) => [
-      item.versionId,
-      item.artifactId,
-      item.submittedAt,
-      item.title,
-      item.typeName,
-      item.authors,
-      item.projectName,
-      item.eventName,
-      item.source,
-      item.score,
-      item.decision,
-      item.externalUrls,
-      item.archivePaths,
-    ]),
-    [38, 38, 24, 42, 24, 38, 34, 34, 14, 14, 18, 44, 58],
-  );
+  addArtifactsTable(workbook, input.artifacts);
   addTable(
     workbook,
     'Новые участники',
