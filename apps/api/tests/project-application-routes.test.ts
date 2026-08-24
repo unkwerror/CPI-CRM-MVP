@@ -11,7 +11,10 @@ import type { AuthUser } from '../src/types.js';
 const ORGANIZATION_ID = '00000000-0000-4000-8000-000000000010';
 const APPLICATION_ID = '00000000-0000-4000-8000-000000000020';
 const PERSON_ID = '00000000-0000-4000-8000-000000000030';
+const INVITEE_PERSON_ID = '00000000-0000-4000-8000-000000000031';
 const PROJECT_ID = '00000000-0000-4000-8000-000000000040';
+const LOCKER_USER_ID = '00000000-0000-4000-8000-000000000050';
+const INVITEE_LOCKER_USER_ID = '00000000-0000-4000-8000-000000000051';
 const USER_ID = '00000000-0000-4000-8000-000000000001';
 
 const organizationRow = {
@@ -120,9 +123,7 @@ describe('project applications', () => {
     const release = vi.fn();
     const app = await applicationTestApp({
       query: poolQuery,
-      connect: vi.fn(
-        async () => ({ query: clientQuery, release }) as unknown as PoolClient,
-      ),
+      connect: vi.fn(async () => ({ query: clientQuery, release }) as unknown as PoolClient),
     });
 
     try {
@@ -137,6 +138,80 @@ describe('project applications', () => {
         created_project_id: PROJECT_ID,
       });
       expect(release).toHaveBeenCalledOnce();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('lets the participant owner invite a synchronized bot user and adds them to project events', async () => {
+    const poolQuery = vi.fn(async (sql: string) => {
+      if (sql.includes('FROM organization_settings os')) return { rows: [organizationRow] };
+      throw new Error(`Unexpected pool SQL: ${sql}`);
+    });
+    const clientQuery = vi.fn(async (sql: string, parameters?: unknown[]) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] };
+      if (sql.includes('FROM external_identities identity')) {
+        return {
+          rows: [
+            {
+              person_id: parameters?.[1] === INVITEE_LOCKER_USER_ID ? INVITEE_PERSON_ID : PERSON_ID,
+            },
+          ],
+        };
+      }
+      if (
+        sql.includes('SELECT id, name, status, lead_person_id') &&
+        sql.includes('FROM projects')
+      ) {
+        return {
+          rows: [{ id: PROJECT_ID, name: 'Проект', status: 'ACTIVE', lead_person_id: PERSON_ID }],
+        };
+      }
+      if (sql.includes('SELECT canonical_full_name FROM persons')) {
+        return { rows: [{ canonical_full_name: 'Петров Пётр Петрович' }] };
+      }
+      if (sql.includes('SELECT membership.id') && sql.includes('archived_at IS NULL')) {
+        return { rows: [] };
+      }
+      if (sql.includes('UPDATE project_memberships') && sql.includes('archived_at = NULL')) {
+        return { rows: [] };
+      }
+      if (sql.includes('INSERT INTO project_memberships')) {
+        return { rows: [{ id: '00000000-0000-4000-8000-000000000060' }] };
+      }
+      if (sql.includes('INSERT INTO event_participations')) return { rows: [], rowCount: 2 };
+      if (sql.includes('INSERT INTO audit_log')) return { rows: [{ id: 'audit' }] };
+      throw new Error(`Unexpected client SQL: ${sql}`);
+    });
+    const app = await applicationTestApp({
+      query: poolQuery,
+      connect: vi.fn(
+        async () => ({ query: clientQuery, release: vi.fn() }) as unknown as PoolClient,
+      ),
+    });
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/integrations/locker/v1/projects/${PROJECT_ID}/invitations`,
+        headers: { authorization: `Bearer ${'x'.repeat(32)}` },
+        payload: {
+          lockerUserId: LOCKER_USER_ID,
+          telegramUserId: '123456789',
+          inviteeLockerUserId: INVITEE_LOCKER_USER_ID,
+          inviteeTelegramUserId: '987654321',
+          role: 'Разработчик',
+        },
+      });
+
+      expect(response.statusCode).toBe(201);
+      expect(response.json()).toMatchObject({
+        personId: INVITEE_PERSON_ID,
+        name: 'Петров Пётр Петрович',
+        role: 'Разработчик',
+        created: true,
+        participantsAddedToEvents: 2,
+      });
     } finally {
       await app.close();
     }

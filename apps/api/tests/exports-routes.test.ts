@@ -171,7 +171,7 @@ describe('participant export route', () => {
         ['alpha'],
         true,
         EVENT_ID,
-        25,
+        100,
         0,
       ]);
       return {
@@ -179,15 +179,36 @@ describe('participant export route', () => {
           {
             id: '00000000-0000-4000-8000-000000000030',
             canonical_full_name: '=2+3',
-            contacts: ' +cmd | телефон "рабочий"',
+            last_name: null,
+            first_name: null,
+            patronymic: null,
+            aliases: '',
+            emails: ' +cmd',
+            phones: 'телефон "рабочий"',
+            telegram: '@alpha',
+            telegram_user_ids: '12345',
+            max_contacts: '',
+            other_contacts: '',
             affiliations: 'Организация "А"\nФакультет',
+            tags: 'Выпускник',
+            notes: 'Комментарий CRM',
+            created_at: new Date('2026-07-01T10:30:00.000Z'),
+            updated_at: new Date('2026-08-01T10:30:00.000Z'),
+            owner_name: 'Куратор',
             profile_needs_review: true,
             from_bot: true,
+            source_identities: 'locker.user: user-1',
+            marketing_email: 'GRANTED',
+            marketing_telegram: 'UNKNOWN',
             artifact_count: '1',
             last_artifact_at: new Date('2026-07-20T10:30:00.000Z'),
             events: '@SUM(A1:A2)',
+            event_results: 'Победитель',
+            projects: 'Альфа',
+            project_roles: 'Альфа: Владелец',
             artifacts: '-1',
             comments: 'Обычный комментарий',
+            interactions: 'Созвон · договорились',
             source_rows: [
               {
                 sheet: 'Лист 1',
@@ -244,6 +265,44 @@ describe('participant export route', () => {
         rows: 1,
         format: 'XLSX',
       });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('applies the selected period to the complete participants workbook', async () => {
+    let countSql = '';
+    let countParameters: unknown[] = [];
+    const query = vi.fn(async (sql: string, parameters?: unknown[]) => {
+      if (sql.includes('FROM organization_settings os')) return { rows: [organizationRow] };
+      if (sql.includes('SELECT count(*)::text AS total')) {
+        countSql = sql;
+        countParameters = parameters ?? [];
+        return { rows: [{ total: '0' }] };
+      }
+      if (sql.includes('INSERT INTO audit_log')) return { rows: [] };
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const app = await exportTestApp(query, [Roles.DATA_STEWARD]);
+
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url:
+          '/exports/participants.xlsx' +
+          '?from=2026-08-01T00%3A00%3A00.000Z&to=2026-08-24T00%3A00%3A00.000Z',
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(countSql).toContain('p.created_at >= $2 AND p.created_at < $3');
+      expect(countParameters).toEqual([
+        ORGANIZATION_ID,
+        new Date('2026-08-01T00:00:00.000Z'),
+        new Date('2026-08-24T00:00:00.000Z'),
+      ]);
+      expect(response.headers['content-disposition']).toBe(
+        'attachment; filename="cpi-participants-2026-08-01-2026-08-24.xlsx"',
+      );
     } finally {
       await app.close();
     }
@@ -311,6 +370,9 @@ describe('participant export route', () => {
           ],
         };
       }
+      if (sql.includes('FROM event_project_participations participation')) {
+        return { rows: [] };
+      }
       if (sql.includes('INSERT INTO audit_log')) {
         auditPayload = JSON.parse(String((parameters ?? [])[4]));
         return { rows: [] };
@@ -330,9 +392,19 @@ describe('participant export route', () => {
       const entries = readZipEntryNames(response.rawPayload);
       expect(entries).toContain('Участники.xlsx');
       expect(entries).toContain('manifest.json');
-      // Файл в карантине не качается, но обязан попасть в manifest со скипами.
-      expect(entries.some((name) => name.startsWith('artifacts/'))).toBe(false);
-      expect(auditPayload).toMatchObject({ participants: 1, artifacts: 1, files: 0, skipped: 1 });
+      // Файл в карантине не качается, но карточка артефакта остаётся в папке
+      // как читаемое описание, а manifest объясняет отсутствие бинарного файла.
+      expect(entries.some((name) => name.startsWith('Артефакты/'))).toBe(true);
+      expect(entries.some((name) => name.endsWith('/Описание.txt'))).toBe(true);
+      expect(auditPayload).toMatchObject({
+        participants: 1,
+        artifacts: 1,
+        projects: 0,
+        projectMembers: 0,
+        projectArtifacts: 0,
+        files: 0,
+        skipped: 1,
+      });
     } finally {
       await app.close();
     }

@@ -60,22 +60,24 @@ describe('operational period workbook', () => {
 
     const artifacts = workbook.getWorksheet('Артефакты')!;
     expect(artifacts.getCell('M2').formula).toBe(
-      'HYPERLINK("../artifacts/Иванов/питч финал.pdf","питч ""финал"".pdf (+1)")',
-    );
-
-    const files = workbook.getWorksheet('Файлы артефактов')!;
-    expect(files.rowCount).toBe(3);
-    expect(files.getCell('H2').formula).toBe(
       'HYPERLINK("../artifacts/Иванов/питч финал.pdf","питч ""финал"".pdf")',
     );
-    expect(files.getCell('H3').formula).toBe(
+    expect(artifacts.getCell('M3').formula).toBe(
       'HYPERLINK("../artifacts/Иванов/расчёты.xlsx","расчёты.xlsx")',
     );
-    expect(files.getCell('I3').text).toBe('artifacts/Иванов/расчёты.xlsx');
+    expect(artifacts.getCell('N3').text).toBe('artifacts/Иванов/расчёты.xlsx');
 
-    const quality = workbook.getWorksheet('Качество артефактов')!;
-    expect(quality.getCell('A8').value).toBe(7);
-    expect(quality.getCell('B8').value).toBe(1);
-    expect(quality.getCell('E2').text).toBe('7.50');
+    const summary = workbook.getWorksheet('Сводка')!;
+    expect(summary.getCell('A11').value).toBe(7);
+    expect(summary.getCell('B11').value).toBe(1);
+    expect(summary.getCell('E5').text).toBe('7.50');
+    expect(workbook.worksheets.map((sheet) => sheet.name)).toEqual([
+      'Сводка',
+      'Участники',
+      'Артефакты',
+      'Мероприятия',
+      'Проекты',
+      'Работа CRM',
+    ]);
   });
 });

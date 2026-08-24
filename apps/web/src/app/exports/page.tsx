@@ -185,9 +185,8 @@ export default function ExportsPage() {
               </CardHeader>
               <CardContent className="space-y-4">
                 <p className="text-muted-foreground text-[13px] leading-relaxed">
-                  ZIP содержит изображение дашборда, один XLSX с отдельным листом качества и
-                  таблицами по артефактам, участникам, задачам, мероприятиям, взаимодействиям и
-                  проектам, а также доступные файлы из общего облачного хранилища.
+                  ZIP содержит изображение дашборда, компактный XLSX на 6 листов, полные карточки
+                  новых участников и доступные файлы артефактов из общего облачного хранилища.
                 </p>
                 <Button asChild size="lg">
                   <a href={`/api/exports/period/package.zip?${query}`}>
@@ -215,8 +214,8 @@ export default function ExportsPage() {
               </CardHeader>
               <CardContent className="space-y-2">
                 <Button asChild className="w-full justify-start" variant="outline">
-                  <a href="/api/exports/participants.xlsx">
-                    <UsersIcon /> Все участники XLSX
+                  <a href={`/api/exports/participants.xlsx?${query}`}>
+                    <UsersIcon /> Все участники за период XLSX
                   </a>
                 </Button>
                 <Button asChild className="w-full justify-start" variant="outline">

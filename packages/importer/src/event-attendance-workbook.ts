@@ -64,6 +64,38 @@ export interface EventParticipantWorkbookRow {
   readonly artifacts?: readonly EventParticipantWorkbookArtifact[];
 }
 
+export interface EventParticipantWorkbookProject {
+  readonly id: string;
+  readonly name: string;
+  readonly description?: string | null;
+  readonly status: string;
+  readonly ownerName?: string | null;
+  readonly decision?: string | null;
+  readonly attendance?: string | null;
+  readonly result?: string | null;
+  readonly registeredAt?: string | null;
+  readonly members: readonly {
+    readonly personId: string;
+    readonly personName: string;
+    readonly role: string;
+    readonly isOwner?: boolean;
+  }[];
+  readonly artifacts: readonly {
+    readonly artifactId: string;
+    readonly title: string;
+    readonly typeName: string;
+    readonly status: string;
+    readonly versionStatus?: string | null;
+    readonly submittedAt?: string | null;
+    readonly authors?: string | null;
+    readonly eventName?: string | null;
+    readonly score?: number | null;
+    readonly decision?: string | null;
+    readonly externalUrls?: string | null;
+    readonly archivePaths?: string | null;
+  }[];
+}
+
 function normalizedHeader(value: string): string {
   return value
     .normalize('NFKC')
@@ -234,6 +266,7 @@ function reviewDecisionLabel(decision: string | null | undefined): string {
 export async function createEventParticipantsWorkbook(input: {
   readonly eventName: string;
   readonly rows: readonly EventParticipantWorkbookRow[];
+  readonly projects?: readonly EventParticipantWorkbookProject[];
 }): Promise<Uint8Array> {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'ЦПИ CRM';
@@ -336,6 +369,107 @@ export async function createEventParticipantsWorkbook(input: {
       }
     });
     styleSheet(artifactSheet, [8, 34, 40, 22, 22, 12, 18, 40, 44]);
+  }
+
+  const projects = input.projects ?? [];
+  if (projects.length > 0) {
+    const projectSheet = workbook.addWorksheet('Проекты', {
+      views: [{ state: 'frozen', ySplit: 1 }],
+    });
+    projectSheet.addRow([
+      '№',
+      'ID проекта',
+      'Проект',
+      'Описание',
+      'Статус проекта',
+      'Владелец',
+      'Решение по мероприятию',
+      'Участие',
+      'Результат',
+      'Добавлен в мероприятие',
+      'Участников',
+      'Артефактов',
+    ]);
+    projects.forEach((project, index) => {
+      projectSheet.addRow([
+        index + 1,
+        project.id,
+        safeSpreadsheetText(project.name),
+        safeSpreadsheetText(project.description),
+        safeSpreadsheetText(project.status),
+        safeSpreadsheetText(project.ownerName),
+        safeSpreadsheetText(project.decision),
+        safeSpreadsheetText(project.attendance),
+        safeSpreadsheetText(project.result),
+        safeSpreadsheetText(project.registeredAt),
+        project.members.length,
+        project.artifacts.length,
+      ]);
+    });
+    styleSheet(projectSheet, [8, 38, 38, 55, 18, 34, 24, 18, 60, 24, 14, 14]);
+
+    const memberSheet = workbook.addWorksheet('Участники проектов', {
+      views: [{ state: 'frozen', ySplit: 1 }],
+    });
+    memberSheet.addRow(['№', 'Проект', 'ID участника', 'Участник', 'Роль', 'Владелец проекта']);
+    let memberNumber = 0;
+    for (const project of projects) {
+      for (const member of project.members) {
+        memberNumber += 1;
+        memberSheet.addRow([
+          memberNumber,
+          safeSpreadsheetText(project.name),
+          member.personId,
+          safeSpreadsheetText(member.personName),
+          safeSpreadsheetText(member.role),
+          member.isOwner ? 'Да' : 'Нет',
+        ]);
+      }
+    }
+    styleSheet(memberSheet, [8, 38, 38, 38, 34, 20]);
+
+    const projectArtifactSheet = workbook.addWorksheet('Артефакты проектов', {
+      views: [{ state: 'frozen', ySplit: 1 }],
+    });
+    projectArtifactSheet.addRow([
+      '№',
+      'Проект',
+      'ID артефакта',
+      'Артефакт',
+      'Тип',
+      'Статус',
+      'Статус версии',
+      'Отправлен',
+      'Авторы',
+      'Связанное мероприятие',
+      'Оценка 1–10',
+      'Решение',
+      'Внешние ссылки',
+      'Файлы в ZIP',
+    ]);
+    let projectArtifactNumber = 0;
+    for (const project of projects) {
+      for (const artifact of project.artifacts) {
+        projectArtifactNumber += 1;
+        projectArtifactSheet.addRow([
+          projectArtifactNumber,
+          safeSpreadsheetText(project.name),
+          artifact.artifactId,
+          safeSpreadsheetText(artifact.title),
+          safeSpreadsheetText(artifact.typeName),
+          safeSpreadsheetText(artifact.status),
+          safeSpreadsheetText(artifact.versionStatus),
+          safeSpreadsheetText(artifact.submittedAt),
+          safeSpreadsheetText(artifact.authors),
+          safeSpreadsheetText(artifact.eventName),
+          artifact.score ?? '',
+          safeSpreadsheetText(artifact.decision),
+          safeSpreadsheetText(artifact.externalUrls),
+          safeSpreadsheetText(artifact.archivePaths),
+        ]);
+      }
+    }
+    styleSheet(projectArtifactSheet, [8, 36, 38, 42, 22, 18, 20, 24, 42, 38, 14, 18, 48, 60]);
   }
 
   const buffer = await workbook.xlsx.writeBuffer();

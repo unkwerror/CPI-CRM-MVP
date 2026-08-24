@@ -49,6 +49,37 @@ describe('event attendance workbook', () => {
           projects: [{ name: 'Робот-садовник', role: 'Основатель' }],
         },
       ],
+      projects: [
+        {
+          id: 'project-1',
+          name: 'Робот-садовник',
+          description: 'Автоматизация теплиц',
+          status: 'ACTIVE',
+          ownerName: 'Иванов Иван Иванович',
+          decision: 'ACCEPTED',
+          attendance: 'ATTENDED',
+          result: 'Финалист',
+          registeredAt: '2026-08-24T10:00:00.000Z',
+          members: [
+            {
+              personId: 'person-1',
+              personName: 'Иванов Иван Иванович',
+              role: 'Основатель',
+              isOwner: true,
+            },
+          ],
+          artifacts: [
+            {
+              artifactId: 'artifact-1',
+              title: 'Презентация проекта',
+              typeName: 'Презентация',
+              status: 'SUBMITTED',
+              authors: 'Иванов Иван Иванович',
+              archivePaths: 'Проекты/Робот-садовник/Артефакты/Презентация/Описание.txt',
+            },
+          ],
+        },
+      ],
     });
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(bytes as unknown as Parameters<typeof workbook.xlsx.load>[0]);
@@ -56,6 +87,13 @@ describe('event attendance workbook', () => {
     expect(exported.getRow(1).getCell(14).text).toBe('Проекты в мероприятии');
     expect(exported.getRow(2).getCell(14).text).toBe('Робот-садовник');
     expect(exported.getRow(2).getCell(15).text).toBe('Основатель');
+    expect(workbook.getWorksheet('Проекты')?.getRow(2).getCell(3).text).toBe('Робот-садовник');
+    expect(workbook.getWorksheet('Участники проектов')?.getRow(2).getCell(5).text).toBe(
+      'Основатель',
+    );
+    expect(workbook.getWorksheet('Артефакты проектов')?.getRow(2).getCell(4).text).toBe(
+      'Презентация проекта',
+    );
     const parsed = await readEventAttendanceWorkbook(bytes);
     expect(parsed.people[0]).toMatchObject({
       lastName: 'Иванов',

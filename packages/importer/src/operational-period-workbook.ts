@@ -1,5 +1,10 @@
 import ExcelJS from 'exceljs';
 
+import {
+  addParticipantsWorksheet,
+  type ParticipantWorkbookRow,
+} from './participants-export-workbook.js';
+
 export interface OperationalPeriodWorkbookInput {
   readonly period: { from: string; to: string };
   readonly summary: readonly {
@@ -38,15 +43,7 @@ export interface OperationalPeriodWorkbookInput {
       archivePath: string;
     }[];
   }[];
-  readonly people: readonly {
-    id: string;
-    fullName: string;
-    createdAt: string;
-    source: string;
-    ownerName?: string | null;
-    artifactCount: number;
-    profileNeedsReview: boolean;
-  }[];
+  readonly people: readonly ParticipantWorkbookRow[];
   readonly tasks: readonly {
     id: string;
     createdAt: string;
@@ -202,77 +199,48 @@ function addArtifactsTable(
     'Оценка 1–10',
     'Решение',
     'Внешние ссылки',
-    'Файлы в ZIP',
+    'Файл в ZIP (ссылка)',
+    'Путь внутри ZIP',
   ]);
 
   for (const item of artifacts) {
     const archiveFiles = item.archiveFiles ?? [];
-    const firstFile = archiveFiles[0];
-    const linkLabel = firstFile
-      ? archiveFiles.length === 1
-        ? firstFile.fileName
-        : `${firstFile.fileName} (+${archiveFiles.length - 1})`
-      : null;
-    const row = sheet.addRow([
-      safe(item.versionId),
-      safe(item.artifactId),
-      safe(item.submittedAt),
-      safe(item.title),
-      safe(item.typeName),
-      safe(item.authors),
-      safe(item.projectName),
-      safe(item.eventName),
-      safe(item.source),
-      safe(item.score),
-      safe(item.decision),
-      safe(item.externalUrls),
-      firstFile && linkLabel
-        ? hyperlinkCell(firstFile.relativePath, linkLabel)
-        : safe(item.archivePaths),
-    ]);
-    if (firstFile) row.getCell(13).font = { color: { argb: 'FF1F5FBF' }, underline: true };
+    const files = archiveFiles.length > 0 ? archiveFiles : [null];
+    for (const file of files) {
+      const row = sheet.addRow([
+        safe(item.versionId),
+        safe(item.artifactId),
+        safe(item.submittedAt),
+        safe(item.title),
+        safe(item.typeName),
+        safe(item.authors),
+        safe(item.projectName),
+        safe(item.eventName),
+        safe(item.source),
+        safe(item.score),
+        safe(item.decision),
+        safe(item.externalUrls),
+        file ? hyperlinkCell(file.relativePath, file.fileName) : safe(item.archivePaths),
+        safe(file?.archivePath),
+      ]);
+      if (file) row.getCell(13).font = { color: { argb: 'FF1F5FBF' }, underline: true };
+    }
   }
 
-  styleSheet(sheet, [38, 38, 24, 42, 24, 38, 34, 34, 14, 14, 18, 44, 58]);
-
-  const files = artifacts.flatMap((artifact) =>
-    (artifact.archiveFiles ?? []).map((file) => ({ artifact, file })),
-  );
-  if (files.length === 0) return;
-
-  const fileSheet = workbook.addWorksheet('Файлы артефактов');
-  fileSheet.addRow([
-    'ID версии',
-    'ID артефакта',
-    'Дата отправки',
-    'Артефакт',
-    'Авторы',
-    'Проект',
-    'Мероприятие',
-    'Файл (ссылка)',
-    'Путь внутри ZIP',
-  ]);
-  for (const { artifact, file } of files) {
-    const row = fileSheet.addRow([
-      safe(artifact.versionId),
-      safe(artifact.artifactId),
-      safe(artifact.submittedAt),
-      safe(artifact.title),
-      safe(artifact.authors),
-      safe(artifact.projectName),
-      safe(artifact.eventName),
-      hyperlinkCell(file.relativePath, file.fileName),
-      safe(file.archivePath),
-    ]);
-    row.getCell(8).font = { color: { argb: 'FF1F5FBF' }, underline: true };
-  }
-  styleSheet(fileSheet, [38, 38, 24, 42, 38, 34, 34, 44, 72]);
+  styleSheet(sheet, [38, 38, 24, 42, 24, 38, 34, 34, 14, 14, 18, 44, 44, 72]);
 }
 
-function addQualityTable(
+function addSummarySheet(
   workbook: ExcelJS.Workbook,
+  period: OperationalPeriodWorkbookInput['period'],
+  summary: OperationalPeriodWorkbookInput['summary'],
   quality: OperationalPeriodWorkbookInput['quality'],
 ): void {
+  const sheet = workbook.addWorksheet('Сводка');
+  sheet.addRow(['Показатель', 'Значение', 'Комментарий']);
+  sheet.addRow(['Период', `${period.from} — ${period.to}`, '']);
+  for (const item of summary) sheet.addRow([safe(item.label), safe(item.value), safe(item.note)]);
+
   const reviewed = Math.max(0, quality.reviewed);
   const reviewTotal = reviewed + Math.max(0, quality.awaitingReview);
   const metrics: readonly (readonly [string, string | number])[] = [
@@ -287,6 +255,19 @@ function addQualityTable(
     ['Принято', quality.accepted],
     ['Не принято', quality.rejected],
   ];
+  sheet.addRow([]);
+  const qualityHeaderRow = sheet.addRow([
+    'Качество артефактов: оценка 1–10',
+    'Количество',
+    'Доля оценённых',
+    'Показатель',
+    'Значение',
+  ]);
+  qualityHeaderRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  qualityHeaderRow.fill = HEADER_FILL;
+  qualityHeaderRow.alignment = { vertical: 'middle', wrapText: true };
+  qualityHeaderRow.height = 34;
+
   const distribution = Array.from({ length: 10 }, (_, index) => {
     const score = index + 1;
     const count = quality.scoreDistribution.find((item) => item.score === score)?.count ?? 0;
@@ -298,16 +279,195 @@ function addQualityTable(
       metrics[index]?.[1] ?? '',
     ] as const;
   });
+  for (const row of distribution) sheet.addRow(row.map(safe));
+
+  sheet.views = [{ state: 'frozen', ySplit: 1 }];
+  const firstHeader = sheet.getRow(1);
+  firstHeader.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  firstHeader.fill = HEADER_FILL;
+  firstHeader.alignment = { vertical: 'middle', wrapText: true };
+  firstHeader.height = 34;
+  [42, 24, 58, 28, 18].forEach((width, index) => {
+    sheet.getColumn(index + 1).width = width;
+  });
+  for (let row = 2; row <= sheet.rowCount; row += 1) {
+    sheet.getRow(row).alignment = { vertical: 'top', wrapText: true };
+  }
+}
+
+function addWorkSheet(workbook: ExcelJS.Workbook, input: OperationalPeriodWorkbookInput): void {
   addTable(
     workbook,
-    'Качество артефактов',
-    ['Оценка 1–10', 'Количество', 'Доля оценённых', 'Показатель', 'Значение'],
-    distribution,
-    [18, 16, 20, 28, 18],
+    'Работа CRM',
+    [
+      'Тип строки',
+      'ID',
+      'Дата',
+      'Завершено',
+      'Участник',
+      'Задача / канал',
+      'Статус / направление',
+      'Результат',
+      'Комментарий',
+      'Исполнитель / ответственный',
+      'Срок / следующий контакт',
+      'Файлы',
+    ],
+    [
+      ...input.tasks.map((item) => [
+        'Задача',
+        item.id,
+        item.createdAt,
+        item.completedAt,
+        item.personName,
+        item.title,
+        item.status,
+        '',
+        '',
+        item.assigneeName,
+        item.dueAt,
+        item.attachments,
+      ]),
+      ...input.interactions.map((item) => [
+        'Взаимодействие',
+        item.id,
+        item.occurredAt,
+        '',
+        item.personName,
+        item.channel,
+        item.direction,
+        item.outcome,
+        item.comment,
+        item.responsibleName,
+        item.nextContactAt,
+        item.attachments,
+      ]),
+    ],
+    [20, 38, 24, 24, 38, 48, 24, 40, 58, 30, 26, 46],
   );
 }
 
-/** Один XLSX вместо набора CSV: каждый набор данных остаётся на отдельном листе. */
+function addProjectsSheet(workbook: ExcelJS.Workbook, input: OperationalPeriodWorkbookInput): void {
+  addTable(
+    workbook,
+    'Проекты',
+    [
+      'Тип строки',
+      'ID проекта',
+      'Проект',
+      'Статус проекта',
+      'Описание',
+      'Начало',
+      'Окончание',
+      'Ответственный',
+      'Участников',
+      'Артефактов',
+      'Мероприятий',
+      'ID объекта',
+      'Объект / участник',
+      'Роль / тип артефакта',
+      'Добавлен / отправлен',
+      'Статус объекта',
+      'Решение',
+      'Посещение / оценка',
+      'Результат',
+      'Авторы / связанное мероприятие',
+    ],
+    [
+      ...input.projects.map((item) => [
+        'Проект',
+        item.id,
+        item.name,
+        item.status,
+        item.description,
+        item.startsAt,
+        item.endsAt,
+        item.ownerName,
+        item.memberCount,
+        item.artifactCount,
+        item.eventCount,
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+      ]),
+      ...input.projectMembers.map((item) => [
+        'Участник проекта',
+        item.projectId,
+        item.projectName,
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        item.personId,
+        item.personName,
+        item.role,
+        item.joinedAt,
+        '',
+        '',
+        '',
+        '',
+        '',
+      ]),
+      ...input.projectArtifacts.map((item) => [
+        'Артефакт проекта',
+        item.projectId,
+        item.projectName,
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        item.artifactId,
+        item.title,
+        item.typeName,
+        item.submittedAt,
+        [item.status, item.latestVersionStatus].filter(Boolean).join(' / '),
+        item.decision,
+        item.score,
+        '',
+        [item.authors, item.eventName].filter(Boolean).join(' · '),
+      ]),
+      ...input.projectEvents.map((item) => [
+        'Мероприятие проекта',
+        item.projectId,
+        item.projectName,
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        item.eventId,
+        item.eventName,
+        '',
+        item.registeredAt,
+        '',
+        item.decision,
+        item.attendance,
+        item.result,
+        '',
+      ]),
+    ],
+    [20, 38, 40, 20, 60, 24, 24, 30, 14, 14, 14, 38, 46, 34, 26, 24, 20, 22, 58, 58],
+  );
+}
+
+/** Компактный полный отчёт: шесть листов вместо разрозненных таблиц. */
 export async function createOperationalPeriodWorkbook(
   input: OperationalPeriodWorkbookInput,
 ): Promise<Uint8Array> {
@@ -316,50 +476,9 @@ export async function createOperationalPeriodWorkbook(
   workbook.created = new Date();
   workbook.subject = `Операционный отчёт ${input.period.from} — ${input.period.to}`;
 
-  addTable(
-    workbook,
-    'Сводка',
-    ['Показатель', 'Значение', 'Комментарий'],
-    [
-      ['Период', `${input.period.from} — ${input.period.to}`, ''],
-      ...input.summary.map((item) => [item.label, item.value, item.note ?? '']),
-    ],
-    [42, 24, 58],
-  );
-  addQualityTable(workbook, input.quality);
+  addSummarySheet(workbook, input.period, input.summary, input.quality);
+  addParticipantsWorksheet(workbook, input.people, 'Участники');
   addArtifactsTable(workbook, input.artifacts);
-  addTable(
-    workbook,
-    'Новые участники',
-    ['ID', 'ФИО / имя профиля', 'Создан', 'Источник', 'Ответственный', 'Артефактов', 'Профиль'],
-    input.people.map((item) => [
-      item.id,
-      item.fullName,
-      item.createdAt,
-      item.source,
-      item.ownerName,
-      item.artifactCount,
-      item.profileNeedsReview ? 'Нужно уточнить ФИО' : 'Заполнен',
-    ]),
-    [38, 38, 24, 20, 30, 14, 24],
-  );
-  addTable(
-    workbook,
-    'Задачи',
-    ['ID', 'Создана', 'Завершена', 'Статус', 'Задача', 'Участник', 'Исполнитель', 'Срок', 'Файлы'],
-    input.tasks.map((item) => [
-      item.id,
-      item.createdAt,
-      item.completedAt,
-      item.status,
-      item.title,
-      item.personName,
-      item.assigneeName,
-      item.dueAt,
-      item.attachments,
-    ]),
-    [38, 24, 24, 18, 42, 36, 28, 24, 42],
-  );
   addTable(
     workbook,
     'Мероприятия',
@@ -385,136 +504,8 @@ export async function createOperationalPeriodWorkbook(
     ]),
     [38, 40, 38, 24, 18, 18, 58, 18],
   );
-  addTable(
-    workbook,
-    'Взаимодействия',
-    [
-      'ID',
-      'Дата',
-      'Участник',
-      'Тип',
-      'Направление',
-      'Результат',
-      'Комментарий',
-      'Ответственный',
-      'Следующий контакт',
-      'Файлы',
-    ],
-    input.interactions.map((item) => [
-      item.id,
-      item.occurredAt,
-      item.personName,
-      item.channel,
-      item.direction,
-      item.outcome,
-      item.comment,
-      item.responsibleName,
-      item.nextContactAt,
-      item.attachments,
-    ]),
-    [38, 24, 38, 18, 18, 40, 58, 28, 24, 42],
-  );
-  addTable(
-    workbook,
-    'Проекты',
-    [
-      'ID',
-      'Проект',
-      'Статус',
-      'Описание',
-      'Начало',
-      'Окончание',
-      'Ответственный',
-      'Участники',
-      'Артефакты',
-      'Мероприятия',
-    ],
-    input.projects.map((item) => [
-      item.id,
-      item.name,
-      item.status,
-      item.description,
-      item.startsAt,
-      item.endsAt,
-      item.ownerName,
-      item.memberCount,
-      item.artifactCount,
-      item.eventCount,
-    ]),
-    [38, 40, 18, 64, 24, 24, 30, 14, 14, 14],
-  );
-  addTable(
-    workbook,
-    'Участники проектов',
-    ['ID проекта', 'Проект', 'ID участника', 'Участник', 'Роль', 'Добавлен в проект'],
-    input.projectMembers.map((item) => [
-      item.projectId,
-      item.projectName,
-      item.personId,
-      item.personName,
-      item.role,
-      item.joinedAt,
-    ]),
-    [38, 40, 38, 40, 36, 24],
-  );
-  addTable(
-    workbook,
-    'Артефакты проектов',
-    [
-      'ID проекта',
-      'Проект',
-      'ID артефакта',
-      'Артефакт',
-      'Тип',
-      'Статус',
-      'Статус версии',
-      'Отправлен',
-      'Авторы',
-      'Мероприятие',
-      'Оценка 1–10',
-      'Решение',
-    ],
-    input.projectArtifacts.map((item) => [
-      item.projectId,
-      item.projectName,
-      item.artifactId,
-      item.title,
-      item.typeName,
-      item.status,
-      item.latestVersionStatus,
-      item.submittedAt,
-      item.authors,
-      item.eventName,
-      item.score,
-      item.decision,
-    ]),
-    [38, 38, 38, 42, 26, 18, 20, 24, 42, 36, 14, 18],
-  );
-  addTable(
-    workbook,
-    'Мероприятия проектов',
-    [
-      'ID проекта',
-      'Проект',
-      'ID мероприятия',
-      'Мероприятие',
-      'Добавлен',
-      'Решение',
-      'Посещение',
-      'Результат',
-    ],
-    input.projectEvents.map((item) => [
-      item.projectId,
-      item.projectName,
-      item.eventId,
-      item.eventName,
-      item.registeredAt,
-      item.decision,
-      item.attendance,
-      item.result,
-    ]),
-    [38, 40, 38, 42, 24, 18, 18, 58],
-  );
+  addProjectsSheet(workbook, input);
+  addWorkSheet(workbook, input);
 
   const buffer = await workbook.xlsx.writeBuffer();
   return new Uint8Array(buffer);

@@ -6,6 +6,9 @@ import {
   createParticipantsExportWorkbook,
   createProjectWorkbook,
   type EventParticipantWorkbookArtifact,
+  type EventParticipantWorkbookProject,
+  type OperationalPeriodWorkbookInput,
+  type ParticipantWorkbookRow,
   type ParticipantsExportWorkbookInput,
 } from '@cpi-crm/importer';
 import { Type } from '@sinclair/typebox';
@@ -26,7 +29,9 @@ import {
 } from '../../lib/period-report.js';
 import { HttpProblem } from '../../lib/problem.js';
 
-const EXPORT_BATCH_SIZE = 25;
+// Полная карточка включает контакты, связи и исходные строки. Сто записей дают
+// умеренное потребление памяти и заметно сокращают число round-trip к PostgreSQL.
+const EXPORT_BATCH_SIZE = 100;
 
 /** Параллельная подготовка источников; сами файлы качаются по очереди. */
 const ARTIFACT_LINK_CONCURRENCY = 4;
@@ -55,6 +60,42 @@ interface EventParticipantExportRow {
 
 type PeriodQueryInput = { weeks?: number; from?: string; to?: string };
 
+interface PersonExportRow {
+  id: string;
+  last_name: string | null;
+  first_name: string | null;
+  patronymic: string | null;
+  canonical_full_name: string;
+  aliases: string;
+  emails: string;
+  phones: string;
+  telegram: string;
+  telegram_user_ids: string;
+  max_contacts: string;
+  other_contacts: string;
+  affiliations: string;
+  tags: string;
+  notes: string | null;
+  created_at: Date;
+  updated_at: Date;
+  owner_name: string | null;
+  from_bot: boolean;
+  source_identities: string;
+  profile_needs_review: boolean;
+  marketing_email: string;
+  marketing_telegram: string;
+  artifact_count: string;
+  last_artifact_at: Date | null;
+  events: string;
+  event_results: string;
+  projects: string;
+  project_roles: string;
+  artifacts: string;
+  comments: string;
+  interactions: string;
+  source_rows: unknown;
+}
+
 interface PeriodArtifactRow {
   version_id: string;
   artifact_id: string;
@@ -67,6 +108,47 @@ interface PeriodArtifactRow {
   score: number | null;
   decision: string | null;
   authors: string[];
+  external_urls: string[];
+  files: {
+    id: string;
+    fileName: string;
+    status: string;
+    storageProvider: 'CRM' | 'LOCKER';
+  }[];
+}
+
+interface EventProjectParticipationExportRow {
+  project_id: string;
+  project_name: string;
+  description: string | null;
+  status: string;
+  lead_person_id: string | null;
+  lead_person_name: string | null;
+  registered_at: Date;
+  decision: string;
+  attendance: string;
+  result: string | null;
+}
+
+interface EventProjectMemberExportRow {
+  project_id: string;
+  person_id: string;
+  person_name: string;
+  role: string;
+}
+
+interface EventProjectArtifactExportRow {
+  project_id: string;
+  artifact_id: string;
+  title: string;
+  type_name: string;
+  status: string;
+  version_status: string | null;
+  submitted_at: Date | null;
+  authors: string[];
+  event_name: string | null;
+  score: number | null;
+  decision: string | null;
   external_urls: string[];
   files: {
     id: string;
@@ -172,6 +254,231 @@ const EVENT_PARTICIPANTS_EXPORT_SQL = `
    ORDER BY person.last_name, person.first_name, person.patronymic, person.id
 `;
 
+const PERSON_EXPORT_CLUSTER_SQL = `(SELECT member.id FROM persons member
+  WHERE member.id = p.id OR member.merged_into_person_id = p.id)`;
+
+/**
+ * Единая проекция полной карточки участника для самостоятельной выгрузки и
+ * периодического ZIP. p всегда указывает на каноническую запись.
+ */
+export function personExportProjection(eventParameter?: string): string {
+  const eventFilter = eventParameter ? `AND participation.event_id = ${eventParameter}` : '';
+  const artifactEventFilter = eventParameter ? `AND artifact.event_id = ${eventParameter}` : '';
+  return `
+    p.id, p.last_name, p.first_name, p.patronymic, p.canonical_full_name,
+    p.notes, p.created_at, p.updated_at, p.last_artifact_at,
+    p.profile_needs_review, owner.display_name AS owner_name,
+    EXISTS (
+      SELECT 1 FROM external_identities identity
+       WHERE identity.person_id IN ${PERSON_EXPORT_CLUSTER_SQL}
+         AND identity.source_namespace IN ('locker.user', 'locker.telegram')
+         AND identity.archived_at IS NULL
+    ) AS from_bot,
+    COALESCE(aliases.values, '') AS aliases,
+    COALESCE(contacts.emails, '') AS emails,
+    COALESCE(contacts.phones, '') AS phones,
+    COALESCE(contacts.telegram, '') AS telegram,
+    COALESCE(contacts.telegram_user_ids, '') AS telegram_user_ids,
+    COALESCE(contacts.max_contacts, '') AS max_contacts,
+    COALESCE(contacts.other_contacts, '') AS other_contacts,
+    COALESCE(affiliations.values, '') AS affiliations,
+    COALESCE(tags.values, '') AS tags,
+    COALESCE(identities.values, '') AS source_identities,
+    COALESCE(consents.marketing_email, 'UNKNOWN') AS marketing_email,
+    COALESCE(consents.marketing_telegram, 'UNKNOWN') AS marketing_telegram,
+    COALESCE(event_data.names, '') AS events,
+    COALESCE(event_data.results, '') AS event_results,
+    COALESCE(event_data.comments, '') AS comments,
+    COALESCE(project_data.names, '') AS projects,
+    COALESCE(project_data.roles, '') AS project_roles,
+    COALESCE(artifact_data.titles, '') AS artifacts,
+    COALESCE(artifact_data.artifact_count, '0') AS artifact_count,
+    COALESCE(interaction_data.values, '') AS interactions,
+    COALESCE(source_data.rows, '[]'::jsonb) AS source_rows
+  FROM persons p
+  LEFT JOIN app_users owner ON owner.id = p.owner_user_id
+  LEFT JOIN LATERAL (
+    SELECT string_agg(DISTINCT alias.raw_value, ' | ' ORDER BY alias.raw_value) AS values
+      FROM person_aliases alias
+     WHERE alias.person_id IN ${PERSON_EXPORT_CLUSTER_SQL} AND alias.archived_at IS NULL
+  ) aliases ON true
+  LEFT JOIN LATERAL (
+    SELECT
+      string_agg(DISTINCT contact.raw_value, ' | ' ORDER BY contact.raw_value)
+        FILTER (WHERE contact.type = 'EMAIL') AS emails,
+      string_agg(DISTINCT contact.raw_value, ' | ' ORDER BY contact.raw_value)
+        FILTER (WHERE contact.type = 'PHONE') AS phones,
+      string_agg(DISTINCT contact.raw_value, ' | ' ORDER BY contact.raw_value)
+        FILTER (WHERE contact.type = 'TELEGRAM') AS telegram,
+      string_agg(DISTINCT contact.messenger_stable_id, ' | ' ORDER BY contact.messenger_stable_id)
+        FILTER (WHERE contact.type = 'TELEGRAM' AND contact.messenger_stable_id IS NOT NULL)
+        AS telegram_user_ids,
+      string_agg(DISTINCT contact.raw_value, ' | ' ORDER BY contact.raw_value)
+        FILTER (WHERE contact.type = 'MAX') AS max_contacts,
+      string_agg(DISTINCT contact.raw_value, ' | ' ORDER BY contact.raw_value)
+        FILTER (WHERE contact.type = 'OTHER') AS other_contacts
+      FROM contact_points contact
+     WHERE contact.person_id IN ${PERSON_EXPORT_CLUSTER_SQL} AND contact.archived_at IS NULL
+  ) contacts ON true
+  LEFT JOIN LATERAL (
+    SELECT string_agg(DISTINCT concat_ws(' / ', related.name,
+               NULLIF(affiliation.faculty, ''), NULLIF(affiliation.department, ''),
+               NULLIF(affiliation.role_title, '')), ' | '
+               ORDER BY concat_ws(' / ', related.name,
+               NULLIF(affiliation.faculty, ''), NULLIF(affiliation.department, ''),
+               NULLIF(affiliation.role_title, ''))) AS values
+      FROM affiliations affiliation
+      JOIN organizations related ON related.id = affiliation.organization_id
+     WHERE affiliation.person_id IN ${PERSON_EXPORT_CLUSTER_SQL}
+       AND affiliation.archived_at IS NULL
+  ) affiliations ON true
+  LEFT JOIN LATERAL (
+    SELECT string_agg(DISTINCT tag.name, ' | ' ORDER BY tag.name) AS values
+      FROM person_tags person_tag
+      JOIN tags tag ON tag.id = person_tag.tag_id
+     WHERE person_tag.person_id IN ${PERSON_EXPORT_CLUSTER_SQL} AND tag.archived_at IS NULL
+  ) tags ON true
+  LEFT JOIN LATERAL (
+    SELECT string_agg(DISTINCT identity.source_namespace || ': ' || identity.external_id,
+                      ' | ' ORDER BY identity.source_namespace || ': ' || identity.external_id)
+             AS values
+      FROM external_identities identity
+     WHERE identity.person_id IN ${PERSON_EXPORT_CLUSTER_SQL} AND identity.archived_at IS NULL
+  ) identities ON true
+  LEFT JOIN LATERAL (
+    SELECT
+      (SELECT consent.status::text FROM consent_records consent
+        WHERE consent.person_id IN ${PERSON_EXPORT_CLUSTER_SQL}
+          AND consent.purpose = 'MARKETING_EMAIL'
+        ORDER BY consent.recorded_at DESC, consent.id DESC LIMIT 1) AS marketing_email,
+      (SELECT consent.status::text FROM consent_records consent
+        WHERE consent.person_id IN ${PERSON_EXPORT_CLUSTER_SQL}
+          AND consent.purpose = 'MARKETING_TELEGRAM'
+        ORDER BY consent.recorded_at DESC, consent.id DESC LIMIT 1) AS marketing_telegram
+  ) consents ON true
+  LEFT JOIN LATERAL (
+    SELECT string_agg(DISTINCT event.name, ' | ' ORDER BY event.name) AS names,
+           string_agg(DISTINCT event.name || ': ' || participation.result,
+                      E'\n---\n' ORDER BY event.name || ': ' || participation.result)
+             FILTER (WHERE participation.result IS NOT NULL) AS results,
+           string_agg(DISTINCT btrim(COALESCE(
+             NULLIF(cell->>'displayText', ''),
+             CASE WHEN jsonb_typeof(cell->'value') = 'string' THEN cell->>'value' ELSE NULL END
+           )), E'\n---\n') FILTER (WHERE cell IS NOT NULL) AS comments
+      FROM event_participations participation
+      JOIN events event ON event.id = participation.event_id
+      LEFT JOIN source_entity_links link
+        ON upper(link.entity_type) = 'EVENT_PARTICIPATION'
+       AND link.entity_id = participation.id AND link.detached_at IS NULL
+      LEFT JOIN source_records source ON source.id = link.source_record_id
+      LEFT JOIN LATERAL jsonb_array_elements(source.raw_json->'cells') cell
+        ON COALESCE(cell->>'normalizedHeader', '') = 'комментарий'
+       AND btrim(COALESCE(NULLIF(cell->>'displayText', ''), cell->>'value', '')) <> ''
+       AND char_length(btrim(COALESCE(NULLIF(cell->>'displayText', ''), cell->>'value', ''))) <= 10000
+       AND lower(btrim(COALESCE(NULLIF(cell->>'displayText', ''), cell->>'value', '')))
+             !~ '^(нет|не указано|отсутствует|none|null|n/?a|test|тест|[-—.]+)$'
+       AND btrim(COALESCE(NULLIF(cell->>'displayText', ''), cell->>'value', ''))
+             ~ '[[:alnum:]А-Яа-яЁё]'
+     WHERE participation.person_id IN ${PERSON_EXPORT_CLUSTER_SQL}
+       AND participation.archived_at IS NULL ${eventFilter}
+  ) event_data ON true
+  LEFT JOIN LATERAL (
+    SELECT string_agg(DISTINCT project.name, ' | ' ORDER BY project.name) AS names,
+           string_agg(DISTINCT project.name || ': ' || membership.role,
+                      ' | ' ORDER BY project.name || ': ' || membership.role) AS roles
+      FROM project_memberships membership
+      JOIN projects project ON project.id = membership.project_id
+     WHERE membership.person_id IN ${PERSON_EXPORT_CLUSTER_SQL}
+       AND membership.archived_at IS NULL AND project.archived_at IS NULL
+  ) project_data ON true
+  LEFT JOIN LATERAL (
+    SELECT string_agg(DISTINCT artifact.title, ' | ' ORDER BY artifact.title) AS titles,
+           count(DISTINCT artifact.id)::text AS artifact_count
+      FROM artifacts artifact
+     WHERE artifact.status <> 'VOIDED' AND artifact.archived_at IS NULL
+       ${artifactEventFilter}
+       AND EXISTS (
+         SELECT 1 FROM artifact_versions version
+         JOIN artifact_version_contributors contributor
+           ON contributor.artifact_version_id = version.id
+        WHERE version.artifact_id = artifact.id AND version.status <> 'VOIDED'
+          AND contributor.person_id IN ${PERSON_EXPORT_CLUSTER_SQL}
+       )
+  ) artifact_data ON true
+  LEFT JOIN LATERAL (
+    SELECT string_agg(
+             concat_ws(' · ', interaction.occurred_at::date::text, interaction.channel::text,
+               NULLIF(interaction.outcome, ''), NULLIF(interaction.comment, '')),
+             E'\n---\n' ORDER BY interaction.occurred_at DESC, interaction.id
+           ) AS values
+      FROM interactions interaction
+     WHERE interaction.person_id IN ${PERSON_EXPORT_CLUSTER_SQL}
+       AND interaction.archived_at IS NULL
+  ) interaction_data ON true
+  LEFT JOIN LATERAL (
+    SELECT jsonb_agg(jsonb_build_object(
+             'sheet', source.sheet_name,
+             'row', source.row_number,
+             'fields', (
+               SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                        'header', COALESCE(cell->>'header', cell->>'address'),
+                        'address', cell->>'address',
+                        'value', COALESCE(NULLIF(cell->>'displayText', ''),
+                          cell#>>'{value,url}', cell#>>'{value,expression}', cell->>'value')
+                      ) ORDER BY (cell->>'column')::integer), '[]'::jsonb)
+                 FROM jsonb_array_elements(source.raw_json->'cells') cell
+                WHERE COALESCE((cell->>'redacted')::boolean, false) = false
+             )
+           ) ORDER BY source.sheet_name, source.row_number) AS rows
+      FROM (
+        SELECT DISTINCT source.id, source.sheet_name, source.row_number, source.raw_json
+          FROM source_entity_links link
+          JOIN source_records source ON source.id = link.source_record_id
+         WHERE upper(link.entity_type) = 'PERSON'
+           AND link.entity_id IN ${PERSON_EXPORT_CLUSTER_SQL} AND link.detached_at IS NULL
+      ) source
+  ) source_data ON true`;
+}
+
+function mapPersonExportRow(row: PersonExportRow): ParticipantWorkbookRow {
+  return {
+    id: row.id,
+    lastName: row.last_name,
+    firstName: row.first_name,
+    patronymic: row.patronymic,
+    fullName: row.canonical_full_name,
+    aliases: row.aliases,
+    emails: row.emails,
+    phones: row.phones,
+    telegram: row.telegram,
+    telegramUserIds: row.telegram_user_ids,
+    max: row.max_contacts,
+    otherContacts: row.other_contacts,
+    affiliations: row.affiliations,
+    tags: row.tags,
+    notes: row.notes,
+    createdAt: row.created_at.toISOString(),
+    updatedAt: row.updated_at.toISOString(),
+    source: row.from_bot ? 'BOT' : 'CRM / IMPORT',
+    sourceIdentities: row.source_identities,
+    ownerName: row.owner_name,
+    profileStatus: row.profile_needs_review ? 'Нужно уточнить ФИО' : 'Заполнен',
+    marketingEmail: row.marketing_email,
+    marketingTelegram: row.marketing_telegram,
+    hasArtifacts: Number(row.artifact_count ?? 0) > 0,
+    artifactCount: Number(row.artifact_count ?? 0),
+    lastArtifactAt: row.last_artifact_at?.toISOString() ?? null,
+    events: row.events,
+    eventResults: row.event_results,
+    projects: row.projects,
+    projectRoles: row.project_roles,
+    artifacts: row.artifacts,
+    comments: row.comments,
+    interactions: row.interactions,
+    sourceRows: row.source_rows,
+  };
+}
+
 export async function registerExportRoutes(app: FastifyInstance): Promise<void> {
   const guardExportConcurrency = createConcurrencyGuard({
     maxConcurrent: 2,
@@ -194,6 +501,9 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
           profileNeedsReview: Type.Optional(Type.Boolean()),
           eventId: Type.Optional(Type.String({ format: 'uuid' })),
           awaitingReview: Type.Optional(Type.Boolean()),
+          weeks: Type.Optional(Type.Integer({ minimum: 1, maximum: 52 })),
+          from: Type.Optional(Type.String({ format: 'date-time' })),
+          to: Type.Optional(Type.String({ format: 'date-time' })),
         }),
       },
     },
@@ -204,6 +514,9 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
         profileNeedsReview?: boolean;
         eventId?: string;
         awaitingReview?: boolean;
+        weeks?: number;
+        from?: string;
+        to?: string;
       };
       const organization = await getOrganizationContext(app.pool);
       const values: unknown[] = [organization.id];
@@ -214,6 +527,14 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
         'p.archived_at IS NULL',
         'p.merged_into_person_id IS NULL',
       ];
+      const selectedPeriod =
+        query.weeks !== undefined || query.from !== undefined || query.to !== undefined
+          ? periodFromQuery(query)
+          : null;
+      if (selectedPeriod) {
+        values.push(selectedPeriod.from, selectedPeriod.to);
+        where.push(`p.created_at >= $${values.length - 1} AND p.created_at < $${values.length}`);
+      }
       if (query.q?.trim()) {
         const raw = query.q.trim();
         const normalizedName = normalizeFullName(raw);
@@ -336,7 +657,7 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
         const pageValues = [...values, EXPORT_BATCH_SIZE, offset];
         const limitParameter = `$${values.length + 1}`;
         const offsetParameter = `$${values.length + 2}`;
-        const result = await app.pool.query(
+        const result = await app.pool.query<PersonExportRow>(
           `WITH export_people AS MATERIALIZED (
                SELECT p.id
                  FROM persons p
@@ -344,149 +665,27 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
                 ORDER BY p.normalized_full_name, p.id
                 LIMIT ${limitParameter} OFFSET ${offsetParameter}
              )
-             SELECT p.id, p.canonical_full_name, p.last_artifact_at,
-                p.profile_needs_review,
-                EXISTS (
-                  SELECT 1 FROM external_identities identity
-                   WHERE identity.person_id IN ${clusterSql}
-                     AND identity.source_namespace IN ('locker.user', 'locker.telegram')
-                     AND identity.archived_at IS NULL
-                ) AS from_bot,
-                COALESCE(contacts.values, '') AS contacts,
-                COALESCE(affiliations.values, '') AS affiliations,
-                COALESCE(event_data.names, '') AS events,
-                COALESCE(event_data.comments, '') AS comments,
-                COALESCE(artifact_data.titles, '') AS artifacts,
-                COALESCE(artifact_data.artifact_count, 0)::text AS artifact_count,
-                COALESCE(source_data.rows, '[]'::jsonb) AS source_rows
-           FROM export_people export_person
-           JOIN persons p ON p.id = export_person.id
-           LEFT JOIN LATERAL (
-             SELECT string_agg(DISTINCT contact.type::text || ': ' || contact.raw_value,
-                               ' | ' ORDER BY contact.type::text || ': ' || contact.raw_value)
-                      AS values
-               FROM contact_points contact
-              WHERE contact.person_id IN ${clusterSql} AND contact.archived_at IS NULL
-           ) contacts ON true
-           LEFT JOIN LATERAL (
-             SELECT string_agg(DISTINCT related.name ||
-                      CASE WHEN affiliation.faculty IS NULL OR affiliation.faculty = ''
-                           THEN '' ELSE ' / ' || affiliation.faculty END,
-                      ' | ' ORDER BY related.name ||
-                      CASE WHEN affiliation.faculty IS NULL OR affiliation.faculty = ''
-                           THEN '' ELSE ' / ' || affiliation.faculty END) AS values
-               FROM affiliations affiliation
-               JOIN organizations related ON related.id = affiliation.organization_id
-              WHERE affiliation.person_id IN ${clusterSql} AND affiliation.archived_at IS NULL
-           ) affiliations ON true
-           LEFT JOIN LATERAL (
-             SELECT string_agg(DISTINCT event.name, ' | ' ORDER BY event.name) AS names,
-                    string_agg(DISTINCT btrim(COALESCE(
-                      NULLIF(cell->>'displayText', ''),
-                      CASE WHEN jsonb_typeof(cell->'value') = 'string'
-                           THEN cell->>'value' ELSE NULL END
-                    )), ' | ') FILTER (WHERE cell IS NOT NULL) AS comments
-               FROM event_participations participation
-               JOIN events event ON event.id = participation.event_id
-               LEFT JOIN source_entity_links link
-                 ON upper(link.entity_type) = 'EVENT_PARTICIPATION'
-                AND link.entity_id = participation.id AND link.detached_at IS NULL
-               LEFT JOIN source_records source ON source.id = link.source_record_id
-               LEFT JOIN LATERAL jsonb_array_elements(source.raw_json->'cells') cell
-                 ON COALESCE(cell->>'normalizedHeader', '') = 'комментарий'
-                AND btrim(COALESCE(NULLIF(cell->>'displayText', ''), cell->>'value', '')) <> ''
-                AND char_length(btrim(COALESCE(NULLIF(cell->>'displayText', ''), cell->>'value', ''))) <= 10000
-                AND lower(btrim(COALESCE(NULLIF(cell->>'displayText', ''), cell->>'value', ''))) !~ '^(нет|не указано|отсутствует|none|null|n/?a|test|тест|[-—.]+)$'
-                AND btrim(COALESCE(NULLIF(cell->>'displayText', ''), cell->>'value', '')) ~ '[[:alnum:]А-Яа-яЁё]'
-              WHERE participation.person_id IN ${clusterSql}
-                AND participation.archived_at IS NULL
-                ${eventParameter ? `AND participation.event_id = ${eventParameter}` : ''}
-           ) event_data ON true
-           LEFT JOIN LATERAL (
-             SELECT string_agg(DISTINCT artifact.title, ' | ' ORDER BY artifact.title) AS titles,
-                    count(DISTINCT artifact.id)::text AS artifact_count
-              FROM artifacts artifact
-              WHERE artifact.status <> 'VOIDED'
-                AND artifact.archived_at IS NULL
-                ${eventParameter ? `AND artifact.event_id = ${eventParameter}` : ''}
-                AND EXISTS (
-                  SELECT 1 FROM artifact_versions version
-                  JOIN artifact_version_contributors contributor
-                    ON contributor.artifact_version_id = version.id
-                   WHERE version.artifact_id = artifact.id
-                     AND version.status <> 'VOIDED'
-                     AND contributor.person_id IN ${clusterSql}
-                )
-           ) artifact_data ON true
-           LEFT JOIN LATERAL (
-             SELECT jsonb_agg(jsonb_build_object(
-                      'sheet', source.sheet_name,
-                      'row', source.row_number,
-                      'fields', (
-                        SELECT COALESCE(jsonb_agg(jsonb_build_object(
-                                 'header', COALESCE(cell->>'header', cell->>'address'),
-                                 'address', cell->>'address',
-                                 'value', COALESCE(
-                                   NULLIF(cell->>'displayText', ''),
-                                   cell#>>'{value,url}',
-                                   cell#>>'{value,expression}',
-                                   cell->>'value'
-                                 )
-                               ) ORDER BY (cell->>'column')::integer), '[]'::jsonb)
-                          FROM jsonb_array_elements(source.raw_json->'cells') cell
-                         WHERE COALESCE((cell->>'redacted')::boolean, false) = false
-                      )
-                    ) ORDER BY source.sheet_name, source.row_number) AS rows
-               FROM (
-                 SELECT DISTINCT source.id, source.sheet_name, source.row_number, source.raw_json
-                   FROM source_entity_links link
-                   JOIN source_records source ON source.id = link.source_record_id
-                  WHERE upper(link.entity_type) = 'PERSON'
-                    AND link.entity_id IN ${clusterSql}
-                    AND link.detached_at IS NULL
-                    ${
-                      eventParameter
-                        ? `AND EXISTS (
-                             SELECT 1
-                               FROM source_entity_links participation_link
-                               JOIN event_participations source_participation
-                                 ON source_participation.id = participation_link.entity_id
-                              WHERE participation_link.source_record_id = source.id
-                                AND upper(participation_link.entity_type) = 'EVENT_PARTICIPATION'
-                                AND participation_link.detached_at IS NULL
-                                AND source_participation.archived_at IS NULL
-                                AND source_participation.event_id = ${eventParameter}
-                           )`
-                        : ''
-                    }
-               ) source
-           ) source_data ON true
+             SELECT ${personExportProjection(eventParameter)}
+          WHERE p.id IN (SELECT id FROM export_people)
           ORDER BY p.normalized_full_name, p.id`,
           pageValues,
         );
         if (result.rows.length === 0) break;
-        for (const row of result.rows) {
-          rows.push({
-            id: row.id,
-            fullName: row.canonical_full_name,
-            contacts: row.contacts,
-            affiliations: row.affiliations,
-            hasArtifacts: Number(row.artifact_count ?? 0) > 0,
-            artifactCount: Number(row.artifact_count ?? 0),
-            lastArtifactAt: row.last_artifact_at?.toISOString() ?? null,
-            source: row.from_bot ? 'BOT' : 'CRM / IMPORT',
-            profileStatus: row.profile_needs_review ? 'Нужно уточнить ФИО' : 'Заполнен',
-            events: row.events,
-            artifacts: row.artifacts,
-            comments: row.comments,
-            sourceRows: row.source_rows,
-          });
-        }
+        rows.push(...result.rows.map(mapPersonExportRow));
         offset += result.rows.length;
       }
 
-      const bytes = await createParticipantsExportWorkbook({ rows });
-      const suffix = query.eventId ? `-event-${query.eventId}` : '';
+      const bytes = await createParticipantsExportWorkbook({
+        rows,
+        period: selectedPeriod
+          ? { from: selectedPeriod.from.toISOString(), to: selectedPeriod.to.toISOString() }
+          : null,
+      });
+      const suffix = query.eventId
+        ? `-event-${query.eventId}`
+        : selectedPeriod
+          ? `-${selectedPeriod.from.toISOString().slice(0, 10)}-${selectedPeriod.to.toISOString().slice(0, 10)}`
+          : '';
       return reply
         .header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
         .header('Content-Disposition', `attachment; filename="cpi-participants${suffix}.xlsx"`)
@@ -619,21 +818,13 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
     async (request, reply) => {
       const period = periodFromQuery(request.query as PeriodQueryInput);
       const organization = await getOrganizationContext(app.pool);
-      const report = await loadOperationalPeriodReport(app.pool, organization.id, period);
-      const bytes = await createOperationalPeriodWorkbook({
-        period: { from: report.period.from, to: report.period.to },
-        summary: periodWorkbookSummary(report),
-        quality: periodWorkbookQuality(report),
-        artifacts: [],
-        people: [],
-        tasks: [],
-        events: [],
-        interactions: [],
-        projects: [],
-        projectMembers: [],
-        projectArtifacts: [],
-        projectEvents: [],
-      });
+      const [report, data] = await Promise.all([
+        loadOperationalPeriodReport(app.pool, organization.id, period),
+        loadPeriodExportData(app, organization.id, period),
+      ]);
+      const bytes = await createOperationalPeriodWorkbook(
+        buildOperationalWorkbookInput(report, data),
+      );
       await auditPeriodExport(app, request, 'period.dashboard_xlsx_exported', report, 'XLSX');
       return reply
         .header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
@@ -720,163 +911,9 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
       skipped.push(...sources.failures);
       const downloadablePaths = new Set(sources.entries.map((entry) => entry.archivePath));
 
-      const workbookBytes = await createOperationalPeriodWorkbook({
-        period: { from: report.period.from, to: report.period.to },
-        summary: [
-          {
-            label: 'Новые участники',
-            value: report.people.newPeople,
-            note: `Из бота: ${report.people.newFromBot}`,
-          },
-          {
-            label: 'Всего участников',
-            value: report.people.total,
-            note: `Из бота: ${report.people.totalFromBot}`,
-          },
-          { label: 'Отправляли артефакты за период', value: report.artifacts.uniqueAuthors },
-          { label: 'Отправляли артефакты всего', value: report.people.artifactSendersEver },
-          { label: 'Отправлено версий', value: report.artifacts.submittedVersions },
-          {
-            label: 'Файлов',
-            value: report.artifacts.files,
-            note: `Доступно: ${report.artifacts.availableFiles}`,
-          },
-          {
-            label: 'Оценено',
-            value: report.artifacts.reviewed,
-            note: `Средний балл: ${report.artifacts.averageScore?.toFixed(1) ?? '—'}`,
-          },
-          { label: 'Участий в мероприятиях', value: report.events.participations },
-          { label: 'Завершено задач', value: report.tasks.completed },
-          { label: 'Взаимодействий', value: report.interactions.recorded },
-          { label: 'Нужно уточнить ФИО', value: report.people.profilesNeedReview },
-          {
-            label: 'Проектов в CRM',
-            value: data.projects.length,
-            note: 'Полный состав и все артефакты — на отдельных листах',
-          },
-        ],
-        quality: {
-          reviewed: report.artifacts.reviewed,
-          awaitingReview: report.artifacts.awaitingReview,
-          accepted: report.artifacts.accepted,
-          rejected: report.artifacts.rejected,
-          averageScore: report.artifacts.averageScore,
-          medianScore: report.artifacts.medianScore,
-          scoreDistribution: report.artifacts.scoreDistribution,
-        },
-        artifacts: data.artifacts.map((artifact) => ({
-          versionId: artifact.version_id,
-          artifactId: artifact.artifact_id,
-          submittedAt: artifact.submitted_at.toISOString(),
-          title: artifact.title,
-          typeName: artifact.type_name,
-          authors: artifact.authors.join(' | '),
-          projectName: artifact.project_name,
-          eventName: artifact.event_name,
-          source: artifact.source,
-          score: artifact.score,
-          decision: artifact.decision,
-          externalUrls: artifact.external_urls.join(' | '),
-          archivePaths: (versionFiles.get(artifact.version_id) ?? [])
-            .filter((file) => downloadablePaths.has(file.archivePath))
-            .map((file) => file.archivePath)
-            .join(' | '),
-          archiveFiles: (versionFiles.get(artifact.version_id) ?? [])
-            .filter((file) => downloadablePaths.has(file.archivePath))
-            .map((file) => ({
-              fileName: file.fileName,
-              archivePath: file.archivePath,
-              relativePath: `../${file.archivePath}`,
-            })),
-        })),
-        people: data.people.map((person) => ({
-          id: person.id,
-          fullName: person.canonical_full_name,
-          createdAt: person.created_at.toISOString(),
-          source: person.from_bot ? 'BOT' : 'CRM / IMPORT',
-          ownerName: person.owner_name,
-          artifactCount: Number(person.artifact_count),
-          profileNeedsReview: person.profile_needs_review,
-        })),
-        tasks: data.tasks.map((task) => ({
-          id: task.id,
-          createdAt: task.created_at.toISOString(),
-          completedAt: task.completed_at?.toISOString() ?? null,
-          status: task.status,
-          title: task.title,
-          personName: task.person_name,
-          assigneeName: task.assignee_name,
-          dueAt: task.due_at?.toISOString() ?? null,
-          attachments: task.attachments.join(' | '),
-        })),
-        events: data.events.map((item) => ({
-          id: item.id,
-          eventName: item.event_name,
-          personName: item.person_name,
-          createdAt: item.created_at.toISOString(),
-          decision: item.decision,
-          attendance: item.attendance,
-          result: item.result,
-          source: item.data_origin,
-        })),
-        interactions: data.interactions.map((item) => ({
-          id: item.id,
-          occurredAt: item.occurred_at.toISOString(),
-          personName: item.person_name,
-          channel: item.channel,
-          direction: item.direction,
-          outcome: item.outcome,
-          comment: item.comment,
-          responsibleName: item.responsible_name,
-          nextContactAt: item.next_contact_at?.toISOString() ?? null,
-          attachments: item.attachments.join(' | '),
-        })),
-        projects: data.projects.map((project) => ({
-          id: project.id,
-          name: project.name,
-          status: project.status,
-          description: project.description,
-          startsAt: project.starts_at?.toISOString() ?? null,
-          endsAt: project.ends_at?.toISOString() ?? null,
-          ownerName: project.owner_name,
-          memberCount: Number(project.member_count),
-          artifactCount: Number(project.artifact_count),
-          eventCount: Number(project.event_count),
-        })),
-        projectMembers: data.projectMembers.map((membership) => ({
-          projectId: membership.project_id,
-          projectName: membership.project_name,
-          personId: membership.person_id,
-          personName: membership.person_name,
-          role: membership.role,
-          joinedAt: membership.joined_at.toISOString(),
-        })),
-        projectArtifacts: data.projectArtifacts.map((artifact) => ({
-          projectId: artifact.project_id,
-          projectName: artifact.project_name,
-          artifactId: artifact.artifact_id,
-          title: artifact.title,
-          typeName: artifact.type_name,
-          status: artifact.status,
-          latestVersionStatus: artifact.version_status,
-          submittedAt: artifact.submitted_at?.toISOString() ?? null,
-          authors: artifact.authors.join(' | '),
-          eventName: artifact.event_name,
-          score: artifact.score,
-          decision: artifact.decision,
-        })),
-        projectEvents: data.projectEvents.map((item) => ({
-          projectId: item.project_id,
-          projectName: item.project_name,
-          eventId: item.event_id,
-          eventName: item.event_name,
-          registeredAt: item.registered_at.toISOString(),
-          decision: item.decision,
-          attendance: item.attendance,
-          result: item.result,
-        })),
-      });
+      const workbookBytes = await createOperationalPeriodWorkbook(
+        buildOperationalWorkbookInput(report, data, versionFiles, downloadablePaths),
+      );
 
       await auditPeriodExport(app, request, 'period.package_zip_exported', report, 'ZIP', {
         files: sources.entries.length,
@@ -898,9 +935,10 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
         `Выгрузка ЦПИ за ${period.from.toISOString()} — ${period.to.toISOString()}\n\n` +
           'report/dashboard.svg — изображение отчёта\n' +
           'report/summary.json — машиночитаемая сводка\n' +
-          'tables/Отчёт.xlsx — сводка и таблицы CRM на отдельных листах\n' +
+          'tables/Отчёт.xlsx — полный отчёт на 6 листах: сводка, участники, артефакты, мероприятия, проекты и работа CRM\n' +
           'Сначала распакуйте ZIP целиком: ссылки из XLSX открывают файлы в папке artifacts/.\n' +
-          'На листе «Файлы артефактов» дана отдельная ссылка на каждый доступный файл.\n' +
+          'На листе «Артефакты» дана отдельная строка и ссылка на каждый доступный файл.\n' +
+          'Лист «Участники» содержит полные карточки новых участников за период: ФИО, контакты, источник, комментарии и связи.\n' +
           'В XLSX проекты раскрыты по участникам, артефактам и мероприятиям.\n' +
           'artifacts/ — доступные файлы отправленных версий\n' +
           'Недоступные или непроверенные файлы перечислены в summary.json и не теряются из CRM.\n',
@@ -1213,12 +1251,113 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
       const event = eventResult.rows[0];
       if (!event) return reply.code(404).send({ title: 'Мероприятие не найдено', status: 404 });
 
-      const [participantsResult, artifactsResult] = await Promise.all([
+      const [
+        participantsResult,
+        artifactsResult,
+        eventProjectsResult,
+        projectMembersResult,
+        projectArtifactsResult,
+      ] = await Promise.all([
         app.pool.query<EventParticipantExportRow>(EVENT_PARTICIPANTS_EXPORT_SQL, [
           eventId,
           organization.id,
         ]),
         app.pool.query(EVENT_ARTIFACTS_SQL, [eventId]),
+        app.pool.query<EventProjectParticipationExportRow>(
+          `SELECT project.id AS project_id, project.name AS project_name,
+                  project.description, project.status, project.lead_person_id,
+                  lead.canonical_full_name AS lead_person_name,
+                  participation.registered_at, participation.decision,
+                  participation.attendance, participation.result
+             FROM event_project_participations participation
+             JOIN projects project ON project.id = participation.project_id
+             LEFT JOIN persons lead ON lead.id = project.lead_person_id
+            WHERE participation.event_id = $1
+              AND participation.archived_at IS NULL
+              AND project.organization_id = $2
+              AND project.archived_at IS NULL
+            ORDER BY project.normalized_name, project.id`,
+          [eventId, organization.id],
+        ),
+        app.pool.query<EventProjectMemberExportRow>(
+          `SELECT DISTINCT ON (project.id, canonical.id)
+                  project.id AS project_id, canonical.id AS person_id,
+                  canonical.canonical_full_name AS person_name, membership.role
+             FROM event_project_participations participation
+             JOIN projects project ON project.id = participation.project_id
+             JOIN project_memberships membership ON membership.project_id = project.id
+             JOIN persons observed ON observed.id = membership.person_id
+             JOIN persons canonical
+               ON canonical.id = COALESCE(observed.merged_into_person_id, observed.id)
+            WHERE participation.event_id = $1
+              AND participation.archived_at IS NULL
+              AND project.organization_id = $2
+              AND project.archived_at IS NULL
+              AND membership.archived_at IS NULL
+              AND canonical.archived_at IS NULL
+            ORDER BY project.id, canonical.id, membership.joined_at, membership.id`,
+          [eventId, organization.id],
+        ),
+        app.pool.query<EventProjectArtifactExportRow>(
+          `SELECT project.id AS project_id, artifact.id AS artifact_id,
+                  artifact.title, type.name AS type_name, artifact.status,
+                  latest.status AS version_status, latest.submitted_at,
+                  COALESCE(authors.items, '[]'::jsonb) AS authors,
+                  artifact_event.name AS event_name, review.score, review.decision,
+                  COALESCE(urls.items, '[]'::jsonb) AS external_urls,
+                  COALESCE(files.items, '[]'::jsonb) AS files
+             FROM event_project_participations participation
+             JOIN projects project ON project.id = participation.project_id
+             JOIN artifacts artifact ON artifact.project_id = project.id
+             JOIN artifact_types type ON type.id = artifact.type_id
+             LEFT JOIN events artifact_event ON artifact_event.id = artifact.event_id
+             LEFT JOIN LATERAL (
+               SELECT version.id, version.status, version.submitted_at
+                 FROM artifact_versions version
+                WHERE version.artifact_id = artifact.id AND version.status <> 'VOIDED'
+                ORDER BY version.version_number DESC LIMIT 1
+             ) latest ON true
+             LEFT JOIN artifact_review_selections selection
+               ON selection.artifact_version_id = latest.id
+             LEFT JOIN artifact_reviews review ON review.id = selection.current_final_review_id
+             LEFT JOIN LATERAL (
+               SELECT jsonb_agg(DISTINCT canonical.canonical_full_name
+                                ORDER BY canonical.canonical_full_name) AS items
+                 FROM artifact_version_contributors contributor
+                 JOIN persons observed_author ON observed_author.id = contributor.person_id
+                 JOIN persons canonical
+                   ON canonical.id = COALESCE(observed_author.merged_into_person_id, observed_author.id)
+                WHERE contributor.artifact_version_id = latest.id
+                  AND contributor.contribution_role = 'AUTHOR'
+             ) authors ON true
+             LEFT JOIN LATERAL (
+               SELECT jsonb_agg(asset.external_url ORDER BY asset.display_order) AS items
+                 FROM artifact_assets asset
+                WHERE asset.artifact_version_id = latest.id
+                  AND asset.asset_type = 'EXTERNAL_URL' AND asset.external_url IS NOT NULL
+             ) urls ON true
+             LEFT JOIN LATERAL (
+               SELECT jsonb_agg(jsonb_build_object(
+                        'id', file.id,
+                        'fileName', file.original_filename,
+                        'status', file.status,
+                        'storageProvider', file.storage_provider
+                      ) ORDER BY asset.display_order, asset.id) AS items
+                 FROM artifact_assets asset
+                 JOIN file_objects file ON file.id = asset.file_object_id
+                WHERE asset.artifact_version_id = latest.id AND asset.asset_type = 'FILE'
+             ) files ON true
+            WHERE participation.event_id = $1
+              AND participation.archived_at IS NULL
+              AND project.organization_id = $2
+              AND project.archived_at IS NULL
+              AND artifact.organization_id = $2
+              AND artifact.archived_at IS NULL
+              AND artifact.status <> 'VOIDED'
+            ORDER BY project.normalized_name, latest.submitted_at DESC NULLS LAST,
+                     artifact.title, artifact.id`,
+          [eventId, organization.id],
+        ),
       ]);
       const artifacts = artifactsResult.rows.map(mapEventArtifactRow);
 
@@ -1229,6 +1368,7 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
         fileId: string;
         storageProvider: 'CRM' | 'LOCKER';
       }[] = [];
+      const descriptions: { archivePath: string; content: string }[] = [];
       const skipped: { artifact: string; file: string; reason: string }[] = [];
       const byAuthor = new Map<string, EventParticipantWorkbookArtifact[]>();
       const orphanArtifacts: EventParticipantWorkbookArtifact[] = [];
@@ -1236,6 +1376,24 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
       for (const artifact of artifacts) {
         const author = artifact.authors[0];
         const folder = sanitizeArchiveSegment(author?.name ?? 'Без автора');
+        const artifactDirectory =
+          `Артефакты/${folder}/` +
+          `${sanitizeArchiveSegment(artifact.title)}_${artifact.id.slice(0, 8)}`;
+        const descriptionPath = uniqueArchivePath(usedPaths, `${artifactDirectory}/Описание.txt`);
+        descriptions.push({
+          archivePath: descriptionPath,
+          content: artifactDescriptionText({
+            title: artifact.title,
+            typeName: artifact.typeName,
+            status: artifact.status,
+            submittedAt: artifact.submittedAt,
+            score: artifact.score,
+            decision: artifact.decision,
+            authors: artifact.authors.map((item) => item.name),
+            externalUrls: artifact.externalUrls,
+            eventName: event.name,
+          }),
+        });
         const entries: EventParticipantWorkbookArtifact[] = [];
 
         if (artifact.files.length === 0) {
@@ -1245,6 +1403,8 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
             score: artifact.score,
             decision: artifact.decision,
             submittedAt: artifact.submittedAt,
+            fileName: 'Описание.txt',
+            archivePath: descriptionPath,
             externalUrl: artifact.externalUrls[0] ?? null,
           });
         }
@@ -1263,12 +1423,14 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
               decision: artifact.decision,
               submittedAt: artifact.submittedAt,
               fileName: file.fileName,
+              archivePath: descriptionPath,
+              externalUrl: artifact.externalUrls[0] ?? null,
             });
             continue;
           }
           const archivePath = uniqueArchivePath(
             usedPaths,
-            `artifacts/${folder}/${sanitizeArchiveSegment(file.fileName)}`,
+            `${artifactDirectory}/${sanitizeArchiveSegment(file.fileName)}`,
           );
           downloads.push({
             archivePath,
@@ -1296,6 +1458,55 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
         }
       }
 
+      const projectNames = new Map(
+        eventProjectsResult.rows.map((project) => [project.project_id, project.project_name]),
+      );
+      const projectArtifactPaths = new Map<string, string[]>();
+      for (const artifact of projectArtifactsResult.rows) {
+        const projectName = projectNames.get(artifact.project_id) ?? 'Проект';
+        const artifactDirectory =
+          `Проекты/${sanitizeArchiveSegment(projectName)}/Артефакты/` +
+          `${sanitizeArchiveSegment(artifact.title)}_${artifact.artifact_id.slice(0, 8)}`;
+        const descriptionPath = uniqueArchivePath(usedPaths, `${artifactDirectory}/Описание.txt`);
+        const paths = [descriptionPath];
+        descriptions.push({
+          archivePath: descriptionPath,
+          content: artifactDescriptionText({
+            title: artifact.title,
+            typeName: artifact.type_name,
+            status: artifact.status,
+            submittedAt: artifact.submitted_at?.toISOString() ?? null,
+            score: artifact.score,
+            decision: artifact.decision,
+            authors: artifact.authors,
+            externalUrls: artifact.external_urls,
+            eventName: artifact.event_name,
+            projectName,
+          }),
+        });
+        for (const file of artifact.files) {
+          if (file.status !== 'AVAILABLE') {
+            skipped.push({
+              artifact: `${projectName}: ${artifact.title}`,
+              file: file.fileName,
+              reason: `Файл в статусе ${file.status}`,
+            });
+            continue;
+          }
+          const archivePath = uniqueArchivePath(
+            usedPaths,
+            `${artifactDirectory}/${sanitizeArchiveSegment(file.fileName)}`,
+          );
+          paths.push(archivePath);
+          downloads.push({
+            archivePath,
+            fileId: file.id,
+            storageProvider: file.storageProvider,
+          });
+        }
+        projectArtifactPaths.set(`${artifact.project_id}:${artifact.artifact_id}`, paths);
+      }
+
       const sources = await resolveDownloadSources(app, getS3(), downloads);
       for (const failure of sources.failures) skipped.push(failure);
 
@@ -1313,6 +1524,7 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
         decision: exportDecisionLabel(row.decisions),
         result: row.result,
         eventName: event.name,
+        projects: row.projects ?? [],
         artifacts: byAuthor.get(row.person_id) ?? [],
       }));
       // Авторы артефактов, не записанные в участники, не должны потеряться в таблице.
@@ -1337,13 +1549,88 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
           decision: 'Не участник мероприятия',
           result: null,
           eventName: event.name,
+          projects: [],
           artifacts: byAuthor.get(author.id) ?? [],
         });
       }
 
+      if (orphanArtifacts.length > 0) {
+        extraNumber += 1;
+        workbookRows.push({
+          number: extraNumber,
+          lastName: '',
+          firstName: '',
+          patronymic: '',
+          canonicalFullName: 'Без автора',
+          email: null,
+          phone: null,
+          telegram: null,
+          telegramUserId: null,
+          attended: null,
+          decision: 'Автор не указан',
+          result: null,
+          eventName: event.name,
+          projects: [],
+          artifacts: orphanArtifacts,
+        });
+      }
+
+      const membersByProject = new Map<string, EventProjectMemberExportRow[]>();
+      for (const member of projectMembersResult.rows) {
+        const bucket = membersByProject.get(member.project_id);
+        if (bucket) bucket.push(member);
+        else membersByProject.set(member.project_id, [member]);
+      }
+      const artifactsByProject = new Map<string, EventProjectArtifactExportRow[]>();
+      for (const artifact of projectArtifactsResult.rows) {
+        const bucket = artifactsByProject.get(artifact.project_id);
+        if (bucket) bucket.push(artifact);
+        else artifactsByProject.set(artifact.project_id, [artifact]);
+      }
+      const guaranteedPaths = new Set(descriptions.map((entry) => entry.archivePath));
+      for (const entry of sources.entries) guaranteedPaths.add(entry.archivePath);
+      const projectWorkbookRows: EventParticipantWorkbookProject[] = eventProjectsResult.rows.map(
+        (project) => ({
+          id: project.project_id,
+          name: project.project_name,
+          description: project.description,
+          status: project.status,
+          ownerName: project.lead_person_name,
+          decision: project.decision,
+          attendance: project.attendance,
+          result: project.result,
+          registeredAt: project.registered_at.toISOString(),
+          members: (membersByProject.get(project.project_id) ?? []).map((member) => ({
+            personId: member.person_id,
+            personName: member.person_name,
+            role: member.role,
+            isOwner: member.person_id === project.lead_person_id,
+          })),
+          artifacts: (artifactsByProject.get(project.project_id) ?? []).map((artifact) => ({
+            artifactId: artifact.artifact_id,
+            title: artifact.title,
+            typeName: artifact.type_name,
+            status: artifact.status,
+            versionStatus: artifact.version_status,
+            submittedAt: artifact.submitted_at?.toISOString() ?? null,
+            authors: artifact.authors.join(' | '),
+            eventName: artifact.event_name,
+            score: artifact.score,
+            decision: artifact.decision,
+            externalUrls: artifact.external_urls.join(' | '),
+            archivePaths: (
+              projectArtifactPaths.get(`${project.project_id}:${artifact.artifact_id}`) ?? []
+            )
+              .filter((archivePath) => guaranteedPaths.has(archivePath))
+              .join(' | '),
+          })),
+        }),
+      );
+
       const workbookBytes = await createEventParticipantsWorkbook({
         eventName: event.name,
         rows: workbookRows,
+        projects: projectWorkbookRows,
       });
 
       await app.pool.query(
@@ -1359,6 +1646,9 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
           JSON.stringify({
             participants: participantsResult.rows.length,
             artifacts: artifacts.length,
+            projects: projectWorkbookRows.length,
+            projectMembers: projectMembersResult.rows.length,
+            projectArtifacts: projectArtifactsResult.rows.length,
             files: sources.entries.length,
             skipped: skipped.length,
           }),
@@ -1373,6 +1663,21 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
       });
 
       archive.append(Buffer.from(workbookBytes), { name: 'Участники.xlsx' });
+      if (artifacts.length === 0) {
+        archive.append(
+          Buffer.from(
+            'В этом мероприятии пока нет карточек артефактов.\n' +
+              'Артефакты проектов мероприятия находятся в папке «Проекты».\n',
+            'utf8',
+          ),
+          { name: 'Артефакты/README.txt' },
+        );
+      }
+      for (const description of descriptions) {
+        archive.append(Buffer.from(description.content, 'utf8'), {
+          name: description.archivePath,
+        });
+      }
       archive.append(
         JSON.stringify(
           {
@@ -1388,6 +1693,17 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
               score: artifact.score,
               decision: artifact.decision,
               source: artifact.source,
+            })),
+            projects: projectWorkbookRows.map((project) => ({
+              id: project.id,
+              name: project.name,
+              status: project.status,
+              ownerName: project.ownerName,
+              decision: project.decision,
+              attendance: project.attendance,
+              result: project.result,
+              members: project.members,
+              artifacts: project.artifacts,
             })),
             files: sources.entries.map((entry) => entry.archivePath),
             skipped,
@@ -1497,6 +1813,137 @@ function periodWorkbookQuality(report: OperationalPeriodReport) {
   };
 }
 
+type PeriodExportData = Awaited<ReturnType<typeof loadPeriodExportData>>;
+type PeriodArtifactFiles = ReadonlyMap<
+  string,
+  readonly { archivePath: string; fileName: string }[]
+>;
+
+function buildOperationalWorkbookInput(
+  report: OperationalPeriodReport,
+  data: PeriodExportData,
+  versionFiles?: PeriodArtifactFiles,
+  downloadablePaths?: ReadonlySet<string>,
+): OperationalPeriodWorkbookInput {
+  const isDownloadable = (archivePath: string) =>
+    downloadablePaths === undefined || downloadablePaths.has(archivePath);
+  return {
+    period: { from: report.period.from, to: report.period.to },
+    summary: [
+      ...periodWorkbookSummary(report),
+      {
+        label: 'Проектов в CRM',
+        value: data.projects.length,
+        note: 'Состав, артефакты и мероприятия собраны на листе «Проекты»',
+      },
+    ],
+    quality: periodWorkbookQuality(report),
+    artifacts: data.artifacts.map((artifact) => {
+      const files = (versionFiles?.get(artifact.version_id) ?? []).filter((file) =>
+        isDownloadable(file.archivePath),
+      );
+      return {
+        versionId: artifact.version_id,
+        artifactId: artifact.artifact_id,
+        submittedAt: artifact.submitted_at.toISOString(),
+        title: artifact.title,
+        typeName: artifact.type_name,
+        authors: artifact.authors.join(' | '),
+        projectName: artifact.project_name,
+        eventName: artifact.event_name,
+        source: artifact.source,
+        score: artifact.score,
+        decision: artifact.decision,
+        externalUrls: artifact.external_urls.join(' | '),
+        archivePaths: files.map((file) => file.archivePath).join(' | '),
+        archiveFiles: files.map((file) => ({
+          fileName: file.fileName,
+          archivePath: file.archivePath,
+          relativePath: `../${file.archivePath}`,
+        })),
+      };
+    }),
+    people: data.people.map(mapPersonExportRow),
+    tasks: data.tasks.map((task) => ({
+      id: task.id,
+      createdAt: task.created_at.toISOString(),
+      completedAt: task.completed_at?.toISOString() ?? null,
+      status: task.status,
+      title: task.title,
+      personName: task.person_name,
+      assigneeName: task.assignee_name,
+      dueAt: task.due_at?.toISOString() ?? null,
+      attachments: task.attachments.join(' | '),
+    })),
+    events: data.events.map((item) => ({
+      id: item.id,
+      eventName: item.event_name,
+      personName: item.person_name,
+      createdAt: item.created_at.toISOString(),
+      decision: item.decision,
+      attendance: item.attendance,
+      result: item.result,
+      source: item.data_origin,
+    })),
+    interactions: data.interactions.map((item) => ({
+      id: item.id,
+      occurredAt: item.occurred_at.toISOString(),
+      personName: item.person_name,
+      channel: item.channel,
+      direction: item.direction,
+      outcome: item.outcome,
+      comment: item.comment,
+      responsibleName: item.responsible_name,
+      nextContactAt: item.next_contact_at?.toISOString() ?? null,
+      attachments: item.attachments.join(' | '),
+    })),
+    projects: data.projects.map((project) => ({
+      id: project.id,
+      name: project.name,
+      status: project.status,
+      description: project.description,
+      startsAt: project.starts_at?.toISOString() ?? null,
+      endsAt: project.ends_at?.toISOString() ?? null,
+      ownerName: project.owner_name,
+      memberCount: Number(project.member_count),
+      artifactCount: Number(project.artifact_count),
+      eventCount: Number(project.event_count),
+    })),
+    projectMembers: data.projectMembers.map((membership) => ({
+      projectId: membership.project_id,
+      projectName: membership.project_name,
+      personId: membership.person_id,
+      personName: membership.person_name,
+      role: membership.role,
+      joinedAt: membership.joined_at.toISOString(),
+    })),
+    projectArtifacts: data.projectArtifacts.map((artifact) => ({
+      projectId: artifact.project_id,
+      projectName: artifact.project_name,
+      artifactId: artifact.artifact_id,
+      title: artifact.title,
+      typeName: artifact.type_name,
+      status: artifact.status,
+      latestVersionStatus: artifact.version_status,
+      submittedAt: artifact.submitted_at?.toISOString() ?? null,
+      authors: artifact.authors.join(' | '),
+      eventName: artifact.event_name,
+      score: artifact.score,
+      decision: artifact.decision,
+    })),
+    projectEvents: data.projectEvents.map((item) => ({
+      projectId: item.project_id,
+      projectName: item.project_name,
+      eventId: item.event_id,
+      eventName: item.event_name,
+      registeredAt: item.registered_at.toISOString(),
+      decision: item.decision,
+      attendance: item.attendance,
+      result: item.result,
+    })),
+  };
+}
+
 async function auditPeriodExport(
   app: FastifyInstance,
   request: FastifyRequest,
@@ -1591,48 +2038,12 @@ async function loadPeriodExportData(
         ORDER BY version.submitted_at, artifact.id, version.version_number`,
       parameters,
     ),
-    app.pool.query<{
-      id: string;
-      canonical_full_name: string;
-      created_at: Date;
-      owner_name: string | null;
-      from_bot: boolean;
-      artifact_count: string;
-      profile_needs_review: boolean;
-    }>(
-      `SELECT person.id, person.canonical_full_name, person.created_at,
-              owner.display_name AS owner_name,
-              person.profile_needs_review,
-              COALESCE(artifact_data.artifact_count, 0)::text AS artifact_count,
-              EXISTS (
-                SELECT 1 FROM external_identities identity
-                 WHERE identity.person_id IN (
-                         SELECT member.id FROM persons member
-                          WHERE member.id = person.id OR member.merged_into_person_id = person.id
-                       )
-                   AND identity.source_namespace IN ('locker.user', 'locker.telegram')
-                   AND identity.archived_at IS NULL
-              ) AS from_bot
-         FROM persons person
-         LEFT JOIN app_users owner ON owner.id = person.owner_user_id
-         LEFT JOIN LATERAL (
-           SELECT count(DISTINCT artifact.id) AS artifact_count
-             FROM artifact_versions version
-             JOIN artifacts artifact ON artifact.id = version.artifact_id
-             JOIN artifact_version_contributors contributor
-               ON contributor.artifact_version_id = version.id
-            WHERE contributor.person_id IN (
-                    SELECT member.id FROM persons member
-                     WHERE member.id = person.id OR member.merged_into_person_id = person.id
-                  )
-              AND contributor.contribution_role = 'AUTHOR'
-              AND version.status = 'SUBMITTED'
-              AND artifact.status <> 'VOIDED' AND artifact.archived_at IS NULL
-         ) artifact_data ON true
-        WHERE person.organization_id = $1 AND person.archived_at IS NULL
-          AND person.merged_into_person_id IS NULL
-          AND person.created_at >= $2 AND person.created_at < $3
-        ORDER BY person.normalized_full_name, person.id`,
+    app.pool.query<PersonExportRow>(
+      `SELECT ${personExportProjection()}
+        WHERE p.organization_id = $1 AND p.archived_at IS NULL
+          AND p.merged_into_person_id IS NULL
+          AND p.created_at >= $2 AND p.created_at < $3
+        ORDER BY p.normalized_full_name, p.id`,
       parameters,
     ),
     app.pool.query<{
@@ -1950,6 +2361,40 @@ async function resolveDownloadSources(
     (left, right) => (order.get(left.archivePath) ?? 0) - (order.get(right.archivePath) ?? 0),
   );
   return { entries, failures };
+}
+
+function artifactDescriptionText(input: {
+  title: string;
+  typeName: string;
+  status: string;
+  submittedAt?: string | null;
+  score?: number | null;
+  decision?: string | null;
+  authors: readonly string[];
+  externalUrls: readonly string[];
+  eventName?: string | null;
+  projectName?: string | null;
+}): string {
+  return [
+    'АРТЕФАКТ ЦПИ',
+    '',
+    `Название: ${input.title}`,
+    `Тип: ${input.typeName}`,
+    `Статус: ${input.status}`,
+    `Отправлен: ${input.submittedAt ?? '—'}`,
+    `Авторы: ${input.authors.join(', ') || '—'}`,
+    `Мероприятие: ${input.eventName ?? '—'}`,
+    `Проект: ${input.projectName ?? '—'}`,
+    `Оценка качества: ${input.score ?? '—'}`,
+    `Решение: ${input.decision ?? '—'}`,
+    '',
+    'ВНЕШНИЕ ССЫЛКИ',
+    input.externalUrls.join('\n') || '—',
+    '',
+    'Если рядом нет исходного файла, у карточки артефакта не было загруженного файла ' +
+      'или он ещё не прошёл проверку хранилища.',
+    '',
+  ].join('\n');
 }
 
 /** Имя папки или файла внутри ZIP: без разделителей пути и управляющих символов. */

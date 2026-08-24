@@ -10,7 +10,7 @@ describe('participants export workbook', () => {
         {
           id: 'person-1',
           fullName: '=2+3',
-          contacts: ' +cmd',
+          emails: ' +cmd',
           affiliations: 'Организация',
           hasArtifacts: true,
           artifactCount: 2,
@@ -28,10 +28,10 @@ describe('participants export workbook', () => {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(bytes as unknown as Parameters<typeof workbook.xlsx.load>[0]);
     const sheet = workbook.getWorksheet('Участники')!;
-    expect(sheet.getCell('B2').text).toBe("'=2+3");
-    expect(sheet.getCell('C2').text).toBe("' +cmd");
-    expect(sheet.getCell('J2').text).toBe("'@SUM(A1:A2)");
-    expect(sheet.getCell('K2').text).toBe("'-1");
-    expect(sheet.getCell('M2').text).toContain('Лист 1');
+    expect(sheet.getCell('E2').text).toBe("'=2+3");
+    expect(sheet.getCell('G2').text).toBe("' +cmd");
+    expect(sheet.getCell('AA2').text).toBe("'@SUM(A1:A2)");
+    expect(sheet.getCell('AE2').text).toBe("'-1");
+    expect(sheet.getCell('AH2').text).toContain('Лист 1');
   });
 });

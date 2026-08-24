@@ -89,8 +89,8 @@ export function EventExportsTab({
                 <div className="min-w-0 flex-1">
                   <p className="text-[13px] font-medium">ZIP-пакет мероприятия</p>
                   <p className="text-muted-foreground text-xs">
-                    Участники.xlsx со ссылками на файлы, папка artifacts с работами и manifest.json
-                    со списком недоступных файлов.
+                    Участники.xlsx со ссылками, папки «Артефакты» и «Проекты» с работами, а также
+                    manifest.json со списком недоступных файлов.
                   </p>
                 </div>
                 <Button size="sm" asChild>
@@ -120,9 +120,7 @@ export function EventExportsTab({
               </div>
             </>
           ) : (
-            <p className="text-muted-foreground text-[13px]">
-              Нужно право «Массовые выгрузки».
-            </p>
+            <p className="text-muted-foreground text-[13px]">Нужно право «Массовые выгрузки».</p>
           )}
         </CardContent>
       </Card>
@@ -169,8 +167,8 @@ export function EventExportsTab({
                   {problemRows > 0 && (
                     <details>
                       <summary className="text-muted-foreground cursor-pointer text-xs">
-                        Неверное ФИО: {result.invalid.length}; не найдены:{' '}
-                        {result.unmatched.length}; неоднозначны: {result.ambiguous.length}
+                        Неверное ФИО: {result.invalid.length}; не найдены: {result.unmatched.length}
+                        ; неоднозначны: {result.ambiguous.length}
                       </summary>
                       <ul className="text-muted-foreground mt-2 space-y-0.5 text-xs">
                         {result.invalid.slice(0, 20).map((item) => (
