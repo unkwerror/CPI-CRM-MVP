@@ -86,6 +86,31 @@ describe('resolving a Locker participant', () => {
     ).rejects.toMatchObject({ reasonCode: 'PERSON_AMBIGUOUS' });
   });
 
+  it('keeps a known Locker identity synchronized after its card was deliberately merged', async () => {
+    const canonicalPersonId = '66666666-6666-4666-8666-666666666666';
+    const query = vi.fn(async (sql: string) => {
+      if (
+        sql.includes('FROM external_identities identity') &&
+        sql.includes("identity.source_namespace = 'locker.user'") &&
+        sql.includes('SELECT DISTINCT COALESCE')
+      ) {
+        return { rows: [{ person_id: canonicalPersonId }] };
+      }
+      if (sql.includes('WHERE telegram_user_id <> $2')) {
+        return { rows: [{ telegram_user_id: '999999999' }] };
+      }
+      if (sql.includes('INSERT INTO audit_log')) return { rows: [{ id: 'audit' }] };
+      return { rows: [] };
+    });
+
+    await expect(
+      resolveLockerPerson({ query } as unknown as PoolClient, organization, baseUser, 'req-merge'),
+    ).resolves.toEqual({ personId: canonicalPersonId, resolution: 'EXTERNAL_ID' });
+    expect(query.mock.calls.some(([sql]) => String(sql).includes('WHERE telegram_user_id <> $2'))).toBe(
+      true,
+    );
+  });
+
   it('brings back a card hidden by the full-name hygiene instead of duplicating it', async () => {
     const { client, query, calls } = mockClient({
       archivedRows: [{ id: archivedPersonId, canonical_full_name: 'Павел' }],

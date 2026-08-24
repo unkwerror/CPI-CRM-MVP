@@ -601,6 +601,7 @@ export async function resolveLockerPerson(
   const externallyLinkedIds = [
     ...new Set([...linked.rows, ...hinted.rows].map((row) => row.person_id)),
   ];
+  const hasLockerIdentityLink = linked.rows.length > 0;
   if (externallyLinkedIds.length > 1) {
     throw new LockerReviewRequired(
       'IDENTITY_CONFLICT',
@@ -778,7 +779,7 @@ export async function resolveLockerPerson(
       ORDER BY telegram_user_id LIMIT 1`,
     [personId, user.telegramUserId],
   );
-  if (conflictingTelegramIdentity.rows[0]) {
+  if (!hasLockerIdentityLink && conflictingTelegramIdentity.rows[0]) {
     throw new LockerReviewRequired(
       'IDENTITY_CONFLICT',
       'Участник CRM уже связан с другим Telegram ID',
