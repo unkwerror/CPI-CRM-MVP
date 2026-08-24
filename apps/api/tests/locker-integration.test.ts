@@ -75,6 +75,12 @@ describe('Locker integration contract', () => {
         submission: { ...base.submission, text: 'Изменённое содержимое' },
       }),
     ).not.toBe(hashLockerSubmissionPayload(base));
+    expect(
+      hashLockerSubmissionPayload({
+        ...base,
+        submission: { ...base.submission, sourceKind: 'event_request' },
+      }),
+    ).not.toBe(hashLockerSubmissionPayload(base));
   });
 
   it('derives the artifact content type without copying remote files', () => {

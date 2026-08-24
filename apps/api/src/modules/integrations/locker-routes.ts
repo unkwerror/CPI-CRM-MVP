@@ -123,6 +123,9 @@ const LockerSubmission = Type.Object(
     link: nullableText(2_000),
     createdAt: Type.String({ format: 'date-time' }),
     submittedAt: Type.String({ format: 'date-time' }),
+    sourceKind: Type.Optional(
+      Type.Union([Type.Literal('submission'), Type.Literal('event_request')]),
+    ),
     files: Type.Array(LockerFile, { maxItems: 100 }),
   },
   { additionalProperties: false },
@@ -176,6 +179,7 @@ type LockerSubmissionInput = {
   link?: string | null;
   createdAt: string;
   submittedAt: string;
+  sourceKind?: 'submission' | 'event_request';
   files: LockerFileInput[];
 };
 
@@ -414,6 +418,7 @@ export async function ingestLockerSubmission(
   eventId: string;
   artifactId: string;
   artifactVersionId: string;
+  taskId?: string;
   replayed: boolean;
 }> {
   await client.query(
@@ -437,7 +442,19 @@ export async function ingestLockerSubmission(
     if (existing.rows[0].payload_hash !== payloadHash) {
       throw new HttpProblem(409, 'Отправка Locker уже синхронизирована с другим содержимым');
     }
-    return { ...mapExisting(existing.rows[0]), replayed: true };
+    const mapped = mapExisting(existing.rows[0]);
+    const taskId =
+      body.submission.sourceKind === 'event_request'
+        ? await ensureLockerEventRequestTask(
+            client,
+            body,
+            payloadHash,
+            mapped.personId,
+            mapped.eventId,
+            requestId,
+          )
+        : undefined;
+    return { ...mapped, ...(taskId ? { taskId } : {}), replayed: true };
   }
 
   await lockLockerUser(client, body.user.telegramUserId);
@@ -461,6 +478,17 @@ export async function ingestLockerSubmission(
     payloadHash,
     requestId,
   );
+  const taskId =
+    body.submission.sourceKind === 'event_request'
+      ? await ensureLockerEventRequestTask(
+          client,
+          body,
+          payloadHash,
+          person.personId,
+          eventId,
+          requestId,
+        )
+      : undefined;
   await client.query(
     `UPDATE locker_pending_submissions
         SET status = 'RESOLVED', resolved_person_id = $2, resolved_at = now(),
@@ -474,6 +502,7 @@ export async function ingestLockerSubmission(
     personResolution: person.resolution,
     eventId,
     ...artifact,
+    ...(taskId ? { taskId } : {}),
     replayed: false,
   };
 }
@@ -1381,6 +1410,80 @@ async function updateResolvedLockerEvent(
   );
 }
 
+async function ensureLockerEventRequestTask(
+  client: PoolClient,
+  body: LockerSyncInput,
+  payloadHash: string,
+  personId: string,
+  eventId: string,
+  requestId: string,
+): Promise<string> {
+  const lockerEventRequestId = body.submission.lockerSubmissionId;
+  const existing = await client.query<{ task_id: string; payload_hash: string }>(
+    `SELECT task_id, payload_hash
+       FROM locker_event_request_links
+      WHERE locker_event_request_id = $1`,
+    [lockerEventRequestId],
+  );
+  if (existing.rows[0]) {
+    if (existing.rows[0].payload_hash !== payloadHash) {
+      throw new HttpProblem(409, 'Обращение из бота уже синхронизировано с другим содержимым');
+    }
+    return existing.rows[0].task_id;
+  }
+
+  const owner = await client.query<{ owner_user_id: string | null }>(
+    'SELECT owner_user_id FROM persons WHERE id = $1',
+    [personId],
+  );
+  const question = normalizeUnicode(body.submission.text ?? '')
+    .trim()
+    .slice(0, 9_000);
+  const taskTitle = cleanText(`Ответить на вопрос: ${body.event.title}`, 500);
+  const taskDescription = [
+    `Мероприятие: ${body.event.title}`,
+    question ? `Вопрос участника:\n${question}` : null,
+    `Источник: Telegram-бот`,
+    `ID обращения: ${lockerEventRequestId}`,
+  ]
+    .filter((part): part is string => Boolean(part))
+    .join('\n\n');
+  const task = await client.query<{ id: string }>(
+    `INSERT INTO tasks
+       (person_id, title, description, status, assignee_user_id, created_by_user_id)
+     VALUES ($1, $2, $3, 'OPEN', $4, $5)
+     RETURNING id`,
+    [
+      personId,
+      taskTitle,
+      taskDescription,
+      owner.rows[0]?.owner_user_id ?? null,
+      LOCKER_ACTOR.userId,
+    ],
+  );
+  const taskId = task.rows[0]!.id;
+  await client.query(
+    `INSERT INTO locker_event_request_links
+       (locker_event_request_id, locker_submission_id, task_id, payload_hash)
+     VALUES ($1, $1, $2, $3)`,
+    [lockerEventRequestId, taskId, payloadHash],
+  );
+  await writeAudit(client, {
+    actor: LOCKER_ACTOR,
+    requestId,
+    action: 'locker.event_request_task_created',
+    entityType: 'task',
+    entityId: taskId,
+    after: {
+      lockerEventRequestId,
+      personId,
+      eventId,
+      lockerEventId: body.event.lockerEventId,
+    },
+  });
+  return taskId;
+}
+
 async function createLockerArtifact(
   client: PoolClient,
   organization: OrganizationContext,
@@ -1400,7 +1503,16 @@ async function createLockerArtifact(
        (organization_id, type_id, title, description, event_id, created_by_user_id)
      VALUES ($1, $2, $3, $4, $5, $6)
      RETURNING id`,
-    [organization.id, type.rows[0].id, title, 'Получено из Locker', eventId, LOCKER_ACTOR.userId],
+    [
+      organization.id,
+      type.rows[0].id,
+      title,
+      body.submission.sourceKind === 'event_request'
+        ? 'Вопрос участника из Telegram-бота'
+        : 'Получено из Locker',
+      eventId,
+      LOCKER_ACTOR.userId,
+    ],
   );
   const artifactId = artifact.rows[0]!.id;
   const normalizedLink = body.submission.link?.trim() || null;

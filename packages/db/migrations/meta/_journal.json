@@ -127,6 +127,13 @@
       "when": 1787576000000,
       "tag": "0017_project_applications",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1787586734262,
+      "tag": "0018_little_inhumans",
+      "breakpoints": true
     }
   ]
 }

@@ -1982,6 +1982,26 @@ export const lockerSubmissionLinks = pgTable(
   ],
 );
 
+export const lockerEventRequestLinks = pgTable(
+  'locker_event_request_links',
+  {
+    lockerEventRequestId: uuid('locker_event_request_id').primaryKey(),
+    lockerSubmissionId: uuid('locker_submission_id')
+      .notNull()
+      .references(() => lockerSubmissionLinks.lockerSubmissionId, { onDelete: 'restrict' }),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'restrict' }),
+    payloadHash: text('payload_hash').notNull(),
+    ...timestamps(),
+  },
+  (table) => [
+    uniqueIndex('locker_event_request_links_submission_uidx').on(table.lockerSubmissionId),
+    uniqueIndex('locker_event_request_links_task_uidx').on(table.taskId),
+    check('locker_event_request_links_hash_check', sql`${table.payloadHash} ~ '^[0-9a-f]{64}$'`),
+  ],
+);
+
 export const campaignChannelEnum = pgEnum('campaign_channel', ['TELEGRAM', 'EMAIL']);
 export const campaignStatusEnum = pgEnum('campaign_status', [
   'DRAFT',
