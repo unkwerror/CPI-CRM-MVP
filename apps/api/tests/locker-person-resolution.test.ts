@@ -2,10 +2,7 @@ import type { PoolClient } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { OrganizationContext } from '../src/lib/organization.js';
-import {
-  LockerReviewRequired,
-  resolveLockerPerson,
-} from '../src/modules/integrations/locker-routes.js';
+import { resolveLockerPerson } from '../src/modules/integrations/locker-routes.js';
 
 const organization: OrganizationContext = {
   id: '22222222-2222-4222-8222-222222222222',
@@ -27,7 +24,7 @@ const baseUser = {
  */
 function mockClient(overrides: { archivedRows?: unknown[]; tombstoneRows?: unknown[] } = {}) {
   const calls: string[] = [];
-  const query = vi.fn(async (sql: string) => {
+  const query = vi.fn(async (sql: string, _parameters?: unknown[]) => {
     calls.push(sql);
     if (sql.includes('person.archived_at IS NOT NULL')) {
       return { rows: overrides.archivedRows ?? [] };
@@ -35,6 +32,7 @@ function mockClient(overrides: { archivedRows?: unknown[]; tombstoneRows?: unkno
     if (sql.includes('person_deletion_tombstones')) {
       return { rows: overrides.tombstoneRows ?? [] };
     }
+    if (sql.includes('INSERT INTO persons')) return { rows: [{ id: archivedPersonId }] };
     if (sql.includes('INSERT INTO audit_log')) return { rows: [{ id: 'audit' }] };
     return { rows: [] };
   });
@@ -42,14 +40,29 @@ function mockClient(overrides: { archivedRows?: unknown[]; tombstoneRows?: unkno
 }
 
 describe('resolving a Locker participant', () => {
-  it('sends an unrecognised participant without a full name to manual review', async () => {
-    const { client } = mockClient();
-    await expect(
-      resolveLockerPerson(client, organization, { ...baseUser, fullName: 'Павел' }, 'req-1'),
-    ).rejects.toBeInstanceOf(LockerReviewRequired);
-    await expect(
-      resolveLockerPerson(client, organization, { ...baseUser, fullName: 'Павел' }, 'req-1'),
-    ).rejects.toMatchObject({ reasonCode: 'FIO_REQUIRED' });
+  it('creates a visible provisional card for an unrecognised incomplete profile', async () => {
+    const { client, query } = mockClient();
+    const result = await resolveLockerPerson(
+      client,
+      organization,
+      { ...baseUser, fullName: 'Павел', profileIncomplete: true },
+      'req-1',
+    );
+
+    expect(result).toEqual({ personId: archivedPersonId, resolution: 'CREATED' });
+    const createCall = query.mock.calls.find(([sql]) =>
+      String(sql).includes('INSERT INTO persons'),
+    );
+    expect(createCall?.[1]).toEqual([
+      organization.id,
+      'Павел',
+      'павел',
+      null,
+      null,
+      null,
+      organization.ruleSetId,
+      true,
+    ]);
   });
 
   it('does not create a participant when several cards share the Telegram id', async () => {
@@ -96,12 +109,22 @@ describe('resolving a Locker participant', () => {
     expect(calls.some((sql) => sql.includes('INSERT INTO persons'))).toBe(false);
   });
 
-  it('keeps a hidden card hidden while the Locker profile has no full name', async () => {
-    const { client } = mockClient({
+  it('restores a hidden card as provisional while the Locker profile is incomplete', async () => {
+    const { client, query } = mockClient({
       archivedRows: [{ id: archivedPersonId, canonical_full_name: 'Павел' }],
     });
-    await expect(
-      resolveLockerPerson(client, organization, { ...baseUser, fullName: 'Павел' }, 'req-4'),
-    ).rejects.toMatchObject({ reasonCode: 'FIO_REQUIRED' });
+    const result = await resolveLockerPerson(
+      client,
+      organization,
+      { ...baseUser, fullName: 'Павел', profileIncomplete: true },
+      'req-4',
+    );
+
+    expect(result).toEqual({ personId: archivedPersonId, resolution: 'RESTORED' });
+    const restoreCall = query.mock.calls.find(
+      ([sql]) =>
+        String(sql).includes('UPDATE persons') && String(sql).includes('archived_at = NULL'),
+    );
+    expect(restoreCall?.[1]?.at(-1)).toBe(true);
   });
 });

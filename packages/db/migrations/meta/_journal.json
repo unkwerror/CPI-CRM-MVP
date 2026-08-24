@@ -113,6 +113,13 @@
       "when": 1787540000000,
       "tag": "0015_operational_exports",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1787550000000,
+      "tag": "0016_generic_events_interactions",
+      "breakpoints": true
     }
   ]
 }

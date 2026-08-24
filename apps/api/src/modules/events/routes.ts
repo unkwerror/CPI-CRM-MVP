@@ -220,6 +220,7 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
                 Type.Literal('PARTIAL'),
               ]),
             ),
+            result: Type.Optional(Type.String({ minLength: 1, maxLength: 10_000 })),
           },
           { additionalProperties: false },
         ),
@@ -231,6 +232,7 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
         personId: string;
         decision?: 'UNKNOWN' | 'PENDING' | 'ACCEPTED' | 'REJECTED' | 'WAITLISTED';
         attendance?: 'UNKNOWN' | 'ATTENDED' | 'NO_SHOW' | 'PARTIAL';
+        result?: string;
       };
       const decision = body.decision ?? 'UNKNOWN';
       const attendance = body.attendance ?? 'UNKNOWN';
@@ -277,6 +279,7 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
               SET archived_at = NULL,
                   decision = $3::participation_decision,
                   attendance = $4::attendance_status,
+                  result = $6,
                   decision_at = CASE WHEN $3::text = 'UNKNOWN' THEN NULL ELSE now() END,
                   attended_at = CASE WHEN $4::text = 'UNKNOWN' THEN NULL
                                      ELSE COALESCE($5::timestamptz, now()) END,
@@ -288,7 +291,14 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
                LIMIT 1
             )
             RETURNING id`,
-          [eventId, personId, decision, attendance, event.rows[0].starts_at],
+          [
+            eventId,
+            personId,
+            decision,
+            attendance,
+            event.rows[0].starts_at,
+            body.result?.trim() || null,
+          ],
         );
 
         const participation =
@@ -297,16 +307,23 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
             await client.query<{ id: string }>(
               `INSERT INTO event_participations
                  (person_id, event_id, registered_at, decision, decision_at,
-                  attendance, attended_at, data_origin)
+                  attendance, attended_at, data_origin, result)
                VALUES ($2, $1, now(),
                        $3::participation_decision,
                        CASE WHEN $3::text = 'UNKNOWN' THEN NULL ELSE now() END,
                        $4::attendance_status,
                        CASE WHEN $4::text = 'UNKNOWN' THEN NULL
                             ELSE COALESCE($5::timestamptz, now()) END,
-                       'LIVE')
+                       'LIVE', $6)
                RETURNING id`,
-              [eventId, personId, decision, attendance, event.rows[0].starts_at],
+              [
+                eventId,
+                personId,
+                decision,
+                attendance,
+                event.rows[0].starts_at,
+                body.result?.trim() || null,
+              ],
             )
           ).rows[0]!;
 
@@ -316,7 +333,14 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
           action: 'event.participant_added',
           entityType: 'event_participation',
           entityId: participation.id,
-          after: { eventId, personId, decision, attendance, restored: restored.rows[0] !== undefined },
+          after: {
+            eventId,
+            personId,
+            decision,
+            attendance,
+            result: body.result?.trim() || null,
+            restored: restored.rows[0] !== undefined,
+          },
         });
 
         return {
@@ -325,10 +349,69 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
           canonicalFullName: person.rows[0].canonical_full_name,
           decision,
           attendance,
+          result: body.result?.trim() || null,
         };
       });
 
       return reply.code(201).send(created);
+    },
+  );
+
+  app.patch(
+    '/events/:id/participants/:personId',
+    {
+      preHandler: app.requirePermission(Permissions.PEOPLE_WRITE),
+      schema: {
+        tags: ['Мероприятия'],
+        summary: 'Обновить результат участия в мероприятии',
+        params: Type.Object({
+          id: Type.String({ format: 'uuid' }),
+          personId: Type.String({ format: 'uuid' }),
+        }),
+        body: Type.Object(
+          { result: Type.Union([Type.String({ minLength: 1, maxLength: 10_000 }), Type.Null()]) },
+          { additionalProperties: false },
+        ),
+      },
+    },
+    async (request) => {
+      const { id: eventId, personId } = request.params as { id: string; personId: string };
+      const result = (request.body as { result: string | null }).result?.trim() || null;
+      const organization = await getOrganizationContext(app.pool);
+      return transaction(app.pool, async (client) => {
+        const event = await client.query(
+          `SELECT 1 FROM events
+            WHERE id = $1 AND organization_id = $2 AND archived_at IS NULL`,
+          [eventId, organization.id],
+        );
+        if (!event.rows[0]) throw new HttpProblem(404, 'Мероприятие не найдено');
+        const person = await client.query<{ id: string }>(
+          `SELECT COALESCE(merged_into_person_id, id) AS id
+             FROM persons WHERE id = $1 AND organization_id = $2 AND archived_at IS NULL`,
+          [personId, organization.id],
+        );
+        if (!person.rows[0]) throw new HttpProblem(404, 'Участник не найден');
+        const updated = await client.query<{ id: string }>(
+          `UPDATE event_participations
+              SET result = $3, updated_at = now(), version = version + 1
+            WHERE event_id = $1 AND archived_at IS NULL
+              AND person_id IN (
+                    SELECT id FROM persons WHERE id = $2 OR merged_into_person_id = $2
+                  )
+            RETURNING id`,
+          [eventId, person.rows[0].id, result],
+        );
+        if (!updated.rows[0]) throw new HttpProblem(404, 'Запись участия не найдена');
+        await writeAudit(client, {
+          actor: request.authUser!,
+          requestId: request.id,
+          action: 'event.participant_result_updated',
+          entityType: 'event_participation',
+          entityId: updated.rows[0].id,
+          after: { eventId, personId: person.rows[0].id, result },
+        });
+        return { id: updated.rows[0].id, result };
+      });
     },
   );
 
@@ -439,7 +522,9 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
                 Type.Literal('CANCELLED'),
               ]),
             ),
-            startsAt: Type.Optional(Type.Union([Type.String({ format: 'date-time' }), Type.Null()])),
+            startsAt: Type.Optional(
+              Type.Union([Type.String({ format: 'date-time' }), Type.Null()]),
+            ),
             endsAt: Type.Optional(Type.Union([Type.String({ format: 'date-time' }), Type.Null()])),
           },
           { additionalProperties: false },
@@ -682,6 +767,7 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
                 participation_data.participation_count,
                 participation_data.decisions,
                 participation_data.attendances,
+                participation_data.results,
                 COALESCE(provenance.comments, '[]'::jsonb) AS comments,
                 COALESCE(provenance.source_count, 0)::text AS source_count,
                 COALESCE(event_artifacts.artifact_count, 0)::text AS artifact_count,
@@ -696,7 +782,9 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
                     array_agg(DISTINCT participation.decision::text
                               ORDER BY participation.decision::text) AS decisions,
                     array_agg(DISTINCT participation.attendance::text
-                              ORDER BY participation.attendance::text) AS attendances
+                              ORDER BY participation.attendance::text) AS attendances,
+                    array_agg(DISTINCT participation.result ORDER BY participation.result)
+                      FILTER (WHERE participation.result IS NOT NULL) AS results
                FROM event_participations participation
                JOIN persons observed ON observed.id = participation.person_id
               WHERE participation.event_id = $1
@@ -791,6 +879,7 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
           participationCount: Number(row.participation_count),
           decisions: row.decisions ?? [],
           attendances: row.attendances ?? [],
+          result: row.results?.at(-1) ?? null,
           comments: row.comments ?? [],
           sourceCount: Number(row.source_count),
           artifactCount: Number(row.artifact_count),

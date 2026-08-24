@@ -249,6 +249,7 @@ describe('event routes', () => {
           'ACCEPTED',
           'ATTENDED',
           new Date('2026-05-15T03:00:00Z'),
+          null,
         ]);
         return { rows: [{ id: '00000000-0000-4000-8000-000000000050' }] };
       }
@@ -296,8 +297,7 @@ describe('event routes', () => {
       throw new Error(`Unexpected client SQL: ${sql}`);
     });
     const connect = vi.fn(
-      async () =>
-        ({ query: clientQuery, release: vi.fn() }) as unknown as import('pg').PoolClient,
+      async () => ({ query: clientQuery, release: vi.fn() }) as unknown as import('pg').PoolClient,
     );
     const app = await eventTestApp(query, [Roles.COMMUNITY_MANAGER], connect);
 
@@ -328,8 +328,7 @@ describe('event routes', () => {
       throw new Error(`Unexpected client SQL: ${sql}`);
     });
     const connect = vi.fn(
-      async () =>
-        ({ query: clientQuery, release: vi.fn() }) as unknown as import('pg').PoolClient,
+      async () => ({ query: clientQuery, release: vi.fn() }) as unknown as import('pg').PoolClient,
     );
     const app = await eventTestApp(query, [Roles.COMMUNITY_MANAGER], connect);
 

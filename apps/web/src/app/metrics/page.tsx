@@ -1,12 +1,12 @@
 'use client';
 
 import {
-  AwardIcon,
+  AlertCircleIcon,
   BotIcon,
-  Building2Icon,
   CalendarDaysIcon,
   CheckCircle2Icon,
   FileUpIcon,
+  MessageCircleIcon,
   StarIcon,
   UsersIcon,
 } from 'lucide-react';
@@ -122,14 +122,14 @@ export default function MetricsPage() {
         <>
           <Card>
             <CardHeader>
-              <CardTitle>Участники и активность</CardTitle>
+              <CardTitle>Участники и отправленные артефакты</CardTitle>
             </CardHeader>
             <CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <Metric
                 icon={UsersIcon}
                 label="Новые участники"
                 value={count(report.people.newPeople)}
-                hint={`${count(report.people.activated)} активированы за период`}
+                hint={`${count(report.people.newFromBot)} пришли из Telegram-бота`}
               />
               <Metric
                 icon={BotIcon}
@@ -170,16 +170,16 @@ export default function MetricsPage() {
                 hint={`${count(report.tasks.created)} создано, ${count(report.tasks.overdueNow)} просрочено`}
               />
               <Metric
-                icon={AwardIcon}
-                label="СВЯ"
-                value={count(report.programs.svya.tracked)}
-                hint={`${count(report.programs.svya.successful)} финалистов / победителей`}
+                icon={MessageCircleIcon}
+                label="Взаимодействия"
+                value={count(report.interactions.recorded)}
+                hint={`${count(report.interactions.followUpsDue)} следующих контактов просрочено`}
               />
               <Metric
-                icon={Building2Icon}
-                label="БИ Академпарка"
-                value={count(report.programs.biAcadempark.tracked)}
-                hint={`${count(report.programs.biAcadempark.successful)} получили резидентство`}
+                icon={AlertCircleIcon}
+                label="Нужно уточнить ФИО"
+                value={count(report.people.profilesNeedReview)}
+                hint="Временные карточки из Telegram-бота"
               />
             </CardContent>
           </Card>
@@ -217,10 +217,10 @@ export default function MetricsPage() {
                   <TableBody>
                     {[
                       ['Всего участников', report.people.total],
-                      ['Активные', report.people.active],
-                      ['Средняя активность', report.people.medium],
-                      ['Неактивные', report.people.inactive],
-                      ['Статус неизвестен', report.people.unknown],
+                      ['Отправляли артефакты всего', report.people.artifactSendersEver],
+                      ['Отправляли за выбранный период', report.artifacts.uniqueAuthors],
+                      ['Связаны с Telegram-ботом', report.people.totalFromBot],
+                      ['Нужно уточнить ФИО', report.people.profilesNeedReview],
                       ['Архивировано за период', report.artifacts.archivedDuringPeriod],
                     ].map(([label, value]) => (
                       <TableRow key={String(label)}>

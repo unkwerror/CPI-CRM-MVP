@@ -21,9 +21,9 @@ export interface ContactPoint {
 export interface PersonSummary {
   id: string;
   canonicalFullName: string;
-  lastName: string;
-  firstName: string;
-  patronymic: string;
+  lastName: string | null;
+  firstName: string | null;
+  patronymic: string | null;
   organization?: string | null;
   faculty?: string | null;
   primaryContact?: string | null;
@@ -36,6 +36,8 @@ export interface PersonSummary {
   hasDuplicateCandidate: boolean;
   /** Карточка связана с Telegram-ботом через стабильный Locker/Telegram ID. */
   fromBot: boolean;
+  profileNeedsReview: boolean;
+  profileReviewReason?: string | null;
   tags?: string[];
 }
 
@@ -54,36 +56,13 @@ export interface PersonDetail extends PersonSummary {
   }[];
   artifacts: ArtifactSummary[];
   events: PersonEventSummary[];
+  projects: PersonProjectSummary[];
   tasks: TaskSummary[];
   sources: SourceSummary[];
   /** Free-form editable notes; initially collated from imported source data. */
   notes?: string | null;
   /** Согласие на рассылки по каналам: отписка исключает из аудиторий, но не из базы. */
   marketingConsent?: { telegram: ConsentStatus; email: ConsentStatus };
-}
-
-export type ProgramResultCode = 'SVYA' | 'BI_ACADEMPARK';
-export type ProgramResultStatus =
-  | 'PLANNED'
-  | 'APPLIED'
-  | 'INTERVIEW'
-  | 'PARTICIPATED'
-  | 'FINALIST'
-  | 'WINNER'
-  | 'RESIDENT'
-  | 'NOT_SELECTED'
-  | 'REJECTED'
-  | 'WITHDRAWN';
-
-export interface PersonProgramResult {
-  id: string;
-  programCode: ProgramResultCode;
-  status: ProgramResultStatus;
-  result?: string | null;
-  occurredAt?: string | null;
-  version: number;
-  recordedByName?: string | null;
-  updatedAt: string;
 }
 
 export type ConsentStatus = 'GRANTED' | 'DENIED' | 'UNKNOWN' | 'WITHDRAWN';
@@ -94,6 +73,8 @@ export interface ArtifactSummary {
   typeName: string;
   eventId?: string | null;
   eventName?: string | null;
+  projectId?: string | null;
+  projectName?: string | null;
   status: string;
   latestVersionId?: string | null;
   latestVersionNumber?: number | null;
@@ -115,6 +96,7 @@ export interface EventParticipationSummary {
   attendance: 'UNKNOWN' | 'ATTENDED' | 'NO_SHOW' | 'PARTIAL';
   attendedAt?: string | null;
   dataOrigin: 'LEGACY_IMPORT' | 'LIVE';
+  result?: string | null;
   comments: string[];
   sources: SourceSummary[];
 }
@@ -127,6 +109,73 @@ export interface PersonEventSummary {
   endsAt?: string | null;
   participations: EventParticipationSummary[];
   artifacts: ArtifactSummary[];
+}
+
+export interface PersonProjectSummary {
+  id: string;
+  name: string;
+  description?: string | null;
+  status: string;
+  startsAt?: string | null;
+  endsAt?: string | null;
+  role: string;
+  joinedAt?: string | null;
+  memberCount: number;
+  artifactCount: number;
+  eventCount: number;
+}
+
+export interface ProjectSummary {
+  id: string;
+  name: string;
+  description?: string | null;
+  status: string;
+  startsAt?: string | null;
+  endsAt?: string | null;
+  version: number;
+  ownerName?: string | null;
+  memberCount: number;
+  artifactCount: number;
+  eventCount: number;
+}
+
+export interface ProjectMemberSummary {
+  membershipId: string;
+  id: string;
+  canonicalFullName: string;
+  role: string;
+  joinedAt: string;
+  version: number;
+  artifactCount: number;
+}
+
+export interface ProjectEventSummary {
+  participationId: string;
+  id: string;
+  name: string;
+  status: string;
+  startsAt?: string | null;
+  endsAt?: string | null;
+  decision: string;
+  attendance: string;
+  result?: string | null;
+  registeredAt: string;
+  version: number;
+}
+
+export interface ProjectDetail extends ProjectSummary {
+  ownerUserId?: string | null;
+  members: ProjectMemberSummary[];
+  events: ProjectEventSummary[];
+  tasks: TaskSummary[];
+}
+
+export interface EventProjectSummary extends ProjectSummary {
+  participationId: string;
+  decision: string;
+  attendance: string;
+  result?: string | null;
+  registeredAt?: string | null;
 }
 
 export interface EventSummary {
@@ -203,8 +252,67 @@ export interface EventParticipantSummary {
   comments: string[];
   sourceCount: number;
   artifactCount: number;
+  result?: string | null;
   artifacts: ArtifactSummary[];
 }
+
+export interface InteractionAttachment {
+  id: string;
+  fileName: string;
+  sizeBytes: number;
+  status: string;
+}
+
+export type PersonTimelineItem =
+  | {
+      kind: 'INTERACTION';
+      id: string;
+      occurredAt: string;
+      channel: 'EMAIL' | 'PHONE' | 'TELEGRAM' | 'MAX' | 'IN_PERSON' | 'NOTE' | 'OTHER';
+      direction: 'INBOUND' | 'OUTBOUND' | 'INTERNAL';
+      outcome?: string | null;
+      comment?: string | null;
+      nextContactAt?: string | null;
+      responsibleUserId?: string | null;
+      responsibleName?: string | null;
+      createdByName?: string | null;
+      attachments: InteractionAttachment[];
+      version: number;
+    }
+  | {
+      kind: 'EVENT';
+      id: string;
+      occurredAt: string;
+      eventId: string;
+      eventName: string;
+      decision: string;
+      attendance: string;
+      result?: string | null;
+    }
+  | {
+      kind: 'ARTIFACT' | 'REVIEW';
+      id: string;
+      occurredAt: string;
+      artifactId: string;
+      artifactVersionId?: string;
+      title: string;
+      typeName?: string;
+      eventId?: string | null;
+      eventName?: string | null;
+      score?: number | null;
+      decision?: string | null;
+    }
+  | {
+      kind: 'TASK_CREATED' | 'TASK_COMPLETED';
+      id: string;
+      occurredAt: string;
+      taskId: string;
+      title: string;
+      status?: string;
+      result?: string | null;
+      dueAt?: string | null;
+      assigneeName?: string | null;
+    };
 
 export interface EventDetail {
   id: string;
@@ -343,12 +451,9 @@ export interface PeopleResponse {
 
 export interface DashboardMetrics {
   totalPeople: number;
-  activatedEver: number;
-  active: number;
-  medium: number;
-  inactive: number;
-  notActivated: number;
-  unknownLegacy: number;
+  artifactSenders: number;
+  withoutArtifacts: number;
+  profilesNeedReview: number;
   unreviewedArtifacts: number;
   duplicateCandidates: number;
   overdueTasks: number;
@@ -527,13 +632,10 @@ export interface OperationalPeriodReport {
   people: {
     newPeople: number;
     newFromBot: number;
-    activated: number;
     total: number;
     totalFromBot: number;
-    active: number;
-    medium: number;
-    inactive: number;
-    unknown: number;
+    artifactSendersEver: number;
+    profilesNeedReview: number;
   };
   artifacts: {
     submittedVersions: number;
@@ -558,14 +660,7 @@ export interface OperationalPeriodReport {
     attended: number;
   };
   tasks: { created: number; completed: number; overdueNow: number };
-  programs: {
-    svya: { tracked: number; successful: number; byStatus: { status: string; count: number }[] };
-    biAcadempark: {
-      tracked: number;
-      successful: number;
-      byStatus: { status: string; count: number }[];
-    };
-  };
+  interactions: { recorded: number; followUpsDue: number };
 }
 
 export type CampaignChannel = 'TELEGRAM' | 'EMAIL';

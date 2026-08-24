@@ -80,9 +80,9 @@ export function EditPersonDialog({
   onSaved: () => void | Promise<void>;
 }) {
   const primaryAffiliation = person.affiliations[0];
-  const [lastName, setLastName] = useState(person.lastName);
-  const [firstName, setFirstName] = useState(person.firstName);
-  const [patronymic, setPatronymic] = useState(person.patronymic);
+  const [lastName, setLastName] = useState(person.lastName ?? '');
+  const [firstName, setFirstName] = useState(person.firstName ?? '');
+  const [patronymic, setPatronymic] = useState(person.patronymic ?? '');
   const [organization, setOrganization] = useState(
     primaryAffiliation?.organization ?? person.organization ?? '',
   );

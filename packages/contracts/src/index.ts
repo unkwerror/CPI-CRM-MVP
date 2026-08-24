@@ -102,6 +102,7 @@ export const CreateArtifactBody = Type.Object({
   typeCode: Type.String({ minLength: 1, maxLength: 100 }),
   description: Type.Optional(Type.String({ maxLength: 10_000 })),
   eventId: Type.Optional(Uuid),
+  projectId: Type.Optional(Uuid),
 });
 
 export const ArtifactContributorInput = Type.Object({

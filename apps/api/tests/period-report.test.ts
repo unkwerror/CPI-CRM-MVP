@@ -46,13 +46,10 @@ describe('operationalReportSvg', () => {
       people: {
         newPeople: 3,
         newFromBot: 2,
-        activated: 1,
         total: 10,
         totalFromBot: 5,
-        active: 4,
-        medium: 2,
-        inactive: 1,
-        unknown: 3,
+        artifactSendersEver: 4,
+        profilesNeedReview: 3,
       },
       artifacts: {
         submittedVersions: 4,
@@ -72,10 +69,7 @@ describe('operationalReportSvg', () => {
       },
       events: { created: 1, participations: 3, uniqueParticipants: 3, attended: 2 },
       tasks: { created: 2, completed: 1, overdueNow: 0 },
-      programs: {
-        svya: { tracked: 1, successful: 1, byStatus: [{ status: 'WINNER', count: 1 }] },
-        biAcadempark: { tracked: 0, successful: 0, byStatus: [] },
-      },
+      interactions: { recorded: 3, followUpsDue: 1 },
     };
 
     const svg = operationalReportSvg(report);

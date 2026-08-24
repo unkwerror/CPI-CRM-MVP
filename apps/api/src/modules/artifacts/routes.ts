@@ -55,6 +55,7 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
             Type.Union([Type.Literal('active'), Type.Literal('archived'), Type.Literal('all')]),
           ),
           eventId: Type.Optional(Type.String({ format: 'uuid' })),
+          projectId: Type.Optional(Type.String({ format: 'uuid' })),
           limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })),
         }),
       },
@@ -65,6 +66,7 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
         review?: string;
         archive?: 'active' | 'archived' | 'all';
         eventId?: string;
+        projectId?: string;
         limit?: number;
       };
       const organization = await getOrganizationContext(app.pool);
@@ -82,6 +84,10 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
         values.push(query.eventId);
         where.push(`a.event_id = $${values.length}`);
       }
+      if (query.projectId) {
+        values.push(query.projectId);
+        where.push(`a.project_id = $${values.length}`);
+      }
       // Доска приёмки: «на проверке» — отправленная версия без финального решения.
       if (query.review === 'pending')
         where.push('latest.version_id IS NOT NULL AND latest.decision IS NULL');
@@ -90,12 +96,14 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
       const result = await app.pool.query(
         `SELECT a.id, a.title, at.name AS type_name, a.status,
                 a.event_id, e.name AS event_name,
+                a.project_id, project.name AS project_name,
                 latest.version_id, latest.version_number, latest.version_status,
                 latest.submitted_at, latest.score, latest.decision, latest.reviewed_at,
                 COALESCE(latest.authors, '[]'::jsonb) AS authors
            FROM artifacts a
            JOIN artifact_types at ON at.id = a.type_id
            LEFT JOIN events e ON e.id = a.event_id
+           LEFT JOIN projects project ON project.id = a.project_id
            LEFT JOIN LATERAL (
              SELECT av.id AS version_id, av.version_number, av.status AS version_status,
                     av.submitted_at, ar.score, ar.decision, ar.reviewed_at,
@@ -124,6 +132,8 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
           status: row.status,
           eventId: row.event_id,
           eventName: row.event_name,
+          projectId: row.project_id,
+          projectName: row.project_name,
           latestVersionId: row.version_id,
           latestVersionNumber: row.version_number,
           latestVersionStatus: row.version_status,
@@ -245,6 +255,7 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
         typeCode: string;
         description?: string;
         eventId?: string;
+        projectId?: string;
       };
       const organization = await getOrganizationContext(app.pool);
       const created = await transaction(app.pool, async (client) => {
@@ -254,16 +265,19 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
         );
         if (!type.rows[0]) throw new HttpProblem(400, 'Неизвестный тип артефакта');
         if (body.eventId) await assertArtifactEventAvailable(client, body.eventId, organization.id);
+        if (body.projectId)
+          await assertArtifactProjectAvailable(client, body.projectId, organization.id);
         const result = await client.query<{ id: string }>(
           `INSERT INTO artifacts
-             (organization_id, type_id, title, description, event_id, created_by_user_id)
-           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+             (organization_id, type_id, title, description, event_id, project_id, created_by_user_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
           [
             organization.id,
             type.rows[0].id,
             body.title.trim(),
             body.description?.trim() || null,
             body.eventId ?? null,
+            body.projectId ?? null,
             request.authUser!.userId,
           ],
         );
@@ -277,6 +291,7 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
             title: body.title,
             typeCode: body.typeCode,
             eventId: body.eventId ?? null,
+            projectId: body.projectId ?? null,
           },
         });
         return result.rows[0];
@@ -312,8 +327,12 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
       const urls = (body.externalUrls ?? []).map(normalizeExternalUrl);
       const organization = await getOrganizationContext(app.pool);
       const created = await transaction(app.pool, async (client) => {
-        const artifact = await client.query<{ id: string; event_id: string | null }>(
-          `SELECT id, event_id
+        const artifact = await client.query<{
+          id: string;
+          event_id: string | null;
+          project_id: string | null;
+        }>(
+          `SELECT id, event_id, project_id
              FROM artifacts
             WHERE id = $1 AND organization_id = $2 AND status <> 'VOIDED'
             FOR UPDATE`,
@@ -332,6 +351,12 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
             .filter((item) => item.role === 'AUTHOR')
             .map((item) => item.personId);
           await assertArtifactEventHasAuthor(client, artifact.rows[0].event_id, authorIds);
+        }
+        if (artifact.rows[0].project_id) {
+          const authorIds = canonicalContributors
+            .filter((item) => item.role === 'AUTHOR')
+            .map((item) => item.personId);
+          await assertArtifactProjectHasAuthor(client, artifact.rows[0].project_id, authorIds);
         }
         const files = body.fileObjectIds?.length
           ? await client.query<{ id: string; sha256: string | null }>(
@@ -863,6 +888,53 @@ export async function assertArtifactEventAvailable(
       'Мероприятие недоступно',
       'Выберите действующее мероприятие текущей организации.',
     );
+}
+
+export async function assertArtifactProjectAvailable(
+  client: PoolClient,
+  projectId: string,
+  organizationId: string,
+): Promise<void> {
+  const project = await client.query<{ id: string }>(
+    `SELECT id
+       FROM projects
+      WHERE id = $1 AND organization_id = $2 AND archived_at IS NULL
+      FOR SHARE`,
+    [projectId, organizationId],
+  );
+  if (!project.rows[0]) {
+    throw new HttpProblem(
+      400,
+      'Проект недоступен',
+      'Выберите действующий проект текущей организации.',
+    );
+  }
+}
+
+export async function assertArtifactProjectHasAuthor(
+  client: PoolClient,
+  projectId: string,
+  authorIds: string[],
+): Promise<void> {
+  const membership = await client.query<{ exists: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1
+         FROM project_memberships membership
+         JOIN persons member ON member.id = membership.person_id
+        WHERE membership.project_id = $1
+          AND membership.archived_at IS NULL
+          AND member.archived_at IS NULL
+          AND COALESCE(member.merged_into_person_id, member.id) = ANY($2::uuid[])
+     ) AS exists`,
+    [projectId, authorIds],
+  );
+  if (!membership.rows[0]?.exists) {
+    throw new HttpProblem(
+      400,
+      'Нет участника проекта среди авторов',
+      'Добавьте автора в состав проекта или выберите другой проект.',
+    );
+  }
 }
 
 export async function assertArtifactEventHasAuthor(

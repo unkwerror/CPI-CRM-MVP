@@ -5,7 +5,6 @@ import {
   ArrowRightIcon,
   BotIcon,
   CalendarDaysIcon,
-  Clock3Icon,
   FileUpIcon,
   StarIcon,
   type LucideIcon,
@@ -29,12 +28,9 @@ const SCORE_RANGE = Array.from({ length: 10 }, (_, index) => ({ score: index + 1
 
 const emptyMetrics: DashboardMetrics = {
   totalPeople: 0,
-  activatedEver: 0,
-  active: 0,
-  medium: 0,
-  inactive: 0,
-  notActivated: 0,
-  unknownLegacy: 0,
+  artifactSenders: 0,
+  withoutArtifacts: 0,
+  profilesNeedReview: 0,
   unreviewedArtifacts: 0,
   duplicateCandidates: 0,
   overdueTasks: 0,
@@ -43,14 +39,6 @@ const emptyMetrics: DashboardMetrics = {
   eventCount: 0,
   scoreDistribution: SCORE_RANGE,
 };
-
-const relativeFormatter = new Intl.RelativeTimeFormat('ru-RU', { numeric: 'auto' });
-
-function relativeDays(value?: string | null): string {
-  if (!value) return 'нет даты';
-  const days = Math.floor((Date.now() - new Date(value).getTime()) / 86_400_000);
-  return relativeFormatter.format(-days, 'day');
-}
 
 function MetricTile({
   label,
@@ -135,7 +123,7 @@ export default function DashboardPage() {
   useEffect(() => {
     void Promise.all([
       api<DashboardMetrics>('/dashboard/participants'),
-      api<PeopleResponse>('/people?activityStatus=MEDIUM&limit=5'),
+      api<PeopleResponse>('/people?profileNeedsReview=true&limit=5'),
       api<OperationalPeriodReport>('/dashboard/cpi?weeks=4').catch(() => null),
     ])
       .then(([nextMetrics, people, periodReport]) => {
@@ -185,31 +173,31 @@ export default function DashboardPage() {
           label="Всего участников"
           loading={loading}
           value={metrics.totalPeople.toLocaleString('ru-RU')}
-          hint={`${metrics.activatedEver.toLocaleString('ru-RU')} активированы когда-либо`}
+          hint={`${metrics.artifactSenders.toLocaleString('ru-RU')} отправляли артефакты`}
         />
         <MetricTile
-          href="/participants?activityStatus=ACTIVE"
-          kicker={{ text: 'Сейчас', variant: 'soft-success' }}
-          label="Активные"
+          href="/participants?hasArtifacts=true"
+          kicker={{ text: 'Результаты', variant: 'soft-success' }}
+          label="Отправляли артефакты"
           loading={loading}
-          value={metrics.active.toLocaleString('ru-RU')}
-          hint="Артефакт за последние 252 часа"
+          value={metrics.artifactSenders.toLocaleString('ru-RU')}
+          hint="Есть хотя бы один отправленный артефакт"
         />
         <MetricTile
-          href="/participants?activityStatus=MEDIUM"
-          kicker={{ text: 'Внимание', variant: 'soft-warning' }}
-          label="Средняя активность"
+          href="/participants?hasArtifacts=false"
+          kicker={{ text: 'Без результата', variant: 'soft-muted' }}
+          label="Без артефактов"
           loading={loading}
-          value={metrics.medium.toLocaleString('ru-RU')}
-          hint="Главная рабочая очередь"
+          value={metrics.withoutArtifacts.toLocaleString('ru-RU')}
+          hint="Пока не отправляли артефакты"
         />
         <MetricTile
-          href="/participants?activityStatus=INACTIVE"
-          kicker={{ text: 'Более 3 недель', variant: 'soft-destructive' }}
-          label="Неактивные"
+          href="/participants?profileNeedsReview=true"
+          kicker={{ text: 'Уточнить', variant: 'soft-warning' }}
+          label="Неполные профили"
           loading={loading}
-          value={metrics.inactive.toLocaleString('ru-RU')}
-          hint="Нужен новый содержательный результат"
+          value={metrics.profilesNeedReview.toLocaleString('ru-RU')}
+          hint="Нужно уточнить ФИО"
         />
       </section>
 
@@ -235,7 +223,7 @@ export default function DashboardPage() {
               label="Новые участники"
               loading={false}
               value={period.people.newPeople.toLocaleString('ru-RU')}
-              hint={`${period.people.activated} активированы за период`}
+              hint={`${period.people.newFromBot} пришли из Telegram-бота`}
             />
             <MetricTile
               href="/participants"
@@ -276,7 +264,7 @@ export default function DashboardPage() {
             </div>
             <CardAction>
               <Button asChild size="sm" variant="ghost">
-                <Link href="/participants?activityStatus=MEDIUM">
+                <Link href="/participants?profileNeedsReview=true">
                   Вся очередь
                   <ArrowRightIcon />
                 </Link>
@@ -290,7 +278,7 @@ export default function DashboardPage() {
               ))}
             </CardContent>
           ) : attention.length === 0 ? (
-            <EmptyState title="Очередь пуста" text="Участники средней активности появятся здесь." />
+            <EmptyState title="Очередь пуста" text="Все профили из Telegram-бота заполнены." />
           ) : (
             <div className="divide-y">
               {attention.map((person) => (
@@ -308,10 +296,7 @@ export default function DashboardPage() {
                       {person.organization ?? person.primaryContact ?? 'Данные уточняются'}
                     </small>
                   </span>
-                  <span className="text-warning inline-flex shrink-0 items-center gap-1 text-xs">
-                    <Clock3Icon className="size-3.5" />
-                    {relativeDays(person.lastArtifactAt)}
-                  </span>
+                  <Badge variant="soft-warning">Нужно уточнить ФИО</Badge>
                   <ArrowRightIcon className="text-muted-foreground size-4 shrink-0" />
                 </Link>
               ))}
@@ -336,10 +321,10 @@ export default function DashboardPage() {
               value={metrics.eventCount}
             />
             <QueueItem
-              href="/participants?activationState=UNKNOWN_LEGACY"
+              href="/participants?profileNeedsReview=true"
               icon={AlertCircleIcon}
-              label="профилей с неполной историей"
-              value={metrics.unknownLegacy}
+              label="профилей, где нужно уточнить ФИО"
+              value={metrics.profilesNeedReview}
             />
           </CardContent>
         </Card>
@@ -352,14 +337,14 @@ export default function DashboardPage() {
               <p className="text-muted-foreground text-xs font-semibold tracking-wider uppercase">
                 Последние 3 недели
               </p>
-              <CardTitle className="mt-1">Артефактная активность</CardTitle>
+              <CardTitle className="mt-1">Отправки артефактов</CardTitle>
             </div>
           </CardHeader>
           <CardContent className="grid gap-3 sm:grid-cols-3">
             {[
               { value: metrics.recentVersions, label: 'учитываемых версий' },
               { value: metrics.recentAuthors, label: 'уникальных авторов' },
-              { value: metrics.notActivated, label: 'не активированы после baseline' },
+              { value: metrics.artifactSenders, label: 'отправляли артефакты всего' },
             ].map((item) => (
               <div className="bg-muted/50 rounded-lg px-4 py-3" key={item.label}>
                 <strong className="block text-2xl font-semibold tracking-tight tabular">

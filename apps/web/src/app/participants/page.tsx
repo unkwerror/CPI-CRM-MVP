@@ -18,7 +18,6 @@ import { CreatePersonDialog } from '@/components/create-person-dialog';
 import { DataToolbar, ToolbarSearch, ToolbarSelect } from '@/components/data-toolbar';
 import { EmptyState } from '@/components/empty-state';
 import { PageHeader, PageStack } from '@/components/page-header';
-import { StatusBadge } from '@/components/status-badge';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -40,20 +39,16 @@ import type { PeopleResponse } from '@/lib/types';
 
 const SAVED_VIEWS = [
   { label: 'Все', params: '' },
-  { label: 'Не активированы', params: 'activationState=NOT_ACTIVATED' },
-  { label: 'Активные', params: 'activityStatus=ACTIVE' },
-  { label: 'Средняя активность', params: 'activityStatus=MEDIUM' },
-  { label: 'Неактивные', params: 'activityStatus=INACTIVE' },
-  { label: 'Legacy неизвестен', params: 'activationState=UNKNOWN_LEGACY' },
+  { label: 'Отправляли артефакты', params: 'hasArtifacts=true' },
+  { label: 'Без артефактов', params: 'hasArtifacts=false' },
+  { label: 'Нужно уточнить ФИО', params: 'profileNeedsReview=true' },
   { label: 'Ожидают оценки', params: 'awaitingReview=true' },
 ];
 
-const ACTIVITY_OPTIONS = [
-  { value: 'ALL', label: 'Любая активность' },
-  { value: 'ACTIVE', label: 'Активные' },
-  { value: 'MEDIUM', label: 'Средняя активность' },
-  { value: 'INACTIVE', label: 'Неактивные' },
-  { value: 'UNKNOWN', label: 'Неизвестно' },
+const ARTIFACT_OPTIONS = [
+  { value: 'ALL', label: 'Все участники' },
+  { value: 'true', label: 'Отправляли артефакты' },
+  { value: 'false', label: 'Без артефактов' },
 ];
 
 const COLUMN_COUNT = 8;
@@ -125,13 +120,13 @@ function ParticipantsContent() {
     const params = new URLSearchParams(view.params);
     return (
       [...params.entries()].every(([key, value]) => searchParams.get(key) === value) &&
-      ['activityStatus', 'activationState', 'awaitingReview'].every(
+      ['hasArtifacts', 'profileNeedsReview', 'awaitingReview'].every(
         (key) => params.has(key) || !searchParams.has(key),
       )
     );
   });
   const exportParams = new URLSearchParams();
-  for (const key of ['q', 'activityStatus', 'activationState', 'awaitingReview'] as const) {
+  for (const key of ['q', 'hasArtifacts', 'profileNeedsReview', 'awaitingReview'] as const) {
     const value = searchParams.get(key);
     if (value) exportParams.set(key, value);
   }
@@ -190,10 +185,10 @@ function ParticipantsContent() {
           />
         </form>
         <ToolbarSelect
-          label="Активность"
-          onChange={(value) => updateParams({ activityStatus: value === 'ALL' ? null : value })}
-          options={ACTIVITY_OPTIONS}
-          value={searchParams.get('activityStatus') ?? 'ALL'}
+          label="Артефакты"
+          onChange={(value) => updateParams({ hasArtifacts: value === 'ALL' ? null : value })}
+          options={ARTIFACT_OPTIONS}
+          value={searchParams.get('hasArtifacts') ?? 'ALL'}
           width="w-52"
         />
       </DataToolbar>
@@ -215,7 +210,7 @@ function ParticipantsContent() {
                   <TableHead>Участник</TableHead>
                   <TableHead>Контакт</TableHead>
                   <TableHead>Организация / факультет</TableHead>
-                  <TableHead>Активность</TableHead>
+                  <TableHead>Отправлял артефакты</TableHead>
                   <TableHead>Последний артефакт</TableHead>
                   <TableHead className="text-right">Артефактов</TableHead>
                   <TableHead className="text-right">Оценка</TableHead>
@@ -254,6 +249,11 @@ function ParticipantsContent() {
                                     <BotIcon /> Бот
                                   </Badge>
                                 )}
+                                {person.profileNeedsReview && (
+                                  <Badge variant="soft-warning" className="px-1 py-0 text-[10px]">
+                                    Нужно уточнить ФИО
+                                  </Badge>
+                                )}
                               </span>
                             </span>
                           </Link>
@@ -281,10 +281,13 @@ function ParticipantsContent() {
                           </span>
                         </TableCell>
                         <TableCell>
-                          <StatusBadge
-                            activity={person.activityStatus}
-                            activation={person.activationState}
-                          />
+                          <Badge
+                            variant={
+                              person.countableArtifactCount > 0 ? 'soft-success' : 'soft-muted'
+                            }
+                          >
+                            {person.countableArtifactCount > 0 ? 'Да' : 'Нет'}
+                          </Badge>
                         </TableCell>
                         <TableCell className="text-muted-foreground text-[13px] whitespace-nowrap">
                           {formatDate(person.lastArtifactAt)}

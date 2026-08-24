@@ -6,6 +6,7 @@ import {
   ExternalLinkIcon,
   FileIcon,
   FilePlus2Icon,
+  FolderKanbanIcon,
   MailIcon,
   MapPinIcon,
   MessageCircleIcon,
@@ -40,10 +41,9 @@ import { EmptyState } from '@/components/empty-state';
 import { PageHeader, PageStack } from '@/components/page-header';
 import { PersonContactDialog } from '@/components/person-contact-dialog';
 import { PersonInteractionDialog } from '@/components/person-interaction-dialog';
+import { PersonInteractionsTab } from '@/components/person-interactions-tab';
 import { PersonEventLinkDialog } from '@/components/person-event-link-dialog';
 import { PersonRemovalDialog } from '@/components/person-removal-dialog';
-import { PersonProgramResults } from '@/components/person-program-results';
-import { StatusBadge } from '@/components/status-badge';
 import { TaskDialog } from '@/components/task-dialog';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
@@ -68,7 +68,7 @@ import {
 import type { ArtifactSummary, PersonDetail } from '@/lib/types';
 
 type BadgeVariant = ComponentProps<typeof Badge>['variant'];
-type Tab = 'overview' | 'events' | 'artifacts' | 'history';
+type Tab = 'overview' | 'interactions' | 'events' | 'projects' | 'artifacts';
 type ArtifactFilterStatus = 'ALL' | 'DRAFT' | 'SUBMITTED' | 'PENDING_REVIEW' | 'REVIEWED';
 
 const ARTIFACT_STATUS_OPTIONS = [
@@ -83,12 +83,14 @@ export function PersonPageClient({ id }: { id: string }) {
   const [person, setPerson] = useState<PersonDetail | null>(null);
   const [tab, setTab] = useState<Tab>('overview');
   const [showArtifact, setShowArtifact] = useState(false);
+  const [artifactEventId, setArtifactEventId] = useState<string | null>(null);
   const [showEdit, setShowEdit] = useState(false);
   const [showContact, setShowContact] = useState(false);
   const [showInteraction, setShowInteraction] = useState(false);
   const [showEventLink, setShowEventLink] = useState(false);
   const [showTask, setShowTask] = useState(false);
   const [showRemoval, setShowRemoval] = useState(false);
+  const [timelineRefreshKey, setTimelineRefreshKey] = useState(0);
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notesDraft, setNotesDraft] = useState<string | null>(null);
@@ -144,15 +146,6 @@ export function PersonPageClient({ id }: { id: string }) {
   if (error) return <EmptyState title="Не удалось открыть карточку" text={error} />;
   if (!person) return <PersonSkeleton />;
 
-  const statusExplanation =
-    person.activationState === 'UNKNOWN_LEGACY'
-      ? 'Исторические данные неполны — отсутствие артефактов не трактуется как неактивность.'
-      : person.activationState === 'NOT_ACTIVATED'
-        ? 'После baseline ещё не зафиксировано ни одного отправленного артефакта.'
-        : person.activityStatus === 'ACTIVE'
-          ? `Последний учитываемый артефакт: ${formatDate(person.lastArtifactAt, true)}.`
-          : `Статус рассчитан по последнему артефакту от ${formatDate(person.lastArtifactAt, true)}.`;
-
   return (
     <PageStack>
       <PageHeader
@@ -180,6 +173,7 @@ export function PersonPageClient({ id }: { id: string }) {
                 <BotIcon /> Из Telegram-бота
               </Badge>
             )}
+            {person.profileNeedsReview && <Badge variant="soft-warning">Нужно уточнить ФИО</Badge>}
             {person.tags?.map((tag) => (
               <Badge key={tag} variant="soft-muted">
                 <TagIcon /> {tag}
@@ -205,7 +199,12 @@ export function PersonPageClient({ id }: { id: string }) {
               </Button>
             )}
             {canAddArtifact && (
-              <Button onClick={() => setShowArtifact(true)}>
+              <Button
+                onClick={() => {
+                  setArtifactEventId(null);
+                  setShowArtifact(true);
+                }}
+              >
                 <FilePlus2Icon /> Добавить артефакт
               </Button>
             )}
@@ -236,26 +235,17 @@ export function PersonPageClient({ id }: { id: string }) {
 
       <Card>
         <CardContent className="grid gap-5 sm:grid-cols-2 xl:grid-cols-4">
-          <Fact
-            label="Активация"
-            hint={
-              person.activatedAt ? `с ${formatDate(person.activatedAt)}` : 'нет подтверждённой даты'
-            }
-          >
-            <strong className="text-[15px] font-semibold">
-              {person.activationState === 'ACTIVATED'
-                ? 'Активирован'
-                : person.activationState === 'NOT_ACTIVATED'
-                  ? 'Не активирован'
-                  : 'Неизвестно'}
-            </strong>
+          <Fact label="Отправлял артефакты">
+            <Badge variant={person.countableArtifactCount > 0 ? 'soft-success' : 'soft-muted'}>
+              {person.countableArtifactCount > 0 ? 'Да' : 'Нет'}
+            </Badge>
           </Fact>
-          <Fact label="Текущая активность" hint={statusExplanation}>
-            <StatusBadge activity={person.activityStatus} activation={person.activationState} />
+          <Fact label="Артефактов" hint="отправленные результаты участника">
+            <strong className="text-[15px] font-semibold">{person.countableArtifactCount}</strong>
           </Fact>
-          <Fact label="Следующая граница" hint="252 / 504 часа по версии правил">
+          <Fact label="Последний артефакт">
             <strong className="text-[15px] font-semibold">
-              {formatDate(person.nextStatusTransitionAt, true)}
+              {formatDate(person.lastArtifactAt)}
             </strong>
           </Fact>
           <Fact label="Ответственный" hint="комьюнити-менеджер">
@@ -269,15 +259,14 @@ export function PersonPageClient({ id }: { id: string }) {
       <Tabs value={tab} onValueChange={(value) => setTab(value as Tab)}>
         <TabsList>
           <TabsTrigger value="overview">Обзор</TabsTrigger>
+          <TabsTrigger value="interactions">Взаимодействия</TabsTrigger>
           <TabsTrigger value="events">Мероприятия · {person.events.length}</TabsTrigger>
+          <TabsTrigger value="projects">Проекты · {person.projects.length}</TabsTrigger>
           <TabsTrigger value="artifacts">Артефакты · {person.artifacts.length}</TabsTrigger>
-          <TabsTrigger value="history">История</TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview">
           <div className="grid gap-4 lg:grid-cols-2">
-            <PersonProgramResults personId={person.id} canEdit={canEditPerson} />
-
             <Card>
               <CardHeader>
                 <CardTitle>Контакты</CardTitle>
@@ -514,12 +503,27 @@ export function PersonPageClient({ id }: { id: string }) {
           </div>
         </TabsContent>
 
+        <TabsContent value="interactions">
+          <PersonInteractionsTab
+            canAdd={canManageTasks}
+            onAdd={() => setShowInteraction(true)}
+            personId={person.id}
+            refreshKey={timelineRefreshKey}
+          />
+        </TabsContent>
+
         <TabsContent value="events">
           <EventsTab
             canLink={canEditPerson}
             onLink={() => setShowEventLink(true)}
             person={person}
             onOpenArtifact={setSelectedVersionId}
+            canAddArtifact={canAddArtifact}
+            onAddArtifact={(eventId) => {
+              setArtifactEventId(eventId);
+              setShowArtifact(true);
+            }}
+            onChanged={reload}
           />
         </TabsContent>
 
@@ -532,14 +536,16 @@ export function PersonPageClient({ id }: { id: string }) {
           />
         </TabsContent>
 
-        <TabsContent value="history">
-          <TimelineTab person={person} />
+        <TabsContent value="projects">
+          <ProjectsTab person={person} />
         </TabsContent>
       </Tabs>
 
       {showArtifact && (
         <ArtifactSubmitDialog
           events={person.events}
+          projects={person.projects}
+          defaultEventId={artifactEventId}
           onClose={() => setShowArtifact(false)}
           onCreated={async () => {
             setShowArtifact(false);
@@ -568,7 +574,15 @@ export function PersonPageClient({ id }: { id: string }) {
         />
       )}
       {showInteraction && (
-        <PersonInteractionDialog onClose={() => setShowInteraction(false)} personId={person.id} />
+        <PersonInteractionDialog
+          onClose={() => setShowInteraction(false)}
+          onSaved={async () => {
+            setTimelineRefreshKey((value) => value + 1);
+            setTab('interactions');
+            await reload();
+          }}
+          personId={person.id}
+        />
       )}
       {showEventLink && (
         <PersonEventLinkDialog
@@ -713,12 +727,39 @@ function EventsTab({
   onOpenArtifact,
   canLink,
   onLink,
+  canAddArtifact,
+  onAddArtifact,
+  onChanged,
 }: {
   person: PersonDetail;
   onOpenArtifact: (versionId: string) => void;
   canLink: boolean;
   onLink: () => void;
+  canAddArtifact: boolean;
+  onAddArtifact: (eventId: string) => void;
+  onChanged: () => void | Promise<void>;
 }) {
+  const [editingResultId, setEditingResultId] = useState<string | null>(null);
+  const [resultDraft, setResultDraft] = useState('');
+  const [savingResult, setSavingResult] = useState(false);
+
+  async function saveResult(eventId: string) {
+    setSavingResult(true);
+    try {
+      await api(`/events/${eventId}/participants/${person.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ result: resultDraft.trim() || null }),
+      });
+      toast.success('Результат участия сохранён');
+      setEditingResultId(null);
+      await onChanged();
+    } catch (caught) {
+      toast.error(apiErrorMessage(caught, 'Не удалось сохранить результат'));
+    } finally {
+      setSavingResult(false);
+    }
+  }
+
   if (!person.events.length) {
     return (
       <Card>
@@ -778,12 +819,7 @@ function EventsTab({
                     Запись участия {index + 1}
                   </p>
                 )}
-                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                  <Fact label="Роль">
-                    <strong className="block text-[13px] font-medium">
-                      {participation.role ?? 'Не указана в источнике'}
-                    </strong>
-                  </Fact>
+                <div className="grid gap-3 sm:grid-cols-3">
                   <Fact label="Решение">
                     <strong className="block text-[13px] font-medium">
                       {PARTICIPATION_DECISION_LABELS[participation.decision] ??
@@ -800,6 +836,55 @@ function EventsTab({
                       {participation.dataOrigin === 'LEGACY_IMPORT' ? 'Импорт из таблицы' : 'CRM'}
                     </strong>
                   </Fact>
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[13px] font-medium">Результат участия</p>
+                    {canLink && editingResultId !== participation.id && (
+                      <Button
+                        onClick={() => {
+                          setEditingResultId(participation.id);
+                          setResultDraft(participation.result ?? '');
+                        }}
+                        size="xs"
+                        variant="ghost"
+                      >
+                        <PencilIcon /> Изменить
+                      </Button>
+                    )}
+                  </div>
+                  {editingResultId === participation.id ? (
+                    <div className="space-y-2">
+                      <Textarea
+                        onChange={(event) => setResultDraft(event.target.value)}
+                        placeholder="Например: выступил, занял 2 место; заявка одобрена"
+                        rows={3}
+                        value={resultDraft}
+                      />
+                      <div className="flex gap-2">
+                        <Button
+                          disabled={savingResult}
+                          onClick={() => void saveResult(event.id)}
+                          size="sm"
+                        >
+                          Сохранить
+                        </Button>
+                        <Button
+                          disabled={savingResult}
+                          onClick={() => setEditingResultId(null)}
+                          size="sm"
+                          variant="outline"
+                        >
+                          Отмена
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-muted-foreground text-[13px] whitespace-pre-wrap">
+                      {participation.result ?? 'Результат пока не заполнен.'}
+                    </p>
+                  )}
                 </div>
 
                 {(participation.registeredAt || participation.attendedAt) && (
@@ -836,7 +921,14 @@ function EventsTab({
             ))}
 
             <section className="space-y-2">
-              <h3 className="text-[13px] font-medium">Артефакты участника с мероприятия</h3>
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-[13px] font-medium">Артефакты участника с мероприятия</h3>
+                {canAddArtifact && (
+                  <Button onClick={() => onAddArtifact(event.id)} size="xs" variant="outline">
+                    <FilePlus2Icon /> Добавить артефакт
+                  </Button>
+                )}
+              </div>
               {event.artifacts.length ? (
                 <div className="grid gap-2 sm:grid-cols-2">
                   {event.artifacts.map((artifact) => (
@@ -866,6 +958,62 @@ function EventsTab({
                 <p className="text-muted-foreground text-[13px]">Связанных артефактов пока нет.</p>
               )}
             </section>
+          </CardContent>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+function ProjectsTab({ person }: { person: PersonDetail }) {
+  if (!person.projects.length) {
+    return (
+      <Card>
+        <EmptyState
+          icon={FolderKanbanIcon}
+          title="Проектов пока нет"
+          text="Добавьте участника в состав проекта из карточки проекта."
+          action={
+            <Button asChild variant="outline">
+              <a href="/projects">Открыть проекты</a>
+            </Button>
+          }
+        />
+      </Card>
+    );
+  }
+  return (
+    <div className="grid gap-3 lg:grid-cols-2">
+      {person.projects.map((project) => (
+        <Card key={project.id}>
+          <CardHeader>
+            <div>
+              <p className="text-muted-foreground text-xs font-semibold tracking-wider uppercase">
+                {project.role}
+              </p>
+              <CardTitle className="mt-1.5">
+                <a className="hover:underline" href={`/projects/${project.id}`}>
+                  {project.name}
+                </a>
+              </CardTitle>
+            </div>
+            <CardAction>
+              <Badge variant={project.status === 'ACTIVE' ? 'soft-success' : 'soft-muted'}>
+                {project.status}
+              </Badge>
+            </CardAction>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {project.description && (
+              <p className="text-muted-foreground line-clamp-3 text-[13px]">
+                {project.description}
+              </p>
+            )}
+            <div className="text-muted-foreground flex flex-wrap gap-x-4 gap-y-1 text-xs">
+              <span>{project.memberCount} участников</span>
+              <span>{project.artifactCount} артефактов</span>
+              <span>{project.eventCount} мероприятий</span>
+            </div>
           </CardContent>
         </Card>
       ))}
@@ -977,7 +1125,7 @@ function ArtifactsTab({
         <EmptyState
           icon={FilePlus2Icon}
           title="Артефактов пока нет"
-          text="Первый отправленный результат активирует участника."
+          text="Добавьте первый отправленный результат участника."
           {...(canAdd
             ? {
                 action: (
@@ -1068,6 +1216,11 @@ function ArtifactsTab({
                         <CalendarDaysIcon className="size-3" /> {eventName}
                       </span>
                     )}
+                    {artifact.projectName && (
+                      <span className="flex items-center gap-1">
+                        <FolderKanbanIcon className="size-3" /> {artifact.projectName}
+                      </span>
+                    )}
                     {artifact.authors?.length ? (
                       <span className="truncate">
                         {artifact.authors.map((author) => author.name).join(', ')}
@@ -1118,43 +1271,5 @@ function ArtifactsTab({
         </Card>
       )}
     </div>
-  );
-}
-
-function TimelineTab({ person }: { person: PersonDetail }) {
-  return (
-    <Card>
-      <CardContent>
-        <ol className="space-y-5 border-l pl-6">
-          <li className="relative">
-            <span className="bg-success ring-card absolute top-1.5 -left-7 size-2 rounded-full ring-4" />
-            <small className="text-muted-foreground block text-xs">
-              {formatDate(person.activatedAt, true)}
-            </small>
-            <strong className="block text-[13px] font-medium">
-              {person.activationState === 'ACTIVATED'
-                ? 'Участник активирован'
-                : 'Карточка участника создана'}
-            </strong>
-            <p className="text-muted-foreground text-[13px]">
-              Событие рассчитано из первичных данных и сохранено в истории статусов.
-            </p>
-          </li>
-          {person.artifacts.map((artifact) => (
-            <li className="relative" key={artifact.id}>
-              <span className="bg-primary ring-card absolute top-1.5 -left-7 size-2 rounded-full ring-4" />
-              <small className="text-muted-foreground block text-xs">
-                {formatDate(artifact.submittedAt, true)}
-              </small>
-              <strong className="block text-[13px] font-medium">Артефакт: {artifact.title}</strong>
-              <p className="text-muted-foreground text-[13px]">
-                {artifact.typeName} ·{' '}
-                {artifact.score == null ? 'не оценён' : `оценка ${artifact.score}/10`}
-              </p>
-            </li>
-          ))}
-        </ol>
-      </CardContent>
-    </Card>
   );
 }

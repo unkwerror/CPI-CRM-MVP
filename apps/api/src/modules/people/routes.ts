@@ -43,9 +43,9 @@ interface PersonListRow {
   id: string;
   canonical_full_name: string;
   normalized_full_name: string;
-  last_name: string;
-  first_name: string;
-  patronymic: string;
+  last_name: string | null;
+  first_name: string | null;
+  patronymic: string | null;
   activation_state: 'UNKNOWN_LEGACY' | 'NOT_ACTIVATED' | 'ACTIVATED';
   live_activity_status: 'UNKNOWN' | 'ACTIVE' | 'MEDIUM' | 'INACTIVE';
   last_artifact_at: Date | null;
@@ -57,6 +57,8 @@ interface PersonListRow {
   latest_score: number | null;
   has_duplicate: boolean;
   from_bot: boolean;
+  profile_needs_review: boolean;
+  profile_review_reason: string | null;
   total_count: string;
 }
 
@@ -87,6 +89,8 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
           ),
           hasDuplicate: Type.Optional(Type.Boolean()),
           awaitingReview: Type.Optional(Type.Boolean()),
+          hasArtifacts: Type.Optional(Type.Boolean()),
+          profileNeedsReview: Type.Optional(Type.Boolean()),
           cursor: Type.Optional(Type.String()),
           limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 50 })),
         }),
@@ -100,6 +104,8 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
         activationState?: string;
         hasDuplicate?: boolean;
         awaitingReview?: boolean;
+        hasArtifacts?: boolean;
+        profileNeedsReview?: boolean;
         cursor?: string;
         limit?: number;
       };
@@ -174,6 +180,13 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
       if (query.hasDuplicate) conditions.push('duplicates.has_duplicate = true');
       if (query.awaitingReview)
         conditions.push('latest.score IS NULL AND latest.version_id IS NOT NULL');
+      if (query.hasArtifacts === true) conditions.push('artifact_agg.artifact_count > 0');
+      if (query.hasArtifacts === false)
+        conditions.push('COALESCE(artifact_agg.artifact_count, 0) = 0');
+      if (query.profileNeedsReview !== undefined) {
+        values.push(query.profileNeedsReview);
+        conditions.push(`p.profile_needs_review = $${values.length}`);
+      }
       if (query.cursor) {
         let cursor: [string, string];
         try {
@@ -199,6 +212,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
                 COALESCE(artifact_agg.artifact_count, 0)::text AS artifact_count,
                 latest.score AS latest_score,
                 COALESCE(duplicates.has_duplicate, false) AS has_duplicate,
+                p.profile_needs_review, p.profile_review_reason,
                 EXISTS (
                   SELECT 1 FROM external_identities identity
                    WHERE identity.person_id IN ${clusterMemberIdsSql}
@@ -483,6 +497,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
         `SELECT p.id, p.canonical_full_name, p.normalized_full_name,
                 p.last_name, p.first_name, p.patronymic, p.activation_state,
                 ${LIVE_ACTIVITY_SQL} AS live_activity_status, p.last_artifact_at, p.notes,
+                p.profile_needs_review, p.profile_review_reason,
                 p.lifecycle_data_state, p.activated_at, p.next_status_transition_at, p.version,
                 affiliation.organization_name, affiliation.faculty,
                 contact.primary_contact, owner.display_name AS owner_name,
@@ -522,6 +537,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
         sources,
         tags,
         participations,
+        projects,
         marketingConsent,
       ] = await Promise.all([
         app.pool.query(
@@ -541,7 +557,27 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
           [canonical],
         ),
         app.pool.query(
-          `SELECT a.id, a.title, a.event_id, at.name AS type_name, a.status, av.id AS version_id, av.version_number, av.status AS version_status, av.submitted_at, ar.score, COALESCE(jsonb_agg(DISTINCT jsonb_build_object('id', author.id, 'name', author.canonical_full_name)) FILTER (WHERE author.id IS NOT NULL AND avc.contribution_role = 'AUTHOR'), '[]') AS authors FROM artifacts a JOIN artifact_types at ON at.id = a.type_id LEFT JOIN LATERAL (SELECT v.* FROM artifact_versions v WHERE v.artifact_id = a.id AND v.status <> 'VOIDED' ORDER BY v.version_number DESC LIMIT 1) av ON true LEFT JOIN artifact_version_contributors avc ON avc.artifact_version_id = av.id LEFT JOIN persons contributor ON contributor.id = avc.person_id LEFT JOIN persons author ON author.id = COALESCE(contributor.merged_into_person_id, contributor.id) LEFT JOIN artifact_review_selections ars ON ars.artifact_version_id = av.id LEFT JOIN artifact_reviews ar ON ar.id = ars.current_final_review_id WHERE a.archived_at IS NULL AND a.status <> 'VOIDED' AND EXISTS (SELECT 1 FROM artifact_version_contributors own JOIN artifact_versions ownv ON ownv.id = own.artifact_version_id WHERE ownv.artifact_id = a.id AND ownv.status <> 'VOIDED' AND own.person_id IN ${clusterSql}) GROUP BY a.id, at.name, av.id, av.version_number, av.status, av.submitted_at, ar.score ORDER BY av.submitted_at DESC NULLS LAST`,
+          `SELECT a.id, a.title, a.event_id, event.name AS event_name,
+                  a.project_id, project.name AS project_name,
+                  at.name AS type_name, a.status, av.id AS version_id,
+                  av.version_number, av.status AS version_status, av.submitted_at,
+                  ar.score, ar.decision, ar.reviewed_at,
+                  COALESCE(jsonb_agg(DISTINCT jsonb_build_object('id', author.id, 'name', author.canonical_full_name)) FILTER (WHERE author.id IS NOT NULL AND avc.contribution_role = 'AUTHOR'), '[]') AS authors
+             FROM artifacts a
+             JOIN artifact_types at ON at.id = a.type_id
+             LEFT JOIN events event ON event.id = a.event_id
+             LEFT JOIN projects project ON project.id = a.project_id
+             LEFT JOIN LATERAL (SELECT v.* FROM artifact_versions v WHERE v.artifact_id = a.id AND v.status <> 'VOIDED' ORDER BY v.version_number DESC LIMIT 1) av ON true
+             LEFT JOIN artifact_version_contributors avc ON avc.artifact_version_id = av.id
+             LEFT JOIN persons contributor ON contributor.id = avc.person_id
+             LEFT JOIN persons author ON author.id = COALESCE(contributor.merged_into_person_id, contributor.id)
+             LEFT JOIN artifact_review_selections ars ON ars.artifact_version_id = av.id
+             LEFT JOIN artifact_reviews ar ON ar.id = ars.current_final_review_id
+            WHERE a.archived_at IS NULL AND a.status <> 'VOIDED'
+              AND EXISTS (SELECT 1 FROM artifact_version_contributors own JOIN artifact_versions ownv ON ownv.id = own.artifact_version_id WHERE ownv.artifact_id = a.id AND ownv.status <> 'VOIDED' AND own.person_id IN ${clusterSql})
+            GROUP BY a.id, event.name, project.name, at.name, av.id, av.version_number,
+                     av.status, av.submitted_at, ar.score, ar.decision, ar.reviewed_at
+            ORDER BY av.submitted_at DESC NULLS LAST`,
           [canonical],
         ),
         app.pool.query(
@@ -568,6 +604,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
         app.pool.query(
           `SELECT ep.id AS participation_id, ep.registered_at, ep.decision, ep.decision_at,
                   ep.attendance, ep.attended_at, ep.data_origin,
+                  ep.result,
                   e.id AS event_id, e.name AS event_name, e.status AS event_status,
                   e.starts_at, e.ends_at,
                   COALESCE(provenance.sources, '[]'::jsonb) AS sources,
@@ -616,6 +653,29 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
                      e.name, ep.id`,
           [canonical],
         ),
+        app.pool.query(
+          `SELECT DISTINCT ON (project.id)
+                  project.id, project.name, project.description, project.status,
+                  project.starts_at, project.ends_at, membership.role,
+                  membership.joined_at,
+                  (SELECT count(*) FROM project_memberships project_member
+                    WHERE project_member.project_id = project.id
+                      AND project_member.archived_at IS NULL)::text AS member_count,
+                  (SELECT count(*) FROM artifacts artifact
+                    WHERE artifact.project_id = project.id
+                      AND artifact.archived_at IS NULL
+                      AND artifact.status <> 'VOIDED')::text AS artifact_count,
+                  (SELECT count(*) FROM event_project_participations event_link
+                    WHERE event_link.project_id = project.id
+                      AND event_link.archived_at IS NULL)::text AS event_count
+             FROM project_memberships membership
+             JOIN projects project ON project.id = membership.project_id
+            WHERE membership.person_id IN ${clusterSql}
+              AND membership.archived_at IS NULL
+              AND project.archived_at IS NULL
+            ORDER BY project.id, membership.updated_at DESC`,
+          [canonical],
+        ),
         // Действует последняя запись по каждой цели: отзыв согласия перекрывает выданное.
         app.pool.query<{ purpose: string; status: string; recorded_at: Date }>(
           `SELECT DISTINCT ON (purpose) purpose, status, recorded_at
@@ -631,12 +691,17 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
         title: item.title,
         typeName: item.type_name,
         eventId: item.event_id,
+        eventName: item.event_name,
+        projectId: item.project_id,
+        projectName: item.project_name,
         status: item.status,
         latestVersionId: item.version_id,
         latestVersionNumber: item.version_number,
         latestVersionStatus: item.version_status,
         submittedAt: item.submitted_at?.toISOString() ?? null,
         score: item.score,
+        decision: item.decision,
+        reviewedAt: item.reviewed_at?.toISOString() ?? null,
         authors: item.authors,
       }));
       const eventMap = new Map<
@@ -674,6 +739,7 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
           attendance: item.attendance,
           attendedAt: item.attended_at?.toISOString() ?? null,
           dataOrigin: item.data_origin,
+          result: item.result,
           comments: item.comments,
           sources: item.sources,
         });
@@ -698,6 +764,19 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
         affiliations: affiliations.rows,
         artifacts: mappedArtifacts,
         events: [...eventMap.values()],
+        projects: projects.rows.map((item) => ({
+          id: item.id,
+          name: item.name,
+          description: item.description,
+          status: item.status,
+          startsAt: item.starts_at?.toISOString() ?? null,
+          endsAt: item.ends_at?.toISOString() ?? null,
+          role: item.role,
+          joinedAt: item.joined_at?.toISOString() ?? null,
+          memberCount: Number(item.member_count),
+          artifactCount: Number(item.artifact_count),
+          eventCount: Number(item.event_count),
+        })),
         tasks: tasks.rows.map((item) => ({
           id: item.id,
           title: item.title,
@@ -719,6 +798,173 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
           email: consentStatus(marketingConsent.rows, 'MARKETING_EMAIL'),
         },
       };
+    },
+  );
+
+  app.get(
+    '/people/:id/timeline',
+    {
+      preHandler: app.requirePermission(Permissions.PEOPLE_READ),
+      schema: {
+        tags: ['Участники'],
+        summary: 'Единая лента взаимодействий участника',
+        params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
+      },
+    },
+    async (request) => {
+      const canonical = await resolveCanonicalId(app, (request.params as { id: string }).id);
+      const clusterSql = `(SELECT id FROM persons WHERE id = $1 OR merged_into_person_id = $1)`;
+      const [interactions, events, artifacts, tasks] = await Promise.all([
+        app.pool.query(
+          `SELECT interaction.id, interaction.occurred_at, interaction.channel,
+                  interaction.direction, interaction.outcome, interaction.comment,
+                  interaction.next_contact_at, interaction.version,
+                  responsible.id AS responsible_user_id,
+                  responsible.display_name AS responsible_name,
+                  creator.display_name AS created_by_name,
+                  COALESCE(attachments.items, '[]'::jsonb) AS attachments
+             FROM interactions interaction
+             LEFT JOIN app_users responsible ON responsible.id = interaction.responsible_user_id
+             LEFT JOIN app_users creator ON creator.id = interaction.created_by_user_id
+             LEFT JOIN LATERAL (
+               SELECT jsonb_agg(jsonb_build_object(
+                        'id', file.id,
+                        'fileName', file.original_filename,
+                        'sizeBytes', file.size_bytes,
+                        'status', file.status
+                      ) ORDER BY attachment.created_at, attachment.id) AS items
+                 FROM interaction_attachments attachment
+                 JOIN file_objects file ON file.id = attachment.file_object_id
+                WHERE attachment.interaction_id = interaction.id
+             ) attachments ON true
+            WHERE interaction.person_id IN ${clusterSql}
+              AND interaction.archived_at IS NULL`,
+          [canonical],
+        ),
+        app.pool.query(
+          `SELECT participation.id, event.id AS event_id, event.name AS event_name,
+                  COALESCE(event.starts_at, participation.attended_at,
+                           participation.registered_at, participation.created_at) AS occurred_at,
+                  participation.decision, participation.attendance, participation.result
+             FROM event_participations participation
+             JOIN events event ON event.id = participation.event_id
+            WHERE participation.person_id IN ${clusterSql}
+              AND participation.archived_at IS NULL AND event.archived_at IS NULL`,
+          [canonical],
+        ),
+        app.pool.query(
+          `SELECT version.id, artifact.id AS artifact_id, artifact.title,
+                  type.name AS type_name, event.id AS event_id, event.name AS event_name,
+                  version.submitted_at AS occurred_at, review.score, review.decision,
+                  review.reviewed_at
+             FROM artifact_versions version
+             JOIN artifacts artifact ON artifact.id = version.artifact_id
+             JOIN artifact_types type ON type.id = artifact.type_id
+             JOIN artifact_version_contributors contributor
+               ON contributor.artifact_version_id = version.id
+             LEFT JOIN events event ON event.id = artifact.event_id
+             LEFT JOIN artifact_review_selections selection
+               ON selection.artifact_version_id = version.id
+             LEFT JOIN artifact_reviews review
+               ON review.id = selection.current_final_review_id
+            WHERE contributor.person_id IN ${clusterSql}
+              AND contributor.contribution_role = 'AUTHOR'
+              AND version.status = 'SUBMITTED'
+              AND artifact.status <> 'VOIDED' AND artifact.archived_at IS NULL`,
+          [canonical],
+        ),
+        app.pool.query(
+          `SELECT task.id, task.title, task.status, task.created_at,
+                  task.completed_at, task.result, task.due_at,
+                  assignee.display_name AS assignee_name
+             FROM tasks task
+             LEFT JOIN app_users assignee ON assignee.id = task.assignee_user_id
+            WHERE task.person_id IN ${clusterSql} AND task.archived_at IS NULL`,
+          [canonical],
+        ),
+      ]);
+
+      const items: Array<Record<string, unknown> & { occurredAt: string }> = [];
+      for (const item of interactions.rows) {
+        items.push({
+          kind: 'INTERACTION',
+          id: item.id,
+          occurredAt: item.occurred_at.toISOString(),
+          channel: item.channel,
+          direction: item.direction,
+          outcome: item.outcome,
+          comment: item.comment,
+          nextContactAt: item.next_contact_at?.toISOString() ?? null,
+          responsibleUserId: item.responsible_user_id,
+          responsibleName: item.responsible_name,
+          createdByName: item.created_by_name,
+          attachments: item.attachments,
+          version: Number(item.version),
+        });
+      }
+      for (const item of events.rows) {
+        items.push({
+          kind: 'EVENT',
+          id: item.id,
+          occurredAt: item.occurred_at.toISOString(),
+          eventId: item.event_id,
+          eventName: item.event_name,
+          decision: item.decision,
+          attendance: item.attendance,
+          result: item.result,
+        });
+      }
+      for (const item of artifacts.rows) {
+        items.push({
+          kind: 'ARTIFACT',
+          id: item.id,
+          occurredAt: item.occurred_at.toISOString(),
+          artifactId: item.artifact_id,
+          title: item.title,
+          typeName: item.type_name,
+          eventId: item.event_id,
+          eventName: item.event_name,
+          score: item.score,
+          decision: item.decision,
+        });
+        if (item.reviewed_at) {
+          items.push({
+            kind: 'REVIEW',
+            id: `review:${item.id}`,
+            occurredAt: item.reviewed_at.toISOString(),
+            artifactVersionId: item.id,
+            artifactId: item.artifact_id,
+            title: item.title,
+            score: item.score,
+            decision: item.decision,
+          });
+        }
+      }
+      for (const item of tasks.rows) {
+        items.push({
+          kind: 'TASK_CREATED',
+          id: `created:${item.id}`,
+          occurredAt: item.created_at.toISOString(),
+          taskId: item.id,
+          title: item.title,
+          status: item.status,
+          dueAt: item.due_at?.toISOString() ?? null,
+          assigneeName: item.assignee_name,
+        });
+        if (item.completed_at) {
+          items.push({
+            kind: 'TASK_COMPLETED',
+            id: `completed:${item.id}`,
+            occurredAt: item.completed_at.toISOString(),
+            taskId: item.id,
+            title: item.title,
+            result: item.result,
+            assigneeName: item.assignee_name,
+          });
+        }
+      }
+      items.sort((left, right) => right.occurredAt.localeCompare(left.occurredAt));
+      return { items: items.slice(0, 300) };
     },
   );
 
@@ -827,6 +1073,8 @@ export async function registerPeopleRoutes(app: FastifyInstance): Promise<void> 
                   last_name = $4,
                   first_name = $5,
                   patronymic = $6,
+                  profile_needs_review = false,
+                  profile_review_reason = NULL,
                   owner_user_id = $7,
                   notes = CASE WHEN $8 THEN $9 ELSE notes END,
                   version = version + 1,
@@ -1629,6 +1877,8 @@ function mapPersonSummary(row: PersonListRow, includeContact = true) {
     latestArtifactScore: row.latest_score,
     hasDuplicateCandidate: row.has_duplicate,
     fromBot: row.from_bot,
+    profileNeedsReview: row.profile_needs_review,
+    profileReviewReason: row.profile_review_reason,
   };
 }
 

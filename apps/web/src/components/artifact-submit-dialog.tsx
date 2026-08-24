@@ -25,7 +25,7 @@ import {
 } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { api, apiErrorMessage, formatBytes, formatDate } from '@/lib/api';
-import type { PersonEventSummary } from '@/lib/types';
+import type { PersonEventSummary, PersonProjectSummary } from '@/lib/types';
 import { UPLOAD_ACCEPT, uploadFile } from '@/lib/upload';
 
 const ARTIFACT_TYPES = [
@@ -78,6 +78,7 @@ const ARTIFACT_TYPES = [
 
 /** Отсутствие привязки к мероприятию: Radix Select не принимает пустую строку. */
 const NO_EVENT = 'NONE';
+const NO_PROJECT = 'NONE';
 
 function toLocalDateTimeValue(date: Date): string {
   const pad = (value: number) => String(value).padStart(2, '0');
@@ -92,17 +93,24 @@ function toLocalDateTimeValue(date: Date): string {
 export function ArtifactSubmitDialog({
   personId,
   events,
+  projects = [],
+  defaultEventId,
+  defaultProjectId,
   onClose,
   onCreated,
 }: {
   personId: string;
   events: PersonEventSummary[];
+  projects?: PersonProjectSummary[];
+  defaultEventId?: string | null;
+  defaultProjectId?: string | null;
   onClose: () => void;
   onCreated: () => void | Promise<void>;
 }) {
   const [title, setTitle] = useState('');
   const [type, setType] = useState('');
-  const [eventId, setEventId] = useState(NO_EVENT);
+  const [eventId, setEventId] = useState(defaultEventId ?? NO_EVENT);
+  const [projectId, setProjectId] = useState(defaultProjectId ?? NO_PROJECT);
   const [contentType, setContentType] = useState<'TEXT' | 'EXTERNAL_URL' | 'FILE'>('TEXT');
   const [content, setContent] = useState('');
   const [files, setFiles] = useState<{ id: string; name: string; sizeBytes: number }[]>([]);
@@ -172,6 +180,7 @@ export function ArtifactSubmitDialog({
             title,
             typeCode: type,
             eventId: eventId === NO_EVENT ? undefined : eventId,
+            projectId: projectId === NO_PROJECT ? undefined : projectId,
           }),
         });
         artifactId = artifact.id;
@@ -231,6 +240,29 @@ export function ArtifactSubmitDialog({
                 required
                 value={title}
               />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label>Проект (необязательно)</Label>
+              {projects.length ? (
+                <Select disabled={artifactLocked} onValueChange={setProjectId} value={projectId}>
+                  <SelectTrigger aria-label="Выбрать проект">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NO_PROJECT}>Без привязки к проекту</SelectItem>
+                    {projects.map((project) => (
+                      <SelectItem key={project.id} value={project.id}>
+                        {project.name} · {project.role}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : (
+                <p className="text-muted-foreground text-xs">
+                  Участник пока не состоит ни в одном проекте.
+                </p>
+              )}
             </div>
 
             <div className="space-y-1.5">

@@ -138,6 +138,7 @@ export const interactionChannelEnum = pgEnum('interaction_channel', [
   'TELEGRAM',
   'MAX',
   'IN_PERSON',
+  'NOTE',
   'OTHER',
 ]);
 export const interactionDirectionEnum = pgEnum('interaction_direction', [
@@ -408,6 +409,8 @@ export const persons = pgTable(
     firstName: text('first_name'),
     patronymic: text('patronymic'),
     notes: text('notes'),
+    profileNeedsReview: boolean('profile_needs_review').notNull().default(false),
+    profileReviewReason: text('profile_review_reason'),
     ownerUserId: uuid('owner_user_id').references(() => appUsers.id, { onDelete: 'set null' }),
     lifecycleDataState: lifecycleDataStateEnum('lifecycle_data_state')
       .notNull()
@@ -434,6 +437,9 @@ export const persons = pgTable(
     index('persons_normalized_full_name_idx').on(table.normalizedFullName),
     index('persons_name_parts_idx').on(table.lastName, table.firstName, table.patronymic),
     index('persons_owner_idx').on(table.ownerUserId),
+    index('persons_profile_review_idx')
+      .on(table.profileNeedsReview, table.createdAt)
+      .where(sql`${table.archivedAt} is null and ${table.mergedIntoPersonId} is null`),
     index('persons_lifecycle_queue_idx').on(table.activityStatus, table.nextStatusTransitionAt),
     index('persons_merged_into_idx').on(table.mergedIntoPersonId),
     check(
@@ -443,10 +449,22 @@ export const persons = pgTable(
     check(
       'persons_active_russian_fio_check',
       sql`${table.archivedAt} is not null or ${table.mergedIntoPersonId} is not null or (
+        ${table.profileNeedsReview}
+        and ${table.canonicalFullName} = btrim(${table.canonicalFullName})
+        and char_length(${table.canonicalFullName}) between 1 and 500
+      ) or (
         ${table.lastName} ~ '^[А-Яа-яЁё]+(-[А-Яа-яЁё]+)*$'
         and ${table.firstName} ~ '^[А-Яа-яЁё]+(-[А-Яа-яЁё]+)*$'
         and ${table.patronymic} ~ '^[А-Яа-яЁё]+(-[А-Яа-яЁё]+)*$'
         and ${table.canonicalFullName} = ${table.lastName} || ' ' || ${table.firstName} || ' ' || ${table.patronymic}
+      )`,
+    ),
+    check(
+      'persons_profile_review_reason_check',
+      sql`not ${table.profileNeedsReview} or (
+        ${table.profileReviewReason} is not null
+        and ${table.profileReviewReason} = btrim(${table.profileReviewReason})
+        and char_length(${table.profileReviewReason}) between 1 and 1000
       )`,
     ),
     check(
@@ -726,6 +744,7 @@ export const eventParticipations = pgTable(
     decisionAt: timestamptz('decision_at'),
     attendance: attendanceStatusEnum('attendance').notNull().default('UNKNOWN'),
     attendedAt: timestamptz('attended_at'),
+    result: text('result'),
     dataOrigin: dataOriginEnum('data_origin').notNull(),
     ...editable(),
   },
@@ -734,6 +753,10 @@ export const eventParticipations = pgTable(
       .on(table.personId, table.eventId)
       .where(sql`${table.archivedAt} is null`),
     index('event_participations_event_idx').on(table.eventId),
+    check(
+      'event_participations_result_check',
+      sql`${table.result} is null or (${table.result} = btrim(${table.result}) and char_length(${table.result}) between 1 and 10000)`,
+    ),
   ],
 );
 
@@ -849,6 +872,66 @@ export const projectTeamLinks = pgTable(
     check(
       'project_team_links_period_check',
       sql`${table.validTo} is null or ${table.validFrom} is null or ${table.validTo} > ${table.validFrom}`,
+    ),
+  ],
+);
+
+export const projectMemberships = pgTable(
+  'project_memberships',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    personId: uuid('person_id')
+      .notNull()
+      .references(() => persons.id, { onDelete: 'cascade' }),
+    role: text('role').notNull().default('Участник'),
+    joinedAt: timestamptz('joined_at').notNull().defaultNow(),
+    dataOrigin: dataOriginEnum('data_origin').notNull().default('LIVE'),
+    ...editable(),
+  },
+  (table) => [
+    uniqueIndex('project_memberships_project_person_uidx')
+      .on(table.projectId, table.personId)
+      .where(sql`${table.archivedAt} is null`),
+    index('project_memberships_person_idx')
+      .on(table.personId, table.projectId)
+      .where(sql`${table.archivedAt} is null`),
+    check(
+      'project_memberships_role_check',
+      sql`${table.role} = btrim(${table.role}) and char_length(${table.role}) between 1 and 500`,
+    ),
+  ],
+);
+
+export const eventProjectParticipations = pgTable(
+  'event_project_participations',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    eventId: uuid('event_id')
+      .notNull()
+      .references(() => events.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    registeredAt: timestamptz('registered_at').notNull().defaultNow(),
+    decision: participationDecisionEnum('decision').notNull().default('UNKNOWN'),
+    attendance: attendanceStatusEnum('attendance').notNull().default('UNKNOWN'),
+    result: text('result'),
+    dataOrigin: dataOriginEnum('data_origin').notNull().default('LIVE'),
+    ...editable(),
+  },
+  (table) => [
+    uniqueIndex('event_project_participations_event_project_uidx')
+      .on(table.eventId, table.projectId)
+      .where(sql`${table.archivedAt} is null`),
+    index('event_project_participations_project_idx')
+      .on(table.projectId, table.eventId)
+      .where(sql`${table.archivedAt} is null`),
+    check(
+      'event_project_participations_result_check',
+      sql`${table.result} is null or (${table.result} = btrim(${table.result}) and char_length(${table.result}) between 1 and 10000)`,
     ),
   ],
 );
@@ -1209,11 +1292,18 @@ export const interactions = pgTable(
     createdByUserId: uuid('created_by_user_id')
       .notNull()
       .references(() => appUsers.id, { onDelete: 'restrict' }),
+    responsibleUserId: uuid('responsible_user_id').references(() => appUsers.id, {
+      onDelete: 'set null',
+    }),
+    nextContactAt: timestamptz('next_contact_at'),
     ...editable(),
   },
   (table) => [
     index('interactions_person_timeline_idx').on(table.personId, table.occurredAt),
     index('interactions_project_idx').on(table.projectId),
+    index('interactions_responsible_next_idx')
+      .on(table.responsibleUserId, table.nextContactAt)
+      .where(sql`${table.archivedAt} is null`),
   ],
 );
 
@@ -1288,45 +1378,27 @@ export const taskAttachments = pgTable(
   ],
 );
 
-export const personProgramResults = pgTable(
-  'person_program_results',
+export const interactionAttachments = pgTable(
+  'interaction_attachments',
   {
     id: uuid('id').primaryKey().defaultRandom(),
-    personId: uuid('person_id')
+    interactionId: uuid('interaction_id')
       .notNull()
-      .references(() => persons.id, { onDelete: 'cascade' }),
-    programCode: text('program_code').notNull(),
-    status: text('status').notNull(),
-    result: text('result'),
-    occurredAt: timestamptz('occurred_at'),
-    recordedByUserId: uuid('recorded_by_user_id').references(() => appUsers.id, {
+      .references(() => interactions.id, { onDelete: 'cascade' }),
+    fileObjectId: uuid('file_object_id')
+      .notNull()
+      .references(() => fileObjects.id, { onDelete: 'restrict' }),
+    uploadedByUserId: uuid('uploaded_by_user_id').references(() => appUsers.id, {
       onDelete: 'set null',
     }),
-    ...editable(),
+    ...timestamps(),
   },
   (table) => [
-    uniqueIndex('person_program_results_person_program_uidx')
-      .on(table.personId, table.programCode)
-      .where(sql`${table.archivedAt} is null`),
-    index('person_program_results_program_status_idx')
-      .on(table.programCode, table.status, table.updatedAt)
-      .where(sql`${table.archivedAt} is null`),
-    check(
-      'person_program_results_program_check',
-      sql`${table.programCode} in ('SVYA', 'BI_ACADEMPARK')`,
+    uniqueIndex('interaction_attachments_interaction_file_uidx').on(
+      table.interactionId,
+      table.fileObjectId,
     ),
-    check(
-      'person_program_results_status_check',
-      sql`${table.status} in ('PLANNED', 'APPLIED', 'INTERVIEW', 'PARTICIPATED', 'FINALIST', 'WINNER', 'RESIDENT', 'NOT_SELECTED', 'REJECTED', 'WITHDRAWN')`,
-    ),
-    check(
-      'person_program_results_compatibility_check',
-      sql`(${table.programCode} = 'SVYA' and ${table.status} in ('PLANNED', 'PARTICIPATED', 'FINALIST', 'WINNER', 'NOT_SELECTED', 'WITHDRAWN')) or (${table.programCode} = 'BI_ACADEMPARK' and ${table.status} in ('PLANNED', 'APPLIED', 'INTERVIEW', 'RESIDENT', 'REJECTED', 'WITHDRAWN'))`,
-    ),
-    check(
-      'person_program_results_result_check',
-      sql`${table.result} is null or (${table.result} = btrim(${table.result}) and char_length(${table.result}) between 1 and 10000)`,
-    ),
+    index('interaction_attachments_interaction_idx').on(table.interactionId, table.createdAt),
   ],
 );
 

@@ -102,7 +102,6 @@ describe('event creation route', () => {
           null,
           'Demo day',
           'demo day',
-          null,
           'ACTIVE',
           new Date('2026-08-10T04:00:00.000Z'),
           new Date('2026-08-10T08:00:00.000Z'),

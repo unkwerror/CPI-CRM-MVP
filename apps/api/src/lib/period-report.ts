@@ -11,13 +11,10 @@ export interface OperationalPeriodReport {
   people: {
     newPeople: number;
     newFromBot: number;
-    activated: number;
     total: number;
     totalFromBot: number;
-    active: number;
-    medium: number;
-    inactive: number;
-    unknown: number;
+    artifactSendersEver: number;
+    profilesNeedReview: number;
   };
   artifacts: {
     submittedVersions: number;
@@ -46,23 +43,11 @@ export interface OperationalPeriodReport {
     completed: number;
     overdueNow: number;
   };
-  programs: {
-    svya: { tracked: number; successful: number; byStatus: StatusCount[] };
-    biAcadempark: { tracked: number; successful: number; byStatus: StatusCount[] };
+  interactions: {
+    recorded: number;
+    followUpsDue: number;
   };
 }
-
-interface StatusCount {
-  status: string;
-  count: number;
-}
-
-const LIVE_ACTIVITY_SQL = `CASE
-  WHEN person.activation_state <> 'ACTIVATED' OR person.last_artifact_at IS NULL THEN 'UNKNOWN'
-  WHEN now() <= person.last_artifact_at + make_interval(hours => rules.active_window_hours) THEN 'ACTIVE'
-  WHEN now() <= person.last_artifact_at + make_interval(hours => rules.inactive_after_hours) THEN 'MEDIUM'
-  ELSE 'INACTIVE'
-END`;
 
 export function resolvePeriod(input: {
   weeks?: number;
@@ -98,22 +83,18 @@ export async function loadOperationalPeriodReport(
   bounds: PeriodBounds,
 ): Promise<OperationalPeriodReport> {
   const parameters = [organizationId, bounds.from, bounds.to];
-  const [people, artifacts, artifactTypes, artifactSources, events, tasks, programStatuses] =
+  const [people, artifacts, artifactTypes, artifactSources, events, tasks, interactions] =
     await Promise.all([
       pool.query<{
         new_people: string;
         new_from_bot: string;
-        activated: string;
         total: string;
         total_from_bot: string;
-        active: string;
-        medium: string;
-        inactive: string;
-        unknown: string;
+        artifact_senders_ever: string;
+        profiles_need_review: string;
       }>(
         `WITH canonical AS (
-           SELECT person.id, person.created_at, person.activated_at,
-                  ${LIVE_ACTIVITY_SQL} AS activity,
+           SELECT person.id, person.created_at, person.profile_needs_review,
                   EXISTS (
                     SELECT 1 FROM external_identities identity
                      WHERE identity.person_id IN (
@@ -122,22 +103,30 @@ export async function loadOperationalPeriodReport(
                            )
                        AND identity.source_namespace IN ('locker.user', 'locker.telegram')
                        AND identity.archived_at IS NULL
-                  ) AS from_bot
+                  ) AS from_bot,
+                  EXISTS (
+                    SELECT 1
+                      FROM artifact_version_contributors contributor
+                      JOIN artifact_versions version ON version.id = contributor.artifact_version_id
+                      JOIN artifacts artifact ON artifact.id = version.artifact_id
+                     WHERE contributor.person_id IN (
+                             SELECT member.id FROM persons member
+                              WHERE member.id = person.id OR member.merged_into_person_id = person.id
+                           )
+                       AND contributor.contribution_role = 'AUTHOR'
+                       AND version.status = 'SUBMITTED'
+                       AND artifact.status <> 'VOIDED' AND artifact.archived_at IS NULL
+                  ) AS has_artifacts
              FROM persons person
-             JOIN organization_settings settings ON settings.organization_id = person.organization_id
-             JOIN lifecycle_rule_sets rules ON rules.id = settings.current_lifecycle_rule_set_id
             WHERE person.organization_id = $1 AND person.archived_at IS NULL
               AND person.merged_into_person_id IS NULL
          )
          SELECT count(*) FILTER (WHERE created_at >= $2 AND created_at < $3)::text AS new_people,
                 count(*) FILTER (WHERE created_at >= $2 AND created_at < $3 AND from_bot)::text AS new_from_bot,
-                count(*) FILTER (WHERE activated_at >= $2 AND activated_at < $3)::text AS activated,
                 count(*)::text AS total,
                 count(*) FILTER (WHERE from_bot)::text AS total_from_bot,
-                count(*) FILTER (WHERE activity = 'ACTIVE')::text AS active,
-                count(*) FILTER (WHERE activity = 'MEDIUM')::text AS medium,
-                count(*) FILTER (WHERE activity = 'INACTIVE')::text AS inactive,
-                count(*) FILTER (WHERE activity = 'UNKNOWN')::text AS unknown
+                count(*) FILTER (WHERE has_artifacts)::text AS artifact_senders_ever,
+                count(*) FILTER (WHERE profile_needs_review)::text AS profiles_need_review
            FROM canonical`,
         parameters,
       ),
@@ -266,23 +255,18 @@ export async function loadOperationalPeriodReport(
             AND COALESCE(person.organization_id, project.organization_id) = $1`,
         parameters,
       ),
-      pool.query<{ program_code: 'SVYA' | 'BI_ACADEMPARK'; status: string; count: string }>(
-        `WITH current_results AS (
-           SELECT DISTINCT ON (canonical.id, result.program_code)
-                  result.program_code, result.status, result.updated_at
-             FROM person_program_results result
-             JOIN persons member ON member.id = result.person_id
-             JOIN persons canonical
-               ON canonical.id = COALESCE(member.merged_into_person_id, member.id)
-            WHERE canonical.organization_id = $1 AND canonical.archived_at IS NULL
-              AND member.archived_at IS NULL AND result.archived_at IS NULL
-            ORDER BY canonical.id, result.program_code, result.updated_at DESC, result.id DESC
-         )
-         SELECT program_code, status, count(*)::text AS count
-           FROM current_results
-          WHERE updated_at >= $2 AND updated_at < $3
-          GROUP BY program_code, status
-          ORDER BY program_code, status`,
+      pool.query<{ recorded: string; follow_ups_due: string }>(
+        `SELECT count(*) FILTER (
+                  WHERE interaction.occurred_at >= $2 AND interaction.occurred_at < $3
+                )::text AS recorded,
+                count(*) FILTER (
+                  WHERE interaction.next_contact_at < now()
+                )::text AS follow_ups_due
+           FROM interactions interaction
+           JOIN persons member ON member.id = interaction.person_id
+           JOIN persons canonical ON canonical.id = COALESCE(member.merged_into_person_id, member.id)
+          WHERE canonical.organization_id = $1
+            AND interaction.archived_at IS NULL AND canonical.archived_at IS NULL`,
         parameters,
       ),
     ]);
@@ -291,18 +275,7 @@ export async function loadOperationalPeriodReport(
   const artifactRow = artifacts.rows[0]!;
   const eventRow = events.rows[0]!;
   const taskRow = tasks.rows[0]!;
-  const program = (code: 'SVYA' | 'BI_ACADEMPARK', successful: readonly string[]) => {
-    const byStatus = programStatuses.rows
-      .filter((row) => row.program_code === code)
-      .map((row) => ({ status: row.status, count: Number(row.count) }));
-    return {
-      tracked: byStatus.reduce((sum, item) => sum + item.count, 0),
-      successful: byStatus
-        .filter((item) => successful.includes(item.status))
-        .reduce((sum, item) => sum + item.count, 0),
-      byStatus,
-    };
-  };
+  const interactionRow = interactions.rows[0]!;
 
   return {
     period: {
@@ -313,13 +286,10 @@ export async function loadOperationalPeriodReport(
     people: {
       newPeople: Number(peopleRow.new_people),
       newFromBot: Number(peopleRow.new_from_bot),
-      activated: Number(peopleRow.activated),
       total: Number(peopleRow.total),
       totalFromBot: Number(peopleRow.total_from_bot),
-      active: Number(peopleRow.active),
-      medium: Number(peopleRow.medium),
-      inactive: Number(peopleRow.inactive),
-      unknown: Number(peopleRow.unknown),
+      artifactSendersEver: Number(peopleRow.artifact_senders_ever),
+      profilesNeedReview: Number(peopleRow.profiles_need_review),
     },
     artifacts: {
       submittedVersions: Number(artifactRow.submitted_versions),
@@ -351,9 +321,9 @@ export async function loadOperationalPeriodReport(
       completed: Number(taskRow.completed),
       overdueNow: Number(taskRow.overdue_now),
     },
-    programs: {
-      svya: program('SVYA', ['FINALIST', 'WINNER']),
-      biAcadempark: program('BI_ACADEMPARK', ['RESIDENT']),
+    interactions: {
+      recorded: Number(interactionRow.recorded),
+      followUpsDue: Number(interactionRow.follow_ups_due),
     },
   };
 }
@@ -380,14 +350,14 @@ export function operationalReportSvg(report: OperationalPeriodReport): string {
     ],
     ['Задач завершено', report.tasks.completed, `просрочено сейчас: ${report.tasks.overdueNow}`],
     [
-      'СВЯ',
-      report.programs.svya.tracked,
-      `финалисты / победители: ${report.programs.svya.successful}`,
+      'Взаимодействия',
+      report.interactions.recorded,
+      `следующих контактов просрочено: ${report.interactions.followUpsDue}`,
     ],
     [
-      'БИ Академпарка',
-      report.programs.biAcadempark.tracked,
-      `резиденты: ${report.programs.biAcadempark.successful}`,
+      'Отправляли артефакты',
+      report.people.artifactSendersEver,
+      `нужно уточнить профилей: ${report.people.profilesNeedReview}`,
     ],
   ] as const;
   const cardSvg = cards

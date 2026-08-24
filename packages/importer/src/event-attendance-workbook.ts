@@ -6,9 +6,9 @@ const MAX_ATTENDANCE_ROWS = 5_000;
 export interface AttendanceWorkbookPerson {
   readonly rowNumber: number;
   readonly rawFullName: string;
-  readonly lastName: string;
-  readonly firstName: string;
-  readonly patronymic: string;
+  readonly lastName: string | null;
+  readonly firstName: string | null;
+  readonly patronymic: string | null;
   readonly canonicalFullName: string;
   readonly normalizedFullName: string;
 }
@@ -39,6 +39,7 @@ export interface EventParticipantWorkbookArtifact {
   readonly typeName: string;
   readonly score?: number | null;
   readonly decision?: string | null;
+  readonly result?: string | null;
   readonly submittedAt?: string | null;
   readonly fileName?: string | null;
   readonly archivePath?: string | null;
@@ -47,9 +48,9 @@ export interface EventParticipantWorkbookArtifact {
 
 export interface EventParticipantWorkbookRow {
   readonly number: number;
-  readonly lastName: string;
-  readonly firstName: string;
-  readonly patronymic: string;
+  readonly lastName: string | null;
+  readonly firstName: string | null;
+  readonly patronymic: string | null;
   readonly canonicalFullName: string;
   readonly email?: string | null;
   readonly phone?: string | null;
@@ -57,6 +58,7 @@ export interface EventParticipantWorkbookRow {
   readonly telegramUserId?: string | null;
   readonly attended?: boolean | null;
   readonly decision?: string | null;
+  readonly result?: string | null;
   readonly eventName: string;
   readonly artifacts?: readonly EventParticipantWorkbookArtifact[];
 }
@@ -250,6 +252,7 @@ export async function createEventParticipantsWorkbook(input: {
     'Telegram ID',
     'Посещал мероприятие',
     'Статус заявки',
+    'Результат участия',
     'Мероприятия',
     'Артефакты',
     'Оценка',
@@ -272,6 +275,7 @@ export async function createEventParticipantsWorkbook(input: {
       safeSpreadsheetText(row.telegramUserId),
       row.attended === true ? 'Да' : row.attended === false ? 'Нет' : '',
       safeSpreadsheetText(row.decision),
+      safeSpreadsheetText(row.result),
       safeSpreadsheetText(row.eventName),
       artifactSummary(artifacts),
       scoreSummary(artifacts),
@@ -281,10 +285,10 @@ export async function createEventParticipantsWorkbook(input: {
         : '',
     ]);
     if (linkable?.archivePath) {
-      added.getCell(16).font = { color: { argb: 'FF1F5FBF' }, underline: true };
+      added.getCell(17).font = { color: { argb: 'FF1F5FBF' }, underline: true };
     }
   }
-  styleSheet(worksheet, [8, 38, 22, 20, 24, 30, 22, 24, 18, 24, 20, 42, 40, 12, 18, 34]);
+  styleSheet(worksheet, [8, 38, 22, 20, 24, 30, 22, 24, 18, 24, 20, 44, 42, 40, 12, 18, 34]);
 
   const allArtifacts = input.rows.flatMap((row) =>
     (row.artifacts ?? []).map((artifact) => ({ row, artifact })),

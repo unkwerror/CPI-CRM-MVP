@@ -12,13 +12,6 @@ import { transaction } from '../../lib/sql.js';
 import { recalculatePersonLifecycle } from '../artifacts/lifecycle-service.js';
 import { revertMergeOperation } from './revert-merge.js';
 
-const LIVE_ACTIVITY_SQL = `CASE
-  WHEN p.activation_state <> 'ACTIVATED' OR p.last_artifact_at IS NULL THEN 'UNKNOWN'
-  WHEN now() <= p.last_artifact_at + make_interval(hours => lrs.active_window_hours) THEN 'ACTIVE'
-  WHEN now() <= p.last_artifact_at + make_interval(hours => lrs.inactive_after_hours) THEN 'MEDIUM'
-  ELSE 'INACTIVE'
-END`;
-
 const TaskStatusSchema = Type.Union([
   Type.Literal('OPEN'),
   Type.Literal('IN_PROGRESS'),
@@ -37,12 +30,9 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
     async () => {
       const metrics = await app.pool.query<{
         total_people: string;
-        activated_ever: string;
-        active: string;
-        medium: string;
-        inactive: string;
-        not_activated: string;
-        unknown_legacy: string;
+        artifact_senders: string;
+        without_artifacts: string;
+        profiles_need_review: string;
         unreviewed_artifacts: string;
         duplicate_candidates: string;
         overdue_tasks: string;
@@ -51,15 +41,26 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
         event_count: string;
       }>(
         `WITH live_people AS (
-           SELECT p.id, p.activation_state, ${LIVE_ACTIVITY_SQL} AS live_activity
+           SELECT p.id, p.profile_needs_review,
+                  EXISTS (
+                    SELECT 1
+                      FROM artifact_version_contributors contributor
+                      JOIN artifact_versions version ON version.id = contributor.artifact_version_id
+                      JOIN artifacts artifact ON artifact.id = version.artifact_id
+                     WHERE contributor.person_id IN (
+                             SELECT member.id FROM persons member
+                              WHERE member.id = p.id OR member.merged_into_person_id = p.id
+                           )
+                       AND contributor.contribution_role = 'AUTHOR'
+                       AND version.status = 'SUBMITTED'
+                       AND artifact.status <> 'VOIDED' AND artifact.archived_at IS NULL
+                  ) AS has_artifacts
              FROM persons p
-             JOIN organization_settings os ON os.organization_id = p.organization_id
-             JOIN lifecycle_rule_sets lrs ON lrs.id = os.current_lifecycle_rule_set_id
             WHERE p.archived_at IS NULL AND p.merged_into_person_id IS NULL
          ), artifact_metrics AS (
            SELECT count(*) FILTER (WHERE ars.id IS NULL) AS unreviewed_artifacts,
-                  count(*) FILTER (WHERE av.qualifies_for_activity AND av.submitted_at >= now() - interval '3 weeks') AS recent_versions,
-                  count(DISTINCT COALESCE(author_person.merged_into_person_id, author_person.id)) FILTER (WHERE av.qualifies_for_activity AND av.submitted_at >= now() - interval '3 weeks' AND avc.contribution_role = 'AUTHOR') AS recent_authors
+                  count(*) FILTER (WHERE av.submitted_at >= now() - interval '3 weeks') AS recent_versions,
+                  count(DISTINCT COALESCE(author_person.merged_into_person_id, author_person.id)) FILTER (WHERE av.submitted_at >= now() - interval '3 weeks' AND avc.contribution_role = 'AUTHOR') AS recent_authors
              FROM artifact_versions av
              LEFT JOIN artifact_review_selections ars ON ars.artifact_version_id = av.id
              LEFT JOIN artifact_version_contributors avc ON avc.artifact_version_id = av.id
@@ -67,12 +68,9 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
             WHERE av.status = 'SUBMITTED'
          )
          SELECT count(*)::text AS total_people,
-                count(*) FILTER (WHERE lp.activation_state = 'ACTIVATED')::text AS activated_ever,
-                count(*) FILTER (WHERE lp.live_activity = 'ACTIVE')::text AS active,
-                count(*) FILTER (WHERE lp.live_activity = 'MEDIUM')::text AS medium,
-                count(*) FILTER (WHERE lp.live_activity = 'INACTIVE')::text AS inactive,
-                count(*) FILTER (WHERE lp.activation_state = 'NOT_ACTIVATED')::text AS not_activated,
-                count(*) FILTER (WHERE lp.activation_state = 'UNKNOWN_LEGACY')::text AS unknown_legacy,
+                count(*) FILTER (WHERE lp.has_artifacts)::text AS artifact_senders,
+                count(*) FILTER (WHERE NOT lp.has_artifacts)::text AS without_artifacts,
+                count(*) FILTER (WHERE lp.profile_needs_review)::text AS profiles_need_review,
                 (SELECT unreviewed_artifacts::text FROM artifact_metrics),
                 (SELECT count(*)::text FROM duplicate_candidates WHERE status = 'OPEN') AS duplicate_candidates,
                 (SELECT count(*)::text FROM tasks WHERE status NOT IN ('DONE', 'CANCELLED') AND due_at < now() AND archived_at IS NULL) AS overdue_tasks,
@@ -91,12 +89,9 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
       const row = metrics.rows[0];
       return {
         totalPeople: Number(row?.total_people ?? 0),
-        activatedEver: Number(row?.activated_ever ?? 0),
-        active: Number(row?.active ?? 0),
-        medium: Number(row?.medium ?? 0),
-        inactive: Number(row?.inactive ?? 0),
-        notActivated: Number(row?.not_activated ?? 0),
-        unknownLegacy: Number(row?.unknown_legacy ?? 0),
+        artifactSenders: Number(row?.artifact_senders ?? 0),
+        withoutArtifacts: Number(row?.without_artifacts ?? 0),
+        profilesNeedReview: Number(row?.profiles_need_review ?? 0),
         unreviewedArtifacts: Number(row?.unreviewed_artifacts ?? 0),
         duplicateCandidates: Number(row?.duplicate_candidates ?? 0),
         overdueTasks: Number(row?.overdue_tasks ?? 0),
@@ -492,6 +487,7 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
             Type.Literal('TELEGRAM'),
             Type.Literal('MAX'),
             Type.Literal('IN_PERSON'),
+            Type.Literal('NOTE'),
             Type.Literal('OTHER'),
           ]),
           direction: Type.Union([
@@ -502,6 +498,13 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
           occurredAt: Type.String({ format: 'date-time' }),
           outcome: Type.Optional(Type.String({ maxLength: 2000 })),
           comment: Type.Optional(Type.String({ maxLength: 10_000 })),
+          responsibleUserId: Type.Optional(Type.String({ format: 'uuid' })),
+          nextContactAt: Type.Optional(
+            Type.Union([Type.String({ format: 'date-time' }), Type.Null()]),
+          ),
+          fileObjectIds: Type.Optional(
+            Type.Array(Type.String({ format: 'uuid' }), { maxItems: 10, uniqueItems: true }),
+          ),
         }),
       },
     },
@@ -513,6 +516,9 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
         occurredAt: string;
         outcome?: string;
         comment?: string;
+        responsibleUserId?: string;
+        nextContactAt?: string | null;
+        fileObjectIds?: string[];
       };
       const result = await transaction(app.pool, async (client) => {
         const canonical = await client.query<{ id: string }>(
@@ -520,17 +526,31 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
           [body.personId],
         );
         if (!canonical.rows[0]) throw new HttpProblem(404, 'Участник не найден');
+        const responsibleUserId = body.responsibleUserId ?? request.authUser!.userId;
+        await assertActiveAssignee(client, responsibleUserId);
         const interaction = await client.query<{ id: string }>(
-          `INSERT INTO interactions (person_id, channel, direction, occurred_at, outcome, comment, created_by_user_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+          `INSERT INTO interactions
+             (person_id, channel, direction, occurred_at, outcome, comment,
+              created_by_user_id, responsible_user_id, next_contact_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           RETURNING id`,
           [
             canonical.rows[0].id,
             body.channel,
             body.direction,
             new Date(body.occurredAt),
-            body.outcome ?? null,
-            body.comment ?? null,
+            body.outcome?.trim() || null,
+            body.comment?.trim() || null,
             request.authUser!.userId,
+            responsibleUserId,
+            body.nextContactAt ? new Date(body.nextContactAt) : null,
           ],
+        );
+        await replaceInteractionAttachments(
+          client,
+          interaction.rows[0]!.id,
+          body.fileObjectIds ?? [],
+          request.authUser!.userId,
         );
         await writeAudit(client, {
           actor: request.authUser!,
@@ -543,6 +563,9 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
             channel: body.channel,
             direction: body.direction,
             occurredAt: body.occurredAt,
+            responsibleUserId,
+            nextContactAt: body.nextContactAt ?? null,
+            attachmentCount: body.fileObjectIds?.length ?? 0,
           },
         });
         return interaction.rows[0];
@@ -988,6 +1011,39 @@ async function replaceTaskAttachments(
        VALUES ($1, $2, $3)
        ON CONFLICT (task_id, file_object_id) DO NOTHING`,
       [taskId, fileId, actorUserId],
+    );
+  }
+}
+
+async function replaceInteractionAttachments(
+  client: PoolClient,
+  interactionId: string,
+  requestedIds: readonly string[],
+  actorUserId: string,
+): Promise<void> {
+  const fileIds = [...new Set(requestedIds)];
+  if (fileIds.length > 10)
+    throw new HttpProblem(400, 'К взаимодействию можно приложить не более 10 файлов');
+  if (fileIds.length > 0) {
+    const files = await client.query<{ id: string }>(
+      `SELECT file.id
+         FROM file_objects file
+        WHERE file.id = ANY($1::uuid[])
+          AND file.status = 'AVAILABLE'
+          AND file.uploaded_by_user_id = $2`,
+      [fileIds, actorUserId],
+    );
+    if (files.rows.length !== fileIds.length) {
+      throw new HttpProblem(400, 'Один из файлов взаимодействия недоступен или ещё проверяется');
+    }
+  }
+  for (const fileId of fileIds) {
+    await client.query(
+      `INSERT INTO interaction_attachments
+         (interaction_id, file_object_id, uploaded_by_user_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (interaction_id, file_object_id) DO NOTHING`,
+      [interactionId, fileId, actorUserId],
     );
   }
 }

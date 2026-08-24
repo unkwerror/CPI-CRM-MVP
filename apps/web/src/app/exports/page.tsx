@@ -134,9 +134,9 @@ export default function ExportsPage() {
               </CardHeader>
               <CardContent className="space-y-4">
                 <p className="text-muted-foreground text-[13px] leading-relaxed">
-                  ZIP содержит изображение дашборда, JSON-сводку, отдельные CSV по артефактам, новым
-                  участникам, задачам, мероприятиям и результатам СВЯ/БИ, а также все доступные
-                  файлы артефактов из общего облачного хранилища.
+                  ZIP содержит изображение дашборда, JSON-сводку, один XLSX с отдельными листами по
+                  артефактам, новым участникам, задачам, мероприятиям и взаимодействиям, а также все
+                  доступные файлы артефактов из общего облачного хранилища.
                 </p>
                 <Button asChild size="lg">
                   <a href={`/api/exports/period/package.zip?${query}`}>
@@ -195,8 +195,8 @@ export default function ExportsPage() {
                   `${report.tasks.created} / ${report.tasks.completed}`,
                 ],
                 [
-                  'СВЯ / БИ в трекинге',
-                  `${report.programs.svya.tracked} / ${report.programs.biAcadempark.tracked}`,
+                  'Взаимодействия / просроченные контакты',
+                  `${report.interactions.recorded} / ${report.interactions.followUpsDue}`,
                 ],
               ].map(([label, value]) => (
                 <div className="rounded-lg border p-3" key={String(label)}>

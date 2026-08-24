@@ -31,10 +31,7 @@ const LOCKER_ACTOR: AuthUser = {
 };
 
 export type LockerReviewReason =
-  | 'FIO_REQUIRED'
-  | 'PERSON_AMBIGUOUS'
-  | 'IDENTITY_CONFLICT'
-  | 'DELETED_IDENTITY';
+  'FIO_REQUIRED' | 'PERSON_AMBIGUOUS' | 'IDENTITY_CONFLICT' | 'DELETED_IDENTITY';
 
 /**
  * Отправку, которую нельзя привязать к участнику автоматически, нельзя и терять:
@@ -65,6 +62,7 @@ const LockerUser = Type.Object(
     position: nullableText(500),
     consentAt: nullableText(64),
     crmPersonId: Type.Optional(Type.String({ format: 'uuid' })),
+    profileIncomplete: Type.Optional(Type.Boolean()),
   },
   { additionalProperties: false },
 );
@@ -131,6 +129,7 @@ type LockerUserInput = {
   position?: string | null;
   consentAt?: string | null;
   crmPersonId?: string;
+  profileIncomplete?: boolean;
 };
 
 type LockerEventInput = {
@@ -432,7 +431,7 @@ export async function resolveLockerPerson(
     );
   }
 
-  const fio = parseRussianFullName(user.fullName);
+  const fio = user.profileIncomplete ? null : parseRussianFullName(user.fullName);
   const normalizedName = fio?.normalizedFullName ?? normalizeFullName(user.fullName);
   const phone = user.phone?.trim() ? normalizePhone(user.phone) : null;
   const hadExternalLink = externallyLinkedIds.length === 1;
@@ -523,27 +522,32 @@ export async function resolveLockerPerson(
     // Человека могли удалить из базы по требованию. Молча создать карточку заново
     // нельзя, но и отправку терять нельзя — отправляем в разбор.
     await assertNotDeletedIdentity(client, organization, user);
-    if (!fio) {
-      throw new LockerReviewRequired(
-        'FIO_REQUIRED',
-        'В профиле Locker не указано полное ФИО русскими буквами',
-      );
-    }
+    const displayName = fio?.canonicalFullName ?? lockerDisplayName(user);
+    const normalizedDisplayName = fio?.normalizedFullName ?? normalizeFullName(displayName);
     const created = await client.query<{ id: string }>(
       `INSERT INTO persons
          (organization_id, canonical_full_name, normalized_full_name,
           last_name, first_name, patronymic, lifecycle_data_state,
-          activation_state, activity_status, applied_lifecycle_rule_set_id)
-       VALUES ($1, $2, $3, $4, $5, $6, 'COMPLETE', 'NOT_ACTIVATED', 'UNKNOWN', $7)
+          activation_state, activity_status, applied_lifecycle_rule_set_id,
+          profile_needs_review, profile_review_reason)
+       VALUES ($1, $2, $3, $4, $5, $6,
+               CASE WHEN $8::boolean THEN 'LEGACY_INCOMPLETE'::lifecycle_data_state
+                    ELSE 'COMPLETE'::lifecycle_data_state END,
+               CASE WHEN $8::boolean THEN 'UNKNOWN_LEGACY'::activation_state
+                    ELSE 'NOT_ACTIVATED'::activation_state END,
+               'UNKNOWN', $7, $8,
+               CASE WHEN $8::boolean THEN 'Нужно уточнить полное ФИО из Telegram-бота'
+                    ELSE NULL END)
        RETURNING id`,
       [
         organization.id,
-        fio.canonicalFullName,
-        fio.normalizedFullName,
-        fio.lastName,
-        fio.firstName,
-        fio.patronymic,
+        displayName,
+        normalizedDisplayName,
+        fio?.lastName ?? null,
+        fio?.firstName ?? null,
+        fio?.patronymic ?? null,
         organization.ruleSetId,
+        fio === null,
       ],
     );
     personId = created.rows[0]!.id;
@@ -552,13 +556,13 @@ export async function resolveLockerPerson(
       `INSERT INTO person_aliases
          (person_id, raw_value, normalized_value, alias_type, data_origin, is_preferred)
        VALUES ($1, $2, $3, 'SOURCE_VARIANT', 'LIVE', true)`,
-      [personId, fio.canonicalFullName, fio.normalizedFullName],
+      [personId, displayName, normalizedDisplayName],
     );
     await client.query(
       `INSERT INTO person_search_documents
          (person_id, internal_ids, canonical_name, search_text)
        VALUES ($1::uuid, $1::uuid::text, $2, $2 || ' ' || $1::uuid::text)`,
-      [personId, fio.normalizedFullName],
+      [personId, normalizedDisplayName],
     );
     await writeAudit(client, {
       actor: LOCKER_ACTOR,
@@ -566,7 +570,11 @@ export async function resolveLockerPerson(
       action: 'locker.person_created',
       entityType: 'person',
       entityId: personId,
-      after: { lockerUserId: user.lockerUserId, telegramUserId: user.telegramUserId },
+      after: {
+        lockerUserId: user.lockerUserId,
+        telegramUserId: user.telegramUserId,
+        profileNeedsReview: fio === null,
+      },
     });
   } else if (!hadExternalLink && resolution !== 'RESTORED') {
     resolution = 'CONTACT';
@@ -600,6 +608,7 @@ export async function resolveLockerPerson(
     );
   }
 
+  await refreshLockerProfile(client, personId, user, fio, requestId);
   await upsertLockerIdentities(client, organization.id, personId, user);
   await upsertLockerContacts(client, personId, user, phone?.e164 ?? null);
   await rebuildSearchDocument(client, personId);
@@ -620,8 +629,8 @@ export async function resolveLockerPerson(
 
 /**
  * Возвращает в оборот карточку, спрятанную гигиеной ФИО. Восстановить можно
- * только вместе с корректным ФИО: у активных карточек оно проверяется
- * ограничением persons_active_russian_fio_check.
+ * С корректным ФИО карточка сразу становится полноценной. Без него она всё
+ * равно возвращается в реестр как временная и получает заметную пометку.
  */
 async function restoreArchivedLockerPerson(
   client: PoolClient,
@@ -661,30 +670,34 @@ async function restoreArchivedLockerPerson(
       'Идентификаторы Locker ведут к нескольким скрытым карточкам',
     );
   }
-  if (!fio) {
-    throw new LockerReviewRequired(
-      'FIO_REQUIRED',
-      'Карточка скрыта гигиеной ФИО, а профиль Locker по-прежнему без полного ФИО',
-    );
-  }
-
   const personId = archived.rows[0]!.id;
   const previousName = archived.rows[0]!.canonical_full_name;
+  const displayName = fio?.canonicalFullName ?? lockerDisplayName(user);
+  const normalizedDisplayName = fio?.normalizedFullName ?? normalizeFullName(displayName);
   await client.query(
     `UPDATE persons
         SET archived_at = NULL,
             canonical_full_name = $2, normalized_full_name = $3,
             last_name = $4, first_name = $5, patronymic = $6,
-            lifecycle_data_state = 'COMPLETE',
+            lifecycle_data_state = CASE WHEN $7::boolean THEN 'LEGACY_INCOMPLETE'::lifecycle_data_state
+                                        ELSE 'COMPLETE'::lifecycle_data_state END,
+            activation_state = CASE WHEN $7::boolean THEN 'UNKNOWN_LEGACY'::activation_state
+                                    WHEN activation_state = 'UNKNOWN_LEGACY'
+                                      THEN 'NOT_ACTIVATED'::activation_state
+                                    ELSE activation_state END,
+            profile_needs_review = $7,
+            profile_review_reason = CASE WHEN $7::boolean
+              THEN 'Нужно уточнить полное ФИО из Telegram-бота' ELSE NULL END,
             updated_at = now(), version = version + 1
       WHERE id = $1`,
     [
       personId,
-      fio.canonicalFullName,
-      fio.normalizedFullName,
-      fio.lastName,
-      fio.firstName,
-      fio.patronymic,
+      displayName,
+      normalizedDisplayName,
+      fio?.lastName ?? null,
+      fio?.firstName ?? null,
+      fio?.patronymic ?? null,
+      fio === null,
     ],
   );
   for (const table of [
@@ -707,7 +720,7 @@ async function restoreArchivedLockerPerson(
         SELECT 1 FROM person_aliases
          WHERE person_id = $1 AND normalized_value = $3 AND archived_at IS NULL
       )`,
-    [personId, fio.canonicalFullName, fio.normalizedFullName],
+    [personId, displayName, normalizedDisplayName],
   );
   await writeAudit(client, {
     actor: LOCKER_ACTOR,
@@ -717,12 +730,90 @@ async function restoreArchivedLockerPerson(
     entityId: personId,
     before: { canonicalFullName: previousName, archived: true },
     after: {
-      canonicalFullName: fio.canonicalFullName,
+      canonicalFullName: displayName,
       lockerUserId: user.lockerUserId,
       telegramUserId: user.telegramUserId,
+      profileNeedsReview: fio === null,
     },
   });
   return personId;
+}
+
+function lockerDisplayName(user: LockerUserInput): string {
+  const supplied = cleanText(user.fullName, 500);
+  if (supplied) return supplied;
+  if (user.telegramUsername?.trim()) return `@${cleanText(user.telegramUsername, 64)}`;
+  return `Telegram ID ${user.telegramUserId}`;
+}
+
+/** Обновляет только временные карточки: подтверждённое оператором ФИО не перетирается ботом. */
+async function refreshLockerProfile(
+  client: PoolClient,
+  personId: string,
+  user: LockerUserInput,
+  fio: ReturnType<typeof parseRussianFullName>,
+  requestId: string,
+): Promise<void> {
+  const current = await client.query<{
+    canonical_full_name: string;
+    profile_needs_review: boolean;
+  }>(
+    `SELECT canonical_full_name, profile_needs_review
+       FROM persons WHERE id = $1 AND archived_at IS NULL`,
+    [personId],
+  );
+  const row = current.rows[0];
+  if (!row?.profile_needs_review) return;
+
+  const displayName = fio?.canonicalFullName ?? lockerDisplayName(user);
+  const normalizedDisplayName = fio?.normalizedFullName ?? normalizeFullName(displayName);
+  await client.query(
+    `UPDATE persons
+        SET canonical_full_name = $2, normalized_full_name = $3,
+            last_name = $4, first_name = $5, patronymic = $6,
+            lifecycle_data_state = CASE WHEN $7::boolean THEN 'LEGACY_INCOMPLETE'::lifecycle_data_state
+                                        ELSE 'COMPLETE'::lifecycle_data_state END,
+            activation_state = CASE WHEN NOT $7::boolean AND activation_state = 'UNKNOWN_LEGACY'
+                                    THEN 'NOT_ACTIVATED'::activation_state ELSE activation_state END,
+            profile_needs_review = $7,
+            profile_review_reason = CASE WHEN $7::boolean
+              THEN 'Нужно уточнить полное ФИО из Telegram-бота' ELSE NULL END,
+            updated_at = now(), version = version + 1
+      WHERE id = $1`,
+    [
+      personId,
+      displayName,
+      normalizedDisplayName,
+      fio?.lastName ?? null,
+      fio?.firstName ?? null,
+      fio?.patronymic ?? null,
+      fio === null,
+    ],
+  );
+  await client.query(
+    `INSERT INTO person_aliases
+       (person_id, raw_value, normalized_value, alias_type, data_origin, is_preferred)
+     SELECT $1, $2, $3, 'SOURCE_VARIANT', 'LIVE', true
+      WHERE NOT EXISTS (
+        SELECT 1 FROM person_aliases
+         WHERE person_id = $1 AND normalized_value = $3 AND archived_at IS NULL
+      )`,
+    [personId, displayName, normalizedDisplayName],
+  );
+  if (row.canonical_full_name !== displayName || fio) {
+    await writeAudit(client, {
+      actor: LOCKER_ACTOR,
+      requestId,
+      action: fio ? 'locker.person_profile_completed' : 'locker.person_profile_refreshed',
+      entityType: 'person',
+      entityId: personId,
+      before: {
+        canonicalFullName: row.canonical_full_name,
+        profileNeedsReview: true,
+      },
+      after: { canonicalFullName: displayName, profileNeedsReview: fio === null },
+    });
+  }
 }
 
 async function upsertLockerIdentities(

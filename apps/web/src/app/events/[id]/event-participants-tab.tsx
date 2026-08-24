@@ -2,7 +2,9 @@
 
 import {
   FileCheck2Icon,
+  FilePlus2Icon,
   MessageSquareIcon,
+  PencilIcon,
   UserMinusIcon,
   UserPlusIcon,
   UsersIcon,
@@ -12,9 +14,9 @@ import { useMemo, useState } from 'react';
 import { toast } from 'sonner';
 
 import { DataToolbar, ToolbarSearch, ToolbarSelect } from '@/components/data-toolbar';
+import { ArtifactSubmitDialog } from '@/components/artifact-submit-dialog';
 import { EmptyState } from '@/components/empty-state';
 import { PersonPicker, type PersonOption } from '@/components/person-picker';
-import { StatusBadge } from '@/components/status-badge';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -27,6 +29,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 import {
   Select,
   SelectContent,
@@ -49,14 +52,18 @@ import type { EventParticipantSummary } from '@/lib/types';
 
 export function EventParticipantsTab({
   eventId,
+  eventName,
   participants,
   canWrite,
+  canAddArtifact,
   onOpenArtifact,
   onChanged,
 }: {
   eventId: string;
+  eventName: string;
   participants: EventParticipantSummary[];
   canWrite: boolean;
+  canAddArtifact: boolean;
   onOpenArtifact: (versionId: string) => void;
   onChanged: () => void | Promise<void>;
 }) {
@@ -64,6 +71,28 @@ export function EventParticipantsTab({
   const [artifactFilter, setArtifactFilter] = useState('');
   const [adding, setAdding] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
+  const [resultPerson, setResultPerson] = useState<EventParticipantSummary | null>(null);
+  const [resultDraft, setResultDraft] = useState('');
+  const [savingResult, setSavingResult] = useState(false);
+  const [artifactPerson, setArtifactPerson] = useState<EventParticipantSummary | null>(null);
+
+  async function saveResult() {
+    if (!resultPerson) return;
+    setSavingResult(true);
+    try {
+      await api(`/events/${eventId}/participants/${resultPerson.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ result: resultDraft.trim() || null }),
+      });
+      toast.success('Результат участия сохранён');
+      setResultPerson(null);
+      await onChanged();
+    } catch (caught) {
+      toast.error(apiErrorMessage(caught, 'Не удалось сохранить результат'));
+    } finally {
+      setSavingResult(false);
+    }
+  }
 
   async function removeParticipant(person: EventParticipantSummary) {
     setRemovingId(person.id);
@@ -150,11 +179,11 @@ export function EventParticipantsTab({
                 <TableRow>
                   <TableHead>Участник</TableHead>
                   <TableHead>Контакт</TableHead>
-                  <TableHead>Активность</TableHead>
                   <TableHead>Участие</TableHead>
+                  <TableHead>Результат</TableHead>
                   <TableHead>Артефакты</TableHead>
                   <TableHead>Комментарии</TableHead>
-                  {canWrite ? <TableHead className="w-10" /> : null}
+                  {canWrite || canAddArtifact ? <TableHead className="w-10" /> : null}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -184,12 +213,6 @@ export function EventParticipantsTab({
                       {person.primaryContact ?? '—'}
                     </TableCell>
                     <TableCell>
-                      <StatusBadge
-                        activity={person.activityStatus}
-                        activation={person.activationState}
-                      />
-                    </TableCell>
-                    <TableCell>
                       <span className="block text-[13px] font-medium">
                         {person.decisions
                           .map((value) => PARTICIPATION_DECISION_LABELS[value] ?? value)
@@ -200,6 +223,26 @@ export function EventParticipantsTab({
                           .map((value) => ATTENDANCE_LABELS[value] ?? value)
                           .join(', ') || 'Посещение не указано'}
                       </small>
+                    </TableCell>
+                    <TableCell className="max-w-72">
+                      <p className="line-clamp-3 text-[13px] whitespace-pre-wrap">
+                        {person.result ?? (
+                          <span className="text-muted-foreground">Не заполнен</span>
+                        )}
+                      </p>
+                      {canWrite && (
+                        <Button
+                          className="mt-1"
+                          onClick={() => {
+                            setResultPerson(person);
+                            setResultDraft(person.result ?? '');
+                          }}
+                          size="xs"
+                          variant="ghost"
+                        >
+                          <PencilIcon /> Изменить
+                        </Button>
+                      )}
                     </TableCell>
                     <TableCell>
                       {person.artifacts.length === 0 ? (
@@ -238,17 +281,31 @@ export function EventParticipantsTab({
                         </div>
                       )}
                     </TableCell>
-                    {canWrite ? (
+                    {canWrite || canAddArtifact ? (
                       <TableCell>
-                        <Button
-                          aria-label={`Снять ${person.canonicalFullName} с мероприятия`}
-                          disabled={removingId === person.id}
-                          onClick={() => void removeParticipant(person)}
-                          size="icon-sm"
-                          variant="ghost"
-                        >
-                          <UserMinusIcon />
-                        </Button>
+                        <div className="flex items-center gap-1">
+                          {canAddArtifact && (
+                            <Button
+                              aria-label={`Добавить артефакт для ${person.canonicalFullName}`}
+                              onClick={() => setArtifactPerson(person)}
+                              size="icon-sm"
+                              variant="ghost"
+                            >
+                              <FilePlus2Icon />
+                            </Button>
+                          )}
+                          {canWrite && (
+                            <Button
+                              aria-label={`Снять ${person.canonicalFullName} с мероприятия`}
+                              disabled={removingId === person.id}
+                              onClick={() => void removeParticipant(person)}
+                              size="icon-sm"
+                              variant="ghost"
+                            >
+                              <UserMinusIcon />
+                            </Button>
+                          )}
+                        </div>
                       </TableCell>
                     ) : null}
                   </TableRow>
@@ -259,6 +316,61 @@ export function EventParticipantsTab({
         )}
       </Card>
       {addDialog}
+      {resultPerson && (
+        <Dialog open onOpenChange={(open) => !open && !savingResult && setResultPerson(null)}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Результат участия</DialogTitle>
+              <DialogDescription>
+                {resultPerson.canonicalFullName} · {eventName}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-2">
+              <Label htmlFor="event-participant-result">Результат</Label>
+              <Textarea
+                autoFocus
+                id="event-participant-result"
+                onChange={(event) => setResultDraft(event.target.value)}
+                placeholder="Например: выступил, занял 2 место; заявка одобрена"
+                rows={5}
+                value={resultDraft}
+              />
+            </div>
+            <DialogFooter>
+              <Button
+                disabled={savingResult}
+                onClick={() => setResultPerson(null)}
+                variant="outline"
+              >
+                Отмена
+              </Button>
+              <Button disabled={savingResult} onClick={() => void saveResult()}>
+                {savingResult ? 'Сохраняем…' : 'Сохранить'}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+      {artifactPerson && (
+        <ArtifactSubmitDialog
+          defaultEventId={eventId}
+          events={[
+            {
+              id: eventId,
+              name: eventName,
+              status: 'ACTIVE',
+              participations: [],
+              artifacts: artifactPerson.artifacts,
+            },
+          ]}
+          onClose={() => setArtifactPerson(null)}
+          onCreated={async () => {
+            setArtifactPerson(null);
+            await onChanged();
+          }}
+          personId={artifactPerson.id}
+        />
+      )}
     </div>
   );
 }
@@ -284,6 +396,7 @@ function AddParticipantDialog({
   const [person, setPerson] = useState<PersonOption | null>(null);
   const [decision, setDecision] = useState('ACCEPTED');
   const [attendance, setAttendance] = useState('ATTENDED');
+  const [result, setResult] = useState('');
   const [saving, setSaving] = useState(false);
 
   const alreadyHere = person !== null && existingIds.has(person.id);
@@ -294,7 +407,12 @@ function AddParticipantDialog({
     try {
       await api(`/events/${eventId}/participants`, {
         method: 'POST',
-        body: JSON.stringify({ personId: person.id, decision, attendance }),
+        body: JSON.stringify({
+          personId: person.id,
+          decision,
+          attendance,
+          result: result.trim() || undefined,
+        }),
       });
       toast.success(`${person.canonicalFullName} добавлен в мероприятие`);
       await onAdded();
@@ -356,6 +474,16 @@ function AddParticipantDialog({
                 </SelectContent>
               </Select>
             </div>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="participant-result">Результат (необязательно)</Label>
+            <Textarea
+              id="participant-result"
+              onChange={(event) => setResult(event.target.value)}
+              placeholder="Например: заявка принята; выступил, занял 2 место"
+              rows={3}
+              value={result}
+            />
           </div>
         </div>
 

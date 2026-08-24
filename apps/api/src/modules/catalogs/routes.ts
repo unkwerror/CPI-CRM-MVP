@@ -30,7 +30,7 @@ const eventBodyFields = new Set([
 
 export async function registerCatalogRoutes(app: FastifyInstance): Promise<void> {
   for (const resource of ['programs', 'events', 'projects'] as const) {
-    if (resource !== 'events') {
+    if (resource === 'programs') {
       app.get(
         `/${resource}`,
         { preHandler: app.requirePermission(Permissions.PEOPLE_READ), schema: { tags: ['Связи'] } },
@@ -145,21 +145,44 @@ export async function registerCatalogRoutes(app: FastifyInstance): Promise<void>
               resource === 'projects'
                 ? '($1, $2, $3, $4, $5, $6, $7, $8, $9)'
                 : resource === 'events'
-                  ? '($1, $2, $3, $4, $6, $7, $8, $9)'
-                  : '($1, $3, $4, $6, $7, $8, $9)';
+                  ? '($1, $2, $3, $4, $5, $6, $7, $8)'
+                  : '($1, $2, $3, $4, $5, $6, $7)';
+            const parameters =
+              resource === 'projects'
+                ? [
+                    organization.id,
+                    body.programId ?? null,
+                    name,
+                    normalizedName,
+                    body.description ?? null,
+                    body.status ?? 'ACTIVE',
+                    startsAt,
+                    endsAt,
+                    request.authUser!.userId,
+                  ]
+                : resource === 'events'
+                  ? [
+                      organization.id,
+                      body.programId ?? null,
+                      name,
+                      normalizedName,
+                      body.status ?? 'PLANNED',
+                      startsAt,
+                      endsAt,
+                      request.authUser!.userId,
+                    ]
+                  : [
+                      organization.id,
+                      name,
+                      normalizedName,
+                      body.status ?? 'ACTIVE',
+                      startsAt,
+                      endsAt,
+                      request.authUser!.userId,
+                    ];
             const result = await client.query<{ id: string }>(
               `INSERT INTO ${resource} ${columns} VALUES ${values} RETURNING id`,
-              [
-                organization.id,
-                body.programId ?? null,
-                name,
-                normalizedName,
-                body.description ?? null,
-                body.status ?? (resource === 'events' ? 'PLANNED' : 'ACTIVE'),
-                startsAt,
-                endsAt,
-                request.authUser!.userId,
-              ],
+              parameters,
             );
             if (resource === 'events' && participantIds.length > 0) {
               const insertedParticipations = await client.query(

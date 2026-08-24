@@ -148,7 +148,7 @@ describe('participant export route', () => {
     }
   });
 
-  it('exports canonical participants using every supplied filter and safe CSV cells', async () => {
+  it('exports canonical participants using artifact/profile filters and safe CSV cells', async () => {
     let exportSql = '';
     let exportParameters: unknown[] = [];
     let auditParameters: unknown[] = [];
@@ -169,8 +169,7 @@ describe('participant export route', () => {
         'Alpha',
         'alpha',
         ['alpha'],
-        'ACTIVE',
-        'ACTIVATED',
+        true,
         EVENT_ID,
         25,
         0,
@@ -182,8 +181,9 @@ describe('participant export route', () => {
             canonical_full_name: '=2+3',
             contacts: ' +cmd | телефон "рабочий"',
             affiliations: 'Организация "А"\nФакультет',
-            activation_state: 'ACTIVATED',
-            activity_status: 'ACTIVE',
+            profile_needs_review: true,
+            from_bot: true,
+            artifact_count: '1',
             last_artifact_at: new Date('2026-07-20T10:30:00.000Z'),
             events: '@SUM(A1:A2)',
             artifacts: '-1',
@@ -201,8 +201,8 @@ describe('participant export route', () => {
     });
     const app = await exportTestApp(query, [Roles.DATA_STEWARD]);
     const url =
-      `/exports/participants.csv?q=%20Alpha%20&activityStatus=ACTIVE` +
-      `&activationState=ACTIVATED&eventId=${EVENT_ID}&awaitingReview=true`;
+      `/exports/participants.csv?q=%20Alpha%20&hasArtifacts=true` +
+      `&profileNeedsReview=true&eventId=${EVENT_ID}&awaitingReview=true`;
 
     try {
       const response = await app.inject({ method: 'GET', url });
@@ -224,7 +224,8 @@ describe('participant export route', () => {
       expect(exportSql).toContain('p.merged_into_person_id IS NULL');
       expect(exportSql).toContain('p.normalized_full_name = $3');
       expect(exportSql).toContain('contact.normalized_value = ANY($4::text[])');
-      expect(exportSql).toContain('participation.event_id = $7');
+      expect(exportSql).toContain('p.profile_needs_review = $5');
+      expect(exportSql).toContain('participation.event_id = $6');
       expect(exportSql).toContain('member.id = p.id OR member.merged_into_person_id = p.id');
       expect(exportSql).toContain("version.status = 'SUBMITTED'");
       expect(exportParameters).toEqual([
@@ -232,8 +233,7 @@ describe('participant export route', () => {
         'Alpha',
         'alpha',
         ['alpha'],
-        'ACTIVE',
-        'ACTIVATED',
+        true,
         EVENT_ID,
       ]);
 
@@ -241,8 +241,8 @@ describe('participant export route', () => {
       expect(JSON.parse(String(auditParameters[3]))).toEqual({
         filters: {
           q: ' Alpha ',
-          activityStatus: 'ACTIVE',
-          activationState: 'ACTIVATED',
+          hasArtifacts: true,
+          profileNeedsReview: true,
           eventId: EVENT_ID,
           awaitingReview: true,
         },

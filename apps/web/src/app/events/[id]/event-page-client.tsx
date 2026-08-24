@@ -1,6 +1,12 @@
 'use client';
 
-import { CalendarDaysIcon, DownloadIcon, FileCheck2Icon, UsersIcon } from 'lucide-react';
+import {
+  CalendarDaysIcon,
+  DownloadIcon,
+  FileCheck2Icon,
+  FolderKanbanIcon,
+  UsersIcon,
+} from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
 import { ArtifactReviewDialog } from '@/components/artifact-review-dialog';
@@ -14,16 +20,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useCurrentUser } from '@/hooks/use-current-user';
 import { api, apiErrorMessage, formatDate } from '@/lib/api';
 import { EVENT_STATUS_LABELS, EVENT_STATUS_VARIANTS } from '@/lib/status-labels';
-import type {
-  EventArtifactsResponse,
-  EventDetail,
-  EventDuplicateSuggestion,
-} from '@/lib/types';
+import type { EventArtifactsResponse, EventDetail, EventDuplicateSuggestion } from '@/lib/types';
 
 import { EventArtifactsTab } from './event-artifacts-tab';
 import { EventDuplicatesTab } from './event-duplicates-tab';
 import { EventExportsTab } from './event-exports-tab';
 import { EventParticipantsTab } from './event-participants-tab';
+import { EventProjectsTab } from './event-projects-tab';
 
 export function EventPageClient({ id }: { id: string }) {
   const { can } = useCurrentUser();
@@ -123,6 +126,9 @@ export function EventPageClient({ id }: { id: string }) {
       <Tabs defaultValue="participants">
         <TabsList>
           <TabsTrigger value="participants">Участники</TabsTrigger>
+          <TabsTrigger value="projects">
+            <FolderKanbanIcon /> Проекты
+          </TabsTrigger>
           <TabsTrigger value="artifacts">
             Артефакты
             {artifactCount > 0 && (
@@ -143,7 +149,9 @@ export function EventPageClient({ id }: { id: string }) {
         <TabsContent value="participants">
           <EventParticipantsTab
             canWrite={can('people.write')}
+            canAddArtifact={can('artifacts.write')}
             eventId={event.id}
+            eventName={event.name}
             onChanged={reloadAll}
             onOpenArtifact={setReviewVersionId}
             participants={event.participants}
@@ -156,6 +164,14 @@ export function EventPageClient({ id }: { id: string }) {
             loading={loadingSide && artifacts === null}
             canWrite={can('artifacts.write')}
             onOpenReview={setReviewVersionId}
+            onChanged={reloadAll}
+          />
+        </TabsContent>
+
+        <TabsContent value="projects">
+          <EventProjectsTab
+            eventId={event.id}
+            canWrite={can('events.write')}
             onChanged={reloadAll}
           />
         </TabsContent>
