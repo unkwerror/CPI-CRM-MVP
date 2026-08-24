@@ -371,6 +371,36 @@ describe('participant export route', () => {
         };
       }
       if (sql.includes('FROM event_project_participations participation')) {
+        if (sql.includes('project.description')) {
+          return {
+            rows: [
+              {
+                project_id: '00000000-0000-4000-8000-000000000050',
+                project_name: 'Проект без файлов',
+                description: 'Описание проекта',
+                status: 'ACTIVE',
+                lead_person_id: participantId,
+                lead_person_name: 'Глазырин Павел Андреевич',
+                registered_at: new Date('2026-08-01T09:00:00.000Z'),
+                decision: 'ACCEPTED',
+                attendance: 'ATTENDED',
+                result: 'Финалист',
+              },
+            ],
+          };
+        }
+        if (sql.includes('JOIN project_memberships membership')) {
+          return {
+            rows: [
+              {
+                project_id: '00000000-0000-4000-8000-000000000050',
+                person_id: participantId,
+                person_name: 'Глазырин Павел Андреевич',
+                role: 'Владелец проекта',
+              },
+            ],
+          };
+        }
         return { rows: [] };
       }
       if (sql.includes('INSERT INTO audit_log')) {
@@ -396,11 +426,12 @@ describe('participant export route', () => {
       // как читаемое описание, а manifest объясняет отсутствие бинарного файла.
       expect(entries.some((name) => name.startsWith('Артефакты/'))).toBe(true);
       expect(entries.some((name) => name.endsWith('/Описание.txt'))).toBe(true);
+      expect(entries).toContain('Проекты/Проект без файлов/Описание проекта.txt');
       expect(auditPayload).toMatchObject({
         participants: 1,
         artifacts: 1,
-        projects: 0,
-        projectMembers: 0,
+        projects: 1,
+        projectMembers: 1,
         projectArtifacts: 0,
         files: 0,
         skipped: 1,

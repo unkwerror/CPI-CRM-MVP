@@ -1587,6 +1587,29 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
         if (bucket) bucket.push(artifact);
         else artifactsByProject.set(artifact.project_id, [artifact]);
       }
+      for (const project of eventProjectsResult.rows) {
+        const members = membersByProject.get(project.project_id) ?? [];
+        const projectArtifacts = artifactsByProject.get(project.project_id) ?? [];
+        const projectDirectory = `Проекты/${sanitizeArchiveSegment(project.project_name)}`;
+        descriptions.push({
+          archivePath: uniqueArchivePath(usedPaths, `${projectDirectory}/Описание проекта.txt`),
+          content:
+            `Проект: ${project.project_name}\n` +
+            `Статус: ${project.status}\n` +
+            `Описание: ${project.description ?? '—'}\n` +
+            `Владелец: ${project.lead_person_name ?? '—'}\n` +
+            `Решение по мероприятию: ${project.decision}\n` +
+            `Посещение: ${project.attendance}\n` +
+            `Результат: ${project.result ?? '—'}\n` +
+            `Добавлен в мероприятие: ${project.registered_at.toISOString()}\n` +
+            `Участники (${members.length}):\n${
+              members.length
+                ? members.map((member) => `- ${member.person_name} — ${member.role}`).join('\n')
+                : '—'
+            }\n` +
+            `Артефакты проекта: ${projectArtifacts.length}\n`,
+        });
+      }
       const guaranteedPaths = new Set(descriptions.map((entry) => entry.archivePath));
       for (const entry of sources.entries) guaranteedPaths.add(entry.archivePath);
       const projectWorkbookRows: EventParticipantWorkbookProject[] = eventProjectsResult.rows.map(
