@@ -10,11 +10,12 @@ import {
 } from '@cpi-crm/domain';
 import type { Pool, PoolClient } from 'pg';
 
-export const STRICT_PARTICIPANT_HYGIENE_VERSION = 'STRICT_PARTICIPANT_HYGIENE_V1';
+export const STRICT_PARTICIPANT_HYGIENE_VERSION = 'STRICT_PARTICIPANT_HYGIENE_V2';
 
 export interface ParticipantHygieneSnapshot {
   readonly activeCanonicalPeople: number;
   readonly validFio: number;
+  readonly provisionalProfiles: number;
   readonly invalidFio: number;
   readonly repairableFio: number;
   readonly archiveCandidates: number;
@@ -47,6 +48,7 @@ interface PersonRow {
   readonly id: string;
   readonly canonical_full_name: string;
   readonly notes: string | null;
+  readonly profile_needs_review: boolean;
 }
 
 interface VariantRow {
@@ -69,7 +71,7 @@ interface ContactRow {
 
 async function activePeople(client: PoolClient, organizationId: string): Promise<PersonRow[]> {
   const result = await client.query<PersonRow>(
-    `SELECT id, canonical_full_name, notes
+    `SELECT id, canonical_full_name, notes, profile_needs_review
        FROM persons
       WHERE organization_id = $1 AND archived_at IS NULL AND merged_into_person_id IS NULL
       ORDER BY id`,
@@ -200,6 +202,7 @@ async function duplicateMetrics(client: PoolClient, organizationId: string) {
        SELECT id, normalized_full_name
          FROM persons
         WHERE organization_id = $1 AND archived_at IS NULL AND merged_into_person_id IS NULL
+          AND NOT profile_needs_review
      ), exact_groups AS (
        SELECT normalized_full_name FROM active GROUP BY normalized_full_name HAVING count(*) > 1
      ), strong_pairs AS (
@@ -226,8 +229,9 @@ export async function inspectParticipantHygiene(
 ): Promise<ParticipantHygieneSnapshot> {
   const people = await activePeople(client, organizationId);
   const invalidPeople = people.filter(
-    (person) => !parseRussianFullName(person.canonical_full_name),
+    (person) => !person.profile_needs_review && !parseRussianFullName(person.canonical_full_name),
   );
+  const provisionalProfiles = people.filter((person) => person.profile_needs_review).length;
   const variants = await nameVariants(
     client,
     organizationId,
@@ -238,7 +242,8 @@ export async function inspectParticipantHygiene(
   const duplicateMetricsResult = await duplicateMetrics(client, organizationId);
   return {
     activeCanonicalPeople: people.length,
-    validFio: people.length - invalidPeople.length,
+    validFio: people.length - invalidPeople.length - provisionalProfiles,
+    provisionalProfiles,
     invalidFio: invalidPeople.length,
     repairableFio: repairs.size,
     archiveCandidates: invalidPeople.length - repairs.size,
@@ -291,6 +296,7 @@ async function queueStrongDuplicatePairs(
        SELECT id, normalized_full_name
          FROM persons
         WHERE organization_id = $1 AND archived_at IS NULL AND merged_into_person_id IS NULL
+          AND NOT profile_needs_review
      )
      SELECT DISTINCT left_person.id AS left_id, right_person.id AS right_id
        FROM active left_person
@@ -333,14 +339,14 @@ export async function applyParticipantHygiene(
     );
     const before = await inspectParticipantHygiene(client, input.organizationId);
     const people = await client.query<PersonRow>(
-      `SELECT id, canonical_full_name, notes
+      `SELECT id, canonical_full_name, notes, profile_needs_review
          FROM persons
         WHERE organization_id = $1 AND archived_at IS NULL AND merged_into_person_id IS NULL
         ORDER BY id FOR UPDATE`,
       [input.organizationId],
     );
     const invalidPeople = people.rows.filter(
-      (person) => !parseRussianFullName(person.canonical_full_name),
+      (person) => !person.profile_needs_review && !parseRussianFullName(person.canonical_full_name),
     );
     const variants = await nameVariants(
       client,
