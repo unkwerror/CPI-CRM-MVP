@@ -789,6 +789,7 @@ export async function resolveLockerPerson(
   await upsertLockerIdentities(client, organization.id, personId, user);
   await upsertLockerContacts(client, personId, user, phone?.e164 ?? null);
   await rebuildSearchDocument(client, personId);
+  await queueLockerNameDuplicateCandidates(client, organization.id, personId);
   await writeAudit(client, {
     actor: LOCKER_ACTOR,
     requestId,
@@ -1124,6 +1125,98 @@ async function queuePhoneDuplicateCandidates(
        VALUES ($1, $2, 9000, $3, '["Совпал телефон"]'::jsonb, '[]'::jsonb)
        ON CONFLICT (person_a_id, person_b_id, evidence_fingerprint) DO NOTHING`,
       [personA, personB, fingerprint],
+    );
+  }
+}
+
+/**
+ * Неполное имя Telegram не проходит строгий разбор ФИО, поэтому оно не может
+ * автоматически привязаться к полноценной CRM-карточке. Два совпавших токена
+ * (обычно фамилия + имя) — достаточно для подсказки оператору, но не для
+ * автоматического слияния.
+ */
+async function queueLockerNameDuplicateCandidates(
+  client: PoolClient,
+  organizationId: string,
+  personId: string,
+): Promise<void> {
+  const matches = await client.query<{
+    person_id: string;
+    source_name: string;
+    candidate_name: string;
+    exact_name: boolean;
+    prefix_name: boolean;
+    token_overlap: number;
+  }>(
+    `WITH source AS (
+       SELECT id, normalized_full_name
+        FROM persons
+       WHERE id = $2 AND organization_id = $1
+          AND archived_at IS NULL AND merged_into_person_id IS NULL
+          AND profile_needs_review
+     )
+     SELECT candidate.id AS person_id,
+            source.normalized_full_name AS source_name,
+            candidate.normalized_full_name AS candidate_name,
+            candidate.normalized_full_name = source.normalized_full_name AS exact_name,
+            candidate.normalized_full_name LIKE source.normalized_full_name || ' %'
+              OR source.normalized_full_name LIKE candidate.normalized_full_name || ' %'
+              AS prefix_name,
+            overlap.token_count AS token_overlap
+       FROM source
+       JOIN persons candidate
+         ON candidate.organization_id = $1
+        AND candidate.id <> source.id
+        AND candidate.archived_at IS NULL
+        AND candidate.merged_into_person_id IS NULL
+        AND NOT candidate.profile_needs_review
+       CROSS JOIN LATERAL (
+         SELECT count(*)::integer AS token_count
+           FROM (
+             SELECT DISTINCT token
+               FROM unnest(regexp_split_to_array(source.normalized_full_name, '[[:space:]]+')) AS source_token(token)
+              WHERE char_length(token) >= 2
+             INTERSECT
+             SELECT DISTINCT token
+               FROM unnest(regexp_split_to_array(candidate.normalized_full_name, '[[:space:]]+')) AS candidate_token(token)
+              WHERE char_length(token) >= 2
+           ) shared_tokens
+       ) overlap
+      WHERE cardinality(regexp_split_to_array(source.normalized_full_name, '[[:space:]]+')) >= 2
+        AND cardinality(regexp_split_to_array(candidate.normalized_full_name, '[[:space:]]+')) >= 2
+        AND (
+          candidate.normalized_full_name = source.normalized_full_name
+          OR candidate.normalized_full_name LIKE source.normalized_full_name || ' %'
+          OR source.normalized_full_name LIKE candidate.normalized_full_name || ' %'
+          OR overlap.token_count >= 2
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM not_duplicate_pairs pair
+           WHERE pair.person_a_id = LEAST(source.id, candidate.id)
+             AND pair.person_b_id = GREATEST(source.id, candidate.id)
+        )
+      ORDER BY exact_name DESC, prefix_name DESC, overlap.token_count DESC,
+               candidate.normalized_full_name
+      LIMIT 20`,
+    [organizationId, personId],
+  );
+
+  for (const match of matches.rows) {
+    const [personA, personB] = [personId, match.person_id].sort();
+    const fingerprint = createHash('sha256')
+      .update(`LOCKER_NAME:${match.source_name}:${match.candidate_name}:${personA}:${personB}`)
+      .digest('hex');
+    const confidence = match.exact_name ? 9500 : match.prefix_name ? 8600 : 7800;
+    const reason = match.exact_name
+      ? 'Совпало ФИО с профилем Telegram'
+      : 'Совпали фамилия и имя с профилем Telegram';
+    await client.query(
+      `INSERT INTO duplicate_candidates
+         (person_a_id, person_b_id, confidence_basis_points, evidence_fingerprint,
+          reasons, conflicts)
+       VALUES ($1, $2, $3, $4, $5::jsonb, '[]'::jsonb)
+       ON CONFLICT (person_a_id, person_b_id, evidence_fingerprint) DO NOTHING`,
+      [personA, personB, confidence, fingerprint, JSON.stringify([reason])],
     );
   }
 }

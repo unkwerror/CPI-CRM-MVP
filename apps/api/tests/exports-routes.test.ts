@@ -138,7 +138,7 @@ describe('participant export route', () => {
     const app = await exportTestApp(query, [Roles.COMMUNITY_MANAGER]);
 
     try {
-      const response = await app.inject({ method: 'GET', url: '/exports/participants.csv' });
+      const response = await app.inject({ method: 'GET', url: '/exports/participants.xlsx' });
 
       expect(response.statusCode).toBe(403);
       expect(response.json()).toMatchObject({ status: 403, title: 'Доступ запрещён' });
@@ -148,7 +148,7 @@ describe('participant export route', () => {
     }
   });
 
-  it('exports canonical participants using artifact/profile filters and safe CSV cells', async () => {
+  it('exports canonical participants using artifact/profile filters as XLSX', async () => {
     let exportSql = '';
     let exportParameters: unknown[] = [];
     let auditParameters: unknown[] = [];
@@ -201,25 +201,20 @@ describe('participant export route', () => {
     });
     const app = await exportTestApp(query, [Roles.DATA_STEWARD]);
     const url =
-      `/exports/participants.csv?q=%20Alpha%20&hasArtifacts=true` +
+      `/exports/participants.xlsx?q=%20Alpha%20&hasArtifacts=true` +
       `&profileNeedsReview=true&eventId=${EVENT_ID}&awaitingReview=true`;
 
     try {
       const response = await app.inject({ method: 'GET', url });
 
       expect(response.statusCode).toBe(200);
-      expect(response.headers['content-type']).toContain('text/csv');
-      expect(response.headers['content-disposition']).toBe(
-        `attachment; filename="cpi-participants-event-${EVENT_ID}.csv"`,
+      expect(response.headers['content-type']).toContain(
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       );
-      expect([...response.rawPayload.subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
-      expect(response.body.startsWith('\uFEFF"ID";"ФИО";')).toBe(true);
-      expect(response.body).toContain('"\'=2+3"');
-      expect(response.body).toContain('"\' +cmd | телефон ""рабочий"""');
-      expect(response.body).toContain('"Организация ""А""\nФакультет"');
-      expect(response.body).toContain('"\'@SUM(A1:A2)"');
-      expect(response.body).toContain('"\'-1"');
-      expect(response.body).toContain('"Лист 1"');
+      expect(response.headers['content-disposition']).toBe(
+        `attachment; filename="cpi-participants-event-${EVENT_ID}.xlsx"`,
+      );
+      expect([...response.rawPayload.subarray(0, 2)]).toEqual([0x50, 0x4b]);
 
       expect(exportSql).toContain('p.merged_into_person_id IS NULL');
       expect(exportSql).toContain('p.normalized_full_name = $3');
@@ -247,7 +242,7 @@ describe('participant export route', () => {
           awaitingReview: true,
         },
         rows: 1,
-        streaming: true,
+        format: 'XLSX',
       });
     } finally {
       await app.close();
@@ -354,11 +349,11 @@ describe('participant export route', () => {
 
     try {
       for (let requestNumber = 0; requestNumber < 4; requestNumber += 1) {
-        const response = await app.inject({ method: 'GET', url: '/exports/participants.csv' });
+        const response = await app.inject({ method: 'GET', url: '/exports/participants.xlsx' });
         expect(response.statusCode).toBe(200);
       }
 
-      const blocked = await app.inject({ method: 'GET', url: '/exports/participants.csv' });
+      const blocked = await app.inject({ method: 'GET', url: '/exports/participants.xlsx' });
       expect(blocked.statusCode).toBe(429);
       expect(blocked.headers['retry-after']).toBeDefined();
       expect(blocked.json()).toMatchObject({

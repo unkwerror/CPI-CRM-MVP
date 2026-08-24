@@ -3,8 +3,10 @@ import { Permissions, normalizeEmail, normalizeFullName, normalizePhone } from '
 import {
   createEventParticipantsWorkbook,
   createOperationalPeriodWorkbook,
+  createParticipantsExportWorkbook,
   createProjectWorkbook,
   type EventParticipantWorkbookArtifact,
+  type ParticipantsExportWorkbookInput,
 } from '@cpi-crm/importer';
 import { Type } from '@sinclair/typebox';
 import { ZipArchive } from 'archiver';
@@ -19,6 +21,7 @@ import {
   loadOperationalPeriodReport,
   operationalReportSvg,
   resolvePeriod,
+  type OperationalPeriodReport,
   type PeriodBounds,
 } from '../../lib/period-report.js';
 import { HttpProblem } from '../../lib/problem.js';
@@ -178,7 +181,7 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
   });
 
   app.get(
-    '/exports/participants.csv',
+    '/exports/participants.xlsx',
     {
       config: { rateLimit: heavyOperationRateLimit(4, '1 minute') },
       preHandler: [app.requirePermission(Permissions.EXPORTS_BULK), guardExportConcurrency],
@@ -323,35 +326,18 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
           request.authUser!.userId,
           request.authUser!.sub,
           request.id,
-          JSON.stringify({ filters: query, rows: total, streaming: true }),
+          JSON.stringify({ filters: query, rows: total, format: 'XLSX' }),
         ],
       );
 
-      const headers = [
-        'ID',
-        'ФИО',
-        'Контакты',
-        'Организации / факультеты',
-        'Отправлял артефакты',
-        'Количество артефактов',
-        'Последний артефакт',
-        'Источник профиля',
-        'Профиль',
-        'Мероприятия',
-        'Артефакты',
-        'Комментарии',
-        'Все исходные поля (JSON)',
-      ];
-
-      async function* streamCsv(): AsyncGenerator<string> {
-        yield `\uFEFF${csvRow(headers)}\r\n`;
-        let offset = 0;
-        while (offset < total && !request.raw.aborted) {
-          const pageValues = [...values, EXPORT_BATCH_SIZE, offset];
-          const limitParameter = `$${values.length + 1}`;
-          const offsetParameter = `$${values.length + 2}`;
-          const result = await app.pool.query(
-            `WITH export_people AS MATERIALIZED (
+      const rows: ParticipantsExportWorkbookInput['rows'][number][] = [];
+      let offset = 0;
+      while (offset < total && !request.raw.aborted) {
+        const pageValues = [...values, EXPORT_BATCH_SIZE, offset];
+        const limitParameter = `$${values.length + 1}`;
+        const offsetParameter = `$${values.length + 2}`;
+        const result = await app.pool.query(
+          `WITH export_people AS MATERIALIZED (
                SELECT p.id
                  FROM persons p
                 WHERE ${where.join(' AND ')}
@@ -476,38 +462,38 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
                ) source
            ) source_data ON true
           ORDER BY p.normalized_full_name, p.id`,
-            pageValues,
-          );
-          if (result.rows.length === 0) break;
-          for (const row of result.rows) {
-            yield `${csvRow([
-              row.id,
-              row.canonical_full_name,
-              row.contacts,
-              row.affiliations,
-              Number(row.artifact_count ?? 0) > 0 ? 'Да' : 'Нет',
-              row.artifact_count ?? '0',
-              row.last_artifact_at?.toISOString() ?? '',
-              row.from_bot ? 'BOT' : 'CRM / IMPORT',
-              row.profile_needs_review ? 'Нужно уточнить ФИО' : 'Заполнен',
-              row.events,
-              row.artifacts,
-              row.comments,
-              JSON.stringify(row.source_rows),
-            ])}\r\n`;
-          }
-          offset += result.rows.length;
+          pageValues,
+        );
+        if (result.rows.length === 0) break;
+        for (const row of result.rows) {
+          rows.push({
+            id: row.id,
+            fullName: row.canonical_full_name,
+            contacts: row.contacts,
+            affiliations: row.affiliations,
+            hasArtifacts: Number(row.artifact_count ?? 0) > 0,
+            artifactCount: Number(row.artifact_count ?? 0),
+            lastArtifactAt: row.last_artifact_at?.toISOString() ?? null,
+            source: row.from_bot ? 'BOT' : 'CRM / IMPORT',
+            profileStatus: row.profile_needs_review ? 'Нужно уточнить ФИО' : 'Заполнен',
+            events: row.events,
+            artifacts: row.artifacts,
+            comments: row.comments,
+            sourceRows: row.source_rows,
+          });
         }
+        offset += result.rows.length;
       }
 
+      const bytes = await createParticipantsExportWorkbook({ rows });
       const suffix = query.eventId ? `-event-${query.eventId}` : '';
       return reply
-        .header('Content-Type', 'text/csv; charset=utf-8')
-        .header('Content-Disposition', `attachment; filename="cpi-participants${suffix}.csv"`)
+        .header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        .header('Content-Disposition', `attachment; filename="cpi-participants${suffix}.xlsx"`)
         .header('Cache-Control', 'private, no-store, max-age=0')
         .header('Pragma', 'no-cache')
         .header('X-Content-Type-Options', 'nosniff')
-        .send(Readable.from(streamCsv()));
+        .send(Buffer.from(bytes));
     },
   );
 
@@ -612,11 +598,49 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
       const period = periodFromQuery(request.query as PeriodQueryInput);
       const organization = await getOrganizationContext(app.pool);
       const report = await loadOperationalPeriodReport(app.pool, organization.id, period);
-      await auditPeriodExport(app, request, 'period.summary_exported', report, 'JSON');
       return reply
         .header('Content-Type', 'application/json; charset=utf-8')
-        .header('Content-Disposition', `attachment; filename="${periodFileStem(period)}.json"`)
+        .header('Cache-Control', 'private, no-store, max-age=0')
         .send(report);
+    },
+  );
+
+  app.get(
+    '/exports/period/report.xlsx',
+    {
+      config: { rateLimit: heavyOperationRateLimit(4, '1 minute') },
+      preHandler: [app.requirePermission(Permissions.EXPORTS_BULK), guardExportConcurrency],
+      schema: {
+        tags: ['Экспорт'],
+        summary: 'XLSX-отчёт дашборда с метриками качества артефактов',
+        querystring: PeriodQuery,
+      },
+    },
+    async (request, reply) => {
+      const period = periodFromQuery(request.query as PeriodQueryInput);
+      const organization = await getOrganizationContext(app.pool);
+      const report = await loadOperationalPeriodReport(app.pool, organization.id, period);
+      const bytes = await createOperationalPeriodWorkbook({
+        period: { from: report.period.from, to: report.period.to },
+        summary: periodWorkbookSummary(report),
+        quality: periodWorkbookQuality(report),
+        artifacts: [],
+        people: [],
+        tasks: [],
+        events: [],
+        interactions: [],
+        projects: [],
+        projectMembers: [],
+        projectArtifacts: [],
+        projectEvents: [],
+      });
+      await auditPeriodExport(app, request, 'period.dashboard_xlsx_exported', report, 'XLSX');
+      return reply
+        .header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        .header('Content-Disposition', `attachment; filename="${periodFileStem(period)}.xlsx"`)
+        .header('Cache-Control', 'private, no-store, max-age=0')
+        .header('X-Content-Type-Options', 'nosniff')
+        .send(Buffer.from(bytes));
     },
   );
 
@@ -732,6 +756,15 @@ export async function registerExportRoutes(app: FastifyInstance): Promise<void> 
             note: 'Полный состав и все артефакты — на отдельных листах',
           },
         ],
+        quality: {
+          reviewed: report.artifacts.reviewed,
+          awaitingReview: report.artifacts.awaitingReview,
+          accepted: report.artifacts.accepted,
+          rejected: report.artifacts.rejected,
+          averageScore: report.artifacts.averageScore,
+          medianScore: report.artifacts.medianScore,
+          scoreDistribution: report.artifacts.scoreDistribution,
+        },
         artifacts: data.artifacts.map((artifact) => ({
           versionId: artifact.version_id,
           artifactId: artifact.artifact_id,
@@ -1409,6 +1442,61 @@ function periodFileStem(period: PeriodBounds): string {
   return `cpi-report-${period.from.toISOString().slice(0, 10)}-${period.to.toISOString().slice(0, 10)}`;
 }
 
+function periodWorkbookSummary(report: OperationalPeriodReport) {
+  return [
+    {
+      label: 'Новые участники',
+      value: report.people.newPeople,
+      note: `Из бота: ${report.people.newFromBot}`,
+    },
+    {
+      label: 'Всего участников',
+      value: report.people.total,
+      note: `Из бота: ${report.people.totalFromBot}`,
+    },
+    { label: 'Отправляли артефакты за период', value: report.artifacts.uniqueAuthors },
+    { label: 'Отправляли артефакты всего', value: report.people.artifactSendersEver },
+    { label: 'Отправлено версий', value: report.artifacts.submittedVersions },
+    {
+      label: 'Файлов',
+      value: report.artifacts.files,
+      note: `Доступно: ${report.artifacts.availableFiles}`,
+    },
+    {
+      label: 'Оценено',
+      value: report.artifacts.reviewed,
+      note: `Средний балл: ${report.artifacts.averageScore?.toFixed(1) ?? '—'}, медиана: ${report.artifacts.medianScore?.toFixed(1) ?? '—'}`,
+    },
+    { label: 'Принято', value: report.artifacts.accepted },
+    { label: 'Не принято', value: report.artifacts.rejected },
+    { label: 'Ждут оценки', value: report.artifacts.awaitingReview },
+    { label: 'Участий в мероприятиях', value: report.events.participations },
+    { label: 'Завершено задач', value: report.tasks.completed },
+    { label: 'Взаимодействий', value: report.interactions.recorded },
+    { label: 'Нужно уточнить ФИО', value: report.people.profilesNeedReview },
+    ...report.artifacts.byType.map((item) => ({
+      label: `Тип артефакта: ${item.name}`,
+      value: item.count,
+    })),
+    ...report.artifacts.bySource.map((item) => ({
+      label: `Источник артефакта: ${item.source}`,
+      value: item.count,
+    })),
+  ];
+}
+
+function periodWorkbookQuality(report: OperationalPeriodReport) {
+  return {
+    reviewed: report.artifacts.reviewed,
+    awaitingReview: report.artifacts.awaitingReview,
+    accepted: report.artifacts.accepted,
+    rejected: report.artifacts.rejected,
+    averageScore: report.artifacts.averageScore,
+    medianScore: report.artifacts.medianScore,
+    scoreDistribution: report.artifacts.scoreDistribution,
+  };
+}
+
 async function auditPeriodExport(
   app: FastifyInstance,
   request: FastifyRequest,
@@ -1907,13 +1995,4 @@ function exportDecisionLabel(values: readonly string[]): string {
       UNKNOWN: 'Не указано',
     }[selected] ?? selected
   );
-}
-
-function csvRow(values: readonly unknown[]): string {
-  return values.map((value) => csvCell(value == null ? '' : String(value))).join(';');
-}
-
-function csvCell(value: string): string {
-  const safe = /^\s*[=+\-@]/u.test(value) ? `'${value}` : value;
-  return `"${safe.replaceAll('"', '""')}"`;
 }

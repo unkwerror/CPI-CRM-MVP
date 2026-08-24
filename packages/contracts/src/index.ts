@@ -105,6 +105,21 @@ export const CreateArtifactBody = Type.Object({
   projectId: Type.Optional(Uuid),
 });
 
+/**
+ * Данные контейнера можно уточнять без переписывания неизменяемых версий.
+ * `null` у связей явно снимает мероприятие или проект.
+ */
+export const UpdateArtifactBody = Type.Object(
+  {
+    title: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
+    typeCode: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
+    description: Type.Optional(Type.Union([Type.String({ maxLength: 10_000 }), Type.Null()])),
+    eventId: Type.Optional(Type.Union([Uuid, Type.Null()])),
+    projectId: Type.Optional(Type.Union([Uuid, Type.Null()])),
+  },
+  { additionalProperties: false, minProperties: 1 },
+);
+
 export const ArtifactContributorInput = Type.Object({
   personId: Uuid,
   role: Type.Union([Type.Literal('AUTHOR'), Type.Literal('CONTRIBUTOR')]),
@@ -393,6 +408,7 @@ export type CreatePersonInput = Static<typeof CreatePersonBody>;
 export type PatchPersonInput = Static<typeof PatchPersonBody>;
 export type CreateEventInput = Static<typeof CreateEventBody>;
 export type CreateArtifactInput = Static<typeof CreateArtifactBody>;
+export type UpdateArtifactInput = Static<typeof UpdateArtifactBody>;
 export type CreateArtifactVersionInput = Static<typeof CreateArtifactVersionBody>;
 export type SubmitArtifactVersionInput = Static<typeof SubmitArtifactVersionBody>;
 export type ReviewArtifactVersionInput = Static<typeof ReviewArtifactVersionBody>;

@@ -3,6 +3,7 @@ import {
   CreateArtifactVersionBody,
   ReviewArtifactVersionBody,
   SubmitArtifactVersionBody,
+  UpdateArtifactBody,
 } from '@cpi-crm/contracts';
 import {
   Permissions,
@@ -161,13 +162,18 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
       const versionId = (request.params as { id: string }).id;
       const organization = await getOrganizationContext(app.pool);
       const version = await app.pool.query(
-        `SELECT av.id, av.artifact_id, a.title, at.name AS type_name,
+        `SELECT av.id, av.artifact_id, a.title, a.description,
+                at.code AS type_code, at.name AS type_name,
+                a.event_id, event.name AS event_name,
+                a.project_id, project.name AS project_name,
                 av.version_number, av.status, av.content_type, av.text_content,
                 av.submitted_at, ar.id AS review_id, ar.score, ar.decision,
                 ar.comment, ar.reviewed_at, reviewer.display_name AS reviewer_name
            FROM artifact_versions av
            JOIN artifacts a ON a.id = av.artifact_id
            JOIN artifact_types at ON at.id = a.type_id
+           LEFT JOIN events event ON event.id = a.event_id
+           LEFT JOIN projects project ON project.id = a.project_id
            LEFT JOIN artifact_review_selections ars ON ars.artifact_version_id = av.id
            LEFT JOIN artifact_reviews ar ON ar.id = ars.current_final_review_id
            LEFT JOIN app_users reviewer ON reviewer.id = ar.reviewer_user_id
@@ -203,13 +209,20 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
         id: row.id,
         artifactId: row.artifact_id,
         title: row.title,
+        description: row.description,
+        typeCode: row.type_code,
         typeName: row.type_name,
+        eventId: row.event_id,
+        eventName: row.event_name,
+        projectId: row.project_id,
+        projectName: row.project_name,
         versionNumber: row.version_number,
         status: row.status,
         contentType: row.content_type,
         textContent: row.text_content,
         submittedAt: row.submitted_at?.toISOString() ?? null,
         canReview: hasPermission(request.authUser!.roles, Permissions.ARTIFACTS_REVIEW),
+        canEdit: hasPermission(request.authUser!.roles, Permissions.ARTIFACTS_WRITE),
         contributors: contributors.rows.map((item) => ({
           id: item.id,
           name: item.name,
@@ -297,6 +310,161 @@ export async function registerArtifactRoutes(app: FastifyInstance): Promise<void
         return result.rows[0];
       });
       return reply.code(201).send(created);
+    },
+  );
+
+  app.patch(
+    '/artifacts/:id',
+    {
+      preHandler: app.requirePermission(Permissions.ARTIFACTS_WRITE),
+      schema: {
+        tags: ['Артефакты'],
+        summary: 'Изменить данные артефакта и его связи',
+        params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
+        body: UpdateArtifactBody,
+      },
+    },
+    async (request) => {
+      const artifactId = (request.params as { id: string }).id;
+      const body = request.body as {
+        title?: string;
+        typeCode?: string;
+        description?: string | null;
+        eventId?: string | null;
+        projectId?: string | null;
+      };
+      const organization = await getOrganizationContext(app.pool);
+
+      return transaction(app.pool, async (client) => {
+        const artifact = await client.query<{
+          id: string;
+          title: string;
+          description: string | null;
+          type_id: string;
+          type_code: string;
+          event_id: string | null;
+          project_id: string | null;
+        }>(
+          `SELECT artifact.id, artifact.title, artifact.description, artifact.type_id,
+                  type.code AS type_code, artifact.event_id, artifact.project_id
+             FROM artifacts artifact
+             JOIN artifact_types type ON type.id = artifact.type_id
+            WHERE artifact.id = $1 AND artifact.organization_id = $2
+              AND artifact.archived_at IS NULL AND artifact.status <> 'VOIDED'
+            FOR UPDATE OF artifact`,
+          [artifactId, organization.id],
+        );
+        const current = artifact.rows[0];
+        if (!current) throw new HttpProblem(404, 'Артефакт не найден');
+
+        const title = body.title === undefined ? current.title : body.title.trim();
+        if (!title) throw new HttpProblem(400, 'Название артефакта не может быть пустым');
+
+        let typeId = current.type_id;
+        let typeCode = current.type_code;
+        if (body.typeCode !== undefined) {
+          const type = await client.query<{ id: string; code: string }>(
+            `SELECT id, code FROM artifact_types
+              WHERE code = $1 AND archived_at IS NULL
+              FOR SHARE`,
+            [body.typeCode],
+          );
+          if (!type.rows[0]) throw new HttpProblem(400, 'Неизвестный тип артефакта');
+          typeId = type.rows[0].id;
+          typeCode = type.rows[0].code;
+        }
+
+        const eventId = body.eventId === undefined ? current.event_id : body.eventId;
+        const projectId = body.projectId === undefined ? current.project_id : body.projectId;
+        if (eventId && eventId !== current.event_id)
+          await assertArtifactEventAvailable(client, eventId, organization.id);
+        if (projectId && projectId !== current.project_id)
+          await assertArtifactProjectAvailable(client, projectId, organization.id);
+
+        const authors = await client.query<{ person_id: string }>(
+          `SELECT DISTINCT COALESCE(person.merged_into_person_id, person.id) AS person_id
+             FROM artifact_versions version
+             JOIN artifact_version_contributors contributor
+               ON contributor.artifact_version_id = version.id
+              AND contributor.contribution_role = 'AUTHOR'
+             JOIN persons person ON person.id = contributor.person_id
+            WHERE version.artifact_id = $1 AND version.status <> 'VOIDED'
+              AND person.archived_at IS NULL`,
+          [artifactId],
+        );
+        const authorIds = authors.rows.map((row) => row.person_id);
+        if (eventId && eventId !== current.event_id && authorIds.length)
+          await assertArtifactEventHasAuthor(client, eventId, authorIds);
+        if (projectId && projectId !== current.project_id && authorIds.length)
+          await assertArtifactProjectHasAuthor(client, projectId, authorIds);
+
+        const description =
+          body.description === undefined ? current.description : body.description?.trim() || null;
+        const updated = await client.query<{
+          id: string;
+          title: string;
+          description: string | null;
+          event_id: string | null;
+          event_name: string | null;
+          project_id: string | null;
+          project_name: string | null;
+          type_code: string;
+          type_name: string;
+          version: number;
+        }>(
+          `UPDATE artifacts artifact
+              SET title = $3, description = $4, type_id = $5,
+                  event_id = $6, project_id = $7,
+                  updated_at = now(), version = artifact.version + 1
+             FROM artifact_types type
+             LEFT JOIN events event ON event.id = $6
+             LEFT JOIN projects project ON project.id = $7
+            WHERE artifact.id = $1 AND artifact.organization_id = $2
+              AND type.id = $5
+          RETURNING artifact.id, artifact.title, artifact.description,
+                    artifact.event_id, event.name AS event_name,
+                    artifact.project_id, project.name AS project_name,
+                    type.code AS type_code, type.name AS type_name, artifact.version`,
+          [artifactId, organization.id, title, description, typeId, eventId, projectId],
+        );
+
+        const before = {
+          title: current.title,
+          description: current.description,
+          typeCode: current.type_code,
+          eventId: current.event_id,
+          projectId: current.project_id,
+        };
+        const after = {
+          title,
+          description,
+          typeCode,
+          eventId,
+          projectId,
+        };
+        await writeAudit(client, {
+          actor: request.authUser!,
+          requestId: request.id,
+          action: 'artifact.updated',
+          entityType: 'artifact',
+          entityId: artifactId,
+          before,
+          after,
+        });
+
+        return {
+          id: updated.rows[0]!.id,
+          title: updated.rows[0]!.title,
+          description: updated.rows[0]!.description,
+          typeCode: updated.rows[0]!.type_code,
+          typeName: updated.rows[0]!.type_name,
+          eventId: updated.rows[0]!.event_id,
+          eventName: updated.rows[0]!.event_name,
+          projectId: updated.rows[0]!.project_id,
+          projectName: updated.rows[0]!.project_name,
+          version: updated.rows[0]!.version,
+        };
+      });
     },
   );
 

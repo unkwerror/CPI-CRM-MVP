@@ -10,7 +10,7 @@ import {
   UsersIcon,
 } from 'lucide-react';
 import Link from 'next/link';
-import { useMemo, useState } from 'react';
+import { type FormEvent, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 
 import { DataToolbar, ToolbarSearch, ToolbarSelect } from '@/components/data-toolbar';
@@ -22,6 +22,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -325,7 +326,7 @@ export function EventParticipantsTab({
                 {resultPerson.canonicalFullName} · {eventName}
               </DialogDescription>
             </DialogHeader>
-            <div className="space-y-2">
+            <DialogBody className="space-y-2">
               <Label htmlFor="event-participant-result">Результат</Label>
               <Textarea
                 autoFocus
@@ -335,7 +336,7 @@ export function EventParticipantsTab({
                 rows={5}
                 value={resultDraft}
               />
-            </div>
+            </DialogBody>
             <DialogFooter>
               <Button
                 disabled={savingResult}
@@ -401,7 +402,8 @@ function AddParticipantDialog({
 
   const alreadyHere = person !== null && existingIds.has(person.id);
 
-  async function submit() {
+  async function submit(event: FormEvent) {
+    event.preventDefault();
     if (!person || alreadyHere) return;
     setSaving(true);
     try {
@@ -425,8 +427,8 @@ function AddParticipantDialog({
   }
 
   return (
-    <Dialog onOpenChange={(open) => !open && onClose()} open>
-      <DialogContent>
+    <Dialog onOpenChange={(open) => !open && !saving && onClose()} open>
+      <DialogContent className="sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>Добавить участника</DialogTitle>
           <DialogDescription>
@@ -435,66 +437,69 @@ function AddParticipantDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
-          <div className="space-y-2">
-            <Label>Участник</Label>
-            <PersonPicker onChange={setPerson} value={person} />
-            {alreadyHere ? (
-              <p className="text-[13px] text-amber-600">Этот участник уже есть в мероприятии.</p>
-            ) : null}
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2">
+        <form className="contents" onSubmit={submit}>
+          <DialogBody className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="participant-decision">Решение</Label>
-              <Select onValueChange={setDecision} value={decision}>
-                <SelectTrigger id="participant-decision">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {Object.entries(PARTICIPATION_DECISION_LABELS).map(([value, label]) => (
-                    <SelectItem key={value} value={value}>
-                      {label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Label>Участник</Label>
+              <PersonPicker onChange={setPerson} value={person} />
+              {alreadyHere ? (
+                <p className="text-[13px] text-amber-600">Этот участник уже есть в мероприятии.</p>
+              ) : null}
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="participant-decision">Решение</Label>
+                <Select disabled={saving} onValueChange={setDecision} value={decision}>
+                  <SelectTrigger id="participant-decision">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {Object.entries(PARTICIPATION_DECISION_LABELS).map(([value, label]) => (
+                      <SelectItem key={value} value={value}>
+                        {label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="participant-attendance">Посещение</Label>
+                <Select disabled={saving} onValueChange={setAttendance} value={attendance}>
+                  <SelectTrigger id="participant-attendance">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {Object.entries(ATTENDANCE_LABELS).map(([value, label]) => (
+                      <SelectItem key={value} value={value}>
+                        {label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="participant-attendance">Посещение</Label>
-              <Select onValueChange={setAttendance} value={attendance}>
-                <SelectTrigger id="participant-attendance">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {Object.entries(ATTENDANCE_LABELS).map(([value, label]) => (
-                    <SelectItem key={value} value={value}>
-                      {label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Label htmlFor="participant-result">Результат (необязательно)</Label>
+              <Textarea
+                disabled={saving}
+                id="participant-result"
+                onChange={(event) => setResult(event.target.value)}
+                placeholder="Например: заявка принята; выступил, занял 2 место"
+                rows={3}
+                value={result}
+              />
             </div>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="participant-result">Результат (необязательно)</Label>
-            <Textarea
-              id="participant-result"
-              onChange={(event) => setResult(event.target.value)}
-              placeholder="Например: заявка принята; выступил, занял 2 место"
-              rows={3}
-              value={result}
-            />
-          </div>
-        </div>
+          </DialogBody>
 
-        <DialogFooter>
-          <Button onClick={onClose} variant="outline">
-            Отмена
-          </Button>
-          <Button disabled={!person || alreadyHere || saving} onClick={() => void submit()}>
-            Добавить
-          </Button>
-        </DialogFooter>
+          <DialogFooter>
+            <Button disabled={saving} onClick={onClose} type="button" variant="outline">
+              Отмена
+            </Button>
+            <Button disabled={!person || alreadyHere || saving} type="submit">
+              {saving ? 'Добавляем…' : 'Добавить'}
+            </Button>
+          </DialogFooter>
+        </form>
       </DialogContent>
     </Dialog>
   );

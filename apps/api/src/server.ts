@@ -26,6 +26,7 @@ import { registerPartnerRoutes } from './modules/partners/routes.js';
 import { registerPeopleRoutes } from './modules/people/routes.js';
 import { registerProductRoutes } from './modules/products/routes.js';
 import { registerProjectRoutes } from './modules/projects/routes.js';
+import { registerProjectApplicationRoutes } from './modules/projects/application-routes.js';
 import { registerAuth } from './plugins/auth.js';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -160,6 +161,7 @@ export async function buildServer(config: ApiConfig = loadConfig()) {
   await registerLockerPendingRoutes(app);
   await registerEventRoutes(app);
   await registerProjectRoutes(app);
+  await registerProjectApplicationRoutes(app);
   await registerExportRoutes(app);
   await registerArtifactRoutes(app);
   await registerCatalogRoutes(app);

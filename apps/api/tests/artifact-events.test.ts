@@ -1,4 +1,4 @@
-import { CreateArtifactBody } from '@cpi-crm/contracts';
+import { CreateArtifactBody, UpdateArtifactBody } from '@cpi-crm/contracts';
 import type { PoolClient } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -18,6 +18,18 @@ describe('artifact event links', () => {
       format: 'uuid',
     });
     expect(CreateArtifactBody.required).not.toContain('eventId');
+  });
+
+  it('allows event and project links to be changed or cleared', () => {
+    for (const field of ['eventId', 'projectId'] as const) {
+      expect(UpdateArtifactBody.properties[field]).toMatchObject({ anyOf: expect.any(Array) });
+      expect(UpdateArtifactBody.properties[field].anyOf).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'string', format: 'uuid' }),
+          expect.objectContaining({ type: 'null' }),
+        ]),
+      );
+    }
   });
 
   it('checks that the selected event belongs to the current organization', async () => {

@@ -21,9 +21,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Textarea } from '@/components/ui/textarea';
 import { api, apiErrorMessage, formatDate } from '@/lib/api';
-import { EVENT_STATUS_LABELS } from '@/lib/status-labels';
-import type { EventSummary } from '@/lib/types';
+import {
+  ATTENDANCE_LABELS,
+  EVENT_STATUS_LABELS,
+  PARTICIPATION_DECISION_LABELS,
+} from '@/lib/status-labels';
+import type { EventParticipationSummary, EventSummary } from '@/lib/types';
 
 export function PersonEventLinkDialog({
   personId,
@@ -38,6 +43,10 @@ export function PersonEventLinkDialog({
 }) {
   const [events, setEvents] = useState<EventSummary[]>([]);
   const [eventId, setEventId] = useState('');
+  const [decision, setDecision] = useState<EventParticipationSummary['decision']>('ACCEPTED');
+  const [attendance, setAttendance] =
+    useState<EventParticipationSummary['attendance']>('ATTENDED');
+  const [result, setResult] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -60,7 +69,12 @@ export function PersonEventLinkDialog({
     try {
       await api(`/events/${eventId}/participants`, {
         method: 'POST',
-        body: JSON.stringify({ personId }),
+        body: JSON.stringify({
+          personId,
+          decision,
+          attendance,
+          result: result.trim() || undefined,
+        }),
       });
       toast.success('Участник добавлен в мероприятие');
       await onLinked();
@@ -74,7 +88,7 @@ export function PersonEventLinkDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && !saving && onClose()}>
-      <DialogContent>
+      <DialogContent className="sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>Добавить в мероприятие</DialogTitle>
           <DialogDescription>
@@ -82,7 +96,7 @@ export function PersonEventLinkDialog({
           </DialogDescription>
         </DialogHeader>
         <form className="contents" onSubmit={submit}>
-          <DialogBody>
+          <DialogBody className="space-y-4">
             <div className="space-y-1.5">
               <Label>Мероприятие *</Label>
               <Select disabled={loading || saving} onValueChange={setEventId} value={eventId}>
@@ -104,6 +118,61 @@ export function PersonEventLinkDialog({
                   Участник уже связан со всеми доступными мероприятиями.
                 </p>
               )}
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="person-event-decision">Решение</Label>
+                <Select
+                  disabled={saving}
+                  onValueChange={(value) =>
+                    setDecision(value as EventParticipationSummary['decision'])
+                  }
+                  value={decision}
+                >
+                  <SelectTrigger id="person-event-decision">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {Object.entries(PARTICIPATION_DECISION_LABELS).map(([value, label]) => (
+                      <SelectItem key={value} value={value}>
+                        {label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="person-event-attendance">Посещение</Label>
+                <Select
+                  disabled={saving}
+                  onValueChange={(value) =>
+                    setAttendance(value as EventParticipationSummary['attendance'])
+                  }
+                  value={attendance}
+                >
+                  <SelectTrigger id="person-event-attendance">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {Object.entries(ATTENDANCE_LABELS).map(([value, label]) => (
+                      <SelectItem key={value} value={value}>
+                        {label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="person-event-result">Результат (необязательно)</Label>
+              <Textarea
+                disabled={saving}
+                id="person-event-result"
+                onChange={(event) => setResult(event.target.value)}
+                placeholder="Например: выступил, занял 2 место; заявка одобрена"
+                rows={3}
+                value={result}
+              />
             </div>
           </DialogBody>
           <DialogFooter>

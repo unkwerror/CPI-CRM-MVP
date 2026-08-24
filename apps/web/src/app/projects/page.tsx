@@ -2,6 +2,7 @@
 
 import {
   ArrowRightIcon,
+  BotIcon,
   CalendarDaysIcon,
   FileCheck2Icon,
   FolderKanbanIcon,
@@ -15,6 +16,7 @@ import { Suspense, type FormEvent, useCallback, useEffect, useState } from 'reac
 import { DataToolbar, ToolbarReset, ToolbarSearch, ToolbarSelect } from '@/components/data-toolbar';
 import { EmptyState } from '@/components/empty-state';
 import { PageHeader, PageStack } from '@/components/page-header';
+import { ProjectApplicationsPanel } from '@/components/project-applications-panel';
 import {
   PROJECT_STATUS_LABELS,
   PROJECT_STATUS_ORDER,
@@ -110,6 +112,8 @@ function ProjectsContent() {
         }
       />
 
+      {can('people.write') && <ProjectApplicationsPanel onChanged={load} />}
+
       <DataToolbar>
         <form className="min-w-56 flex-1" onSubmit={submitSearch}>
           <ToolbarSearch
@@ -192,6 +196,11 @@ function ProjectsContent() {
                               <strong className="block font-medium group-hover:underline">
                                 {project.name}
                               </strong>
+                              {project.visibleInBot && (
+                                <Badge className="mt-1" variant="soft-primary">
+                                  <BotIcon /> В Telegram-боте
+                                </Badge>
+                              )}
                               {project.description && (
                                 <small className="text-muted-foreground line-clamp-1 block max-w-xl">
                                   {project.description}

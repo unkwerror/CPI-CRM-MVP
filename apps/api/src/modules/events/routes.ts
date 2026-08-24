@@ -72,9 +72,65 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
       const organization = await getOrganizationContext(app.pool);
       const values: unknown[] = [organization.id];
       const filters = ['true'];
+      let searchRanking = '0 AS search_rank, 0::real AS search_similarity';
       if (query.q?.trim()) {
-        values.push(`%${query.q.trim()}%`);
-        filters.push(`name ILIKE $${values.length}`);
+        const rawSearch = query.q.trim();
+        const normalizedSearch = normalizeFullName(rawSearch);
+        values.push(rawSearch, normalizedSearch);
+        const rawParameter = `$${values.length - 1}`;
+        const normalizedParameter = `$${values.length}`;
+        filters.push(`(
+          event_registry.id::text = ${rawParameter}
+          OR starts_with(event_registry.id::text, lower(${rawParameter}))
+          OR event_registry.normalized_name = ${normalizedParameter}
+          OR starts_with(event_registry.normalized_name, ${normalizedParameter})
+          OR position(${normalizedParameter} in event_registry.normalized_name) > 0
+          OR similarity(event_registry.normalized_name, ${normalizedParameter}) >= 0.30
+          OR EXISTS (
+            SELECT 1
+              FROM event_participations matched_participation
+              JOIN persons observed_person
+                ON observed_person.id = matched_participation.person_id
+              JOIN persons matched_person
+                ON matched_person.id = COALESCE(
+                     observed_person.merged_into_person_id,
+                     observed_person.id
+                   )
+             WHERE matched_participation.event_id = event_registry.id
+               AND matched_participation.archived_at IS NULL
+               AND matched_person.archived_at IS NULL
+               AND (
+                 matched_person.normalized_full_name = ${normalizedParameter}
+                 OR starts_with(matched_person.normalized_full_name, ${normalizedParameter})
+                 OR position(${normalizedParameter} in matched_person.normalized_full_name) > 0
+                 OR similarity(matched_person.normalized_full_name, ${normalizedParameter}) >= 0.32
+               )
+          )
+          OR EXISTS (
+            SELECT 1
+              FROM event_project_participations matched_link
+              JOIN projects matched_project ON matched_project.id = matched_link.project_id
+             WHERE matched_link.event_id = event_registry.id
+               AND matched_link.archived_at IS NULL
+               AND matched_project.archived_at IS NULL
+               AND (
+                 matched_project.normalized_name = ${normalizedParameter}
+                 OR starts_with(matched_project.normalized_name, ${normalizedParameter})
+                 OR position(${normalizedParameter} in matched_project.normalized_name) > 0
+                 OR similarity(matched_project.normalized_name, ${normalizedParameter}) >= 0.30
+               )
+          )
+        )`);
+        searchRanking = `CASE
+                           WHEN event_registry.id::text = ${rawParameter} THEN 0
+                           WHEN event_registry.normalized_name = ${normalizedParameter} THEN 1
+                           WHEN starts_with(event_registry.normalized_name, ${normalizedParameter}) THEN 2
+                           WHEN position(${normalizedParameter} in event_registry.normalized_name) > 0 THEN 3
+                           WHEN similarity(event_registry.normalized_name, ${normalizedParameter}) >= 0.30 THEN 4
+                           ELSE 5
+                         END AS search_rank,
+                         similarity(event_registry.normalized_name, ${normalizedParameter})
+                           AS search_similarity`;
       }
       if (query.status?.trim()) {
         values.push(query.status.trim());
@@ -109,10 +165,12 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
           WHERE e.organization_id = $1 AND e.archived_at IS NULL
           GROUP BY e.id
         ), filtered_events AS (
-          SELECT * FROM event_registry WHERE ${filters.join(' AND ')}
+          SELECT event_registry.*, ${searchRanking}
+            FROM event_registry WHERE ${filters.join(' AND ')}
         ), paged_events AS (
           SELECT * FROM filtered_events
-           ORDER BY starts_at DESC NULLS LAST, normalized_name, id
+           ORDER BY search_rank, search_similarity DESC,
+                    starts_at DESC NULLS LAST, normalized_name, id
            LIMIT $${limitParameter} OFFSET $${offsetParameter}
         )
         SELECT page.id, page.name, page.status, page.starts_at, page.ends_at, page.version,
@@ -121,7 +179,8 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
                totals.total_count::text AS total_count
           FROM (SELECT count(*) AS total_count FROM filtered_events) totals
           LEFT JOIN paged_events page ON true
-         ORDER BY page.starts_at DESC NULLS LAST, page.normalized_name, page.id`,
+         ORDER BY page.search_rank, page.search_similarity DESC,
+                  page.starts_at DESC NULLS LAST, page.normalized_name, page.id`,
         values,
       );
       return {
@@ -363,24 +422,51 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
       preHandler: app.requirePermission(Permissions.PEOPLE_WRITE),
       schema: {
         tags: ['Мероприятия'],
-        summary: 'Обновить результат участия в мероприятии',
+        summary: 'Обновить участие в мероприятии',
         params: Type.Object({
           id: Type.String({ format: 'uuid' }),
           personId: Type.String({ format: 'uuid' }),
         }),
         body: Type.Object(
-          { result: Type.Union([Type.String({ minLength: 1, maxLength: 10_000 }), Type.Null()]) },
-          { additionalProperties: false },
+          {
+            decision: Type.Optional(
+              Type.Union([
+                Type.Literal('UNKNOWN'),
+                Type.Literal('PENDING'),
+                Type.Literal('ACCEPTED'),
+                Type.Literal('REJECTED'),
+                Type.Literal('WAITLISTED'),
+              ]),
+            ),
+            attendance: Type.Optional(
+              Type.Union([
+                Type.Literal('UNKNOWN'),
+                Type.Literal('ATTENDED'),
+                Type.Literal('NO_SHOW'),
+                Type.Literal('PARTIAL'),
+              ]),
+            ),
+            result: Type.Optional(
+              Type.Union([Type.String({ minLength: 1, maxLength: 10_000 }), Type.Null()]),
+            ),
+          },
+          { additionalProperties: false, minProperties: 1 },
         ),
       },
     },
     async (request) => {
       const { id: eventId, personId } = request.params as { id: string; personId: string };
-      const result = (request.body as { result: string | null }).result?.trim() || null;
+      const body = request.body as {
+        decision?: 'UNKNOWN' | 'PENDING' | 'ACCEPTED' | 'REJECTED' | 'WAITLISTED';
+        attendance?: 'UNKNOWN' | 'ATTENDED' | 'NO_SHOW' | 'PARTIAL';
+        result?: string | null;
+      };
+      const hasResult = Object.prototype.hasOwnProperty.call(body, 'result');
+      const result = hasResult ? body.result?.trim() || null : null;
       const organization = await getOrganizationContext(app.pool);
       return transaction(app.pool, async (client) => {
-        const event = await client.query(
-          `SELECT 1 FROM events
+        const event = await client.query<{ starts_at: Date | null }>(
+          `SELECT starts_at FROM events
             WHERE id = $1 AND organization_id = $2 AND archived_at IS NULL`,
           [eventId, organization.id],
         );
@@ -391,26 +477,58 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
           [personId, organization.id],
         );
         if (!person.rows[0]) throw new HttpProblem(404, 'Участник не найден');
-        const updated = await client.query<{ id: string }>(
+        const updated = await client.query<{
+          id: string;
+          decision: string;
+          attendance: string;
+          result: string | null;
+        }>(
           `UPDATE event_participations
-              SET result = $3, updated_at = now(), version = version + 1
+              SET decision = COALESCE($3::participation_decision, decision),
+                  decision_at = CASE
+                    WHEN $3::text IS NULL THEN decision_at
+                    WHEN $3::text = 'UNKNOWN' THEN NULL
+                    ELSE now()
+                  END,
+                  attendance = COALESCE($4::attendance_status, attendance),
+                  attended_at = CASE
+                    WHEN $4::text IS NULL THEN attended_at
+                    WHEN $4::text = 'UNKNOWN' THEN NULL
+                    ELSE COALESCE($5::timestamptz, now())
+                  END,
+                  result = CASE WHEN $6::boolean THEN $7 ELSE result END,
+                  updated_at = now(), version = version + 1
             WHERE event_id = $1 AND archived_at IS NULL
               AND person_id IN (
                     SELECT id FROM persons WHERE id = $2 OR merged_into_person_id = $2
                   )
-            RETURNING id`,
-          [eventId, person.rows[0].id, result],
+            RETURNING id, decision::text, attendance::text, result`,
+          [
+            eventId,
+            person.rows[0].id,
+            body.decision ?? null,
+            body.attendance ?? null,
+            event.rows[0].starts_at,
+            hasResult,
+            result,
+          ],
         );
         if (!updated.rows[0]) throw new HttpProblem(404, 'Запись участия не найдена');
         await writeAudit(client, {
           actor: request.authUser!,
           requestId: request.id,
-          action: 'event.participant_result_updated',
+          action: 'event.participation_updated',
           entityType: 'event_participation',
           entityId: updated.rows[0].id,
-          after: { eventId, personId: person.rows[0].id, result },
+          after: {
+            eventId,
+            personId: person.rows[0].id,
+            decision: updated.rows[0].decision,
+            attendance: updated.rows[0].attendance,
+            result: updated.rows[0].result,
+          },
         });
-        return { id: updated.rows[0].id, result };
+        return updated.rows[0];
       });
     },
   );

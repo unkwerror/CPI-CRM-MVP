@@ -22,7 +22,13 @@ const baseUser = {
  * Порядок запросов в резолвере зависит от того, разобралось ли ФИО, поэтому
  * заглушка отвечает по содержимому SQL, а не по номеру вызова.
  */
-function mockClient(overrides: { archivedRows?: unknown[]; tombstoneRows?: unknown[] } = {}) {
+function mockClient(
+  overrides: {
+    archivedRows?: unknown[];
+    tombstoneRows?: unknown[];
+    nameMatchRows?: unknown[];
+  } = {},
+) {
   const calls: string[] = [];
   const query = vi.fn(async (sql: string, _parameters?: unknown[]) => {
     calls.push(sql);
@@ -31,6 +37,9 @@ function mockClient(overrides: { archivedRows?: unknown[]; tombstoneRows?: unkno
     }
     if (sql.includes('person_deletion_tombstones')) {
       return { rows: overrides.tombstoneRows ?? [] };
+    }
+    if (sql.includes('WITH source AS (') && sql.includes('overlap.token_count')) {
+      return { rows: overrides.nameMatchRows ?? [] };
     }
     if (sql.includes('INSERT INTO persons')) return { rows: [{ id: archivedPersonId }] };
     if (sql.includes('INSERT INTO audit_log')) return { rows: [{ id: 'audit' }] };
@@ -126,5 +135,38 @@ describe('resolving a Locker participant', () => {
         String(sql).includes('UPDATE persons') && String(sql).includes('archived_at = NULL'),
     );
     expect(restoreCall?.[1]?.at(-1)).toBe(true);
+  });
+
+  it('queues a human-reviewed merge for a partial Telegram name matching CRM FIO', async () => {
+    const crmPersonId = '66666666-6666-4666-8666-666666666666';
+    const { client, query } = mockClient({
+      nameMatchRows: [
+        {
+          person_id: crmPersonId,
+          source_name: 'куракин антон',
+          candidate_name: 'куракин антон юрьевич',
+          exact_name: false,
+          prefix_name: true,
+          token_overlap: 2,
+        },
+      ],
+    });
+
+    await resolveLockerPerson(
+      client,
+      organization,
+      { ...baseUser, fullName: 'Куракин Антон', profileIncomplete: true },
+      'req-name-duplicate',
+    );
+
+    const duplicateInsert = query.mock.calls.find(
+      ([sql]) =>
+        String(sql).includes('INSERT INTO duplicate_candidates') &&
+        String(sql).includes('confidence_basis_points'),
+    );
+    expect(duplicateInsert?.[1]?.slice(0, 3)).toEqual([archivedPersonId, crmPersonId, 8600]);
+    expect(duplicateInsert?.[1]?.at(-1)).toBe(
+      JSON.stringify(['Совпали фамилия и имя с профилем Telegram']),
+    );
   });
 });

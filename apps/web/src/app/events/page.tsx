@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { Suspense, useCallback, useEffect, useState } from 'react';
+import { type FormEvent, Suspense, useCallback, useEffect, useState } from 'react';
 import { toast } from 'sonner';
 
 import { CreateEventDialog } from '@/components/create-event-dialog';
@@ -114,6 +114,11 @@ function EventsContent() {
     router.push(`/events${params.size ? `?${params}` : ''}`);
   }
 
+  function submitSearch(event: FormEvent) {
+    event.preventDefault();
+    updateParams({ q: query.trim() || null });
+  }
+
   async function changeStatus(eventId: string, status: string) {
     const event = data.items.find((candidate) => candidate.id === eventId);
     if (!event || event.status === status) return;
@@ -194,17 +199,19 @@ function EventsContent() {
       />
 
       <DataToolbar>
-        <ToolbarSearch
-          value={query}
-          onChange={(value) => {
-            setQuery(value);
-            if (value === '') updateParams({ q: null });
-          }}
-          placeholder="Поиск по названию…"
-        />
-        <Button variant="outline" size="sm" onClick={() => updateParams({ q: query.trim() || null })}>
-          Найти
-        </Button>
+        <form className="flex min-w-72 flex-1 gap-2" onSubmit={submitSearch}>
+          <ToolbarSearch
+            value={query}
+            onChange={(value) => {
+              setQuery(value);
+              if (value === '') updateParams({ q: null });
+            }}
+            placeholder="Название, участник, проект или ID…"
+          />
+          <Button type="submit" variant="outline" size="sm">
+            Найти
+          </Button>
+        </form>
         <ToolbarSelect
           label="Статус"
           value={searchParams.get('status') ?? ''}

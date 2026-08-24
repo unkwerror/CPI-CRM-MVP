@@ -16,6 +16,8 @@ const resourceBody = Type.Object({
   endsAt: Type.Optional(Type.String({ format: 'date-time' })),
   programId: Type.Optional(Type.String({ format: 'uuid' })),
   description: Type.Optional(Type.String({ maxLength: 10_000 })),
+  leadPersonId: Type.Optional(Type.String({ format: 'uuid' })),
+  visibleInBot: Type.Optional(Type.Boolean()),
 });
 
 const controlCharacters = /[\u0000-\u001f\u007f-\u009f]/u;
@@ -67,6 +69,8 @@ export async function registerCatalogRoutes(app: FastifyInstance): Promise<void>
           programId?: string;
           description?: string;
           participantIds?: string[];
+          leadPersonId?: string;
+          visibleInBot?: boolean;
         };
         const unicodeName = normalizeUnicode(body.name);
         if (resource === 'events' && controlCharacters.test(unicodeName)) {
@@ -135,15 +139,30 @@ export async function registerCatalogRoutes(app: FastifyInstance): Promise<void>
                 throw new HttpProblem(400, 'Программа организации не найдена');
               }
             }
+            let leadPersonId: string | null = null;
+            if (resource === 'projects' && body.leadPersonId) {
+              const lead = await client.query<{ person_id: string }>(
+                `SELECT canonical.id AS person_id
+                   FROM persons observed
+                   JOIN persons canonical
+                     ON canonical.id = COALESCE(observed.merged_into_person_id, observed.id)
+                  WHERE observed.id = $1 AND observed.organization_id = $2
+                    AND canonical.archived_at IS NULL
+                  FOR UPDATE OF canonical`,
+                [body.leadPersonId, organization.id],
+              );
+              if (!lead.rows[0]) throw new HttpProblem(400, 'Руководитель проекта не найден');
+              leadPersonId = lead.rows[0].person_id;
+            }
             const columns =
               resource === 'projects'
-                ? '(organization_id, program_id, name, normalized_name, description, status, starts_at, ends_at, owner_user_id)'
+                ? '(organization_id, program_id, name, normalized_name, description, status, starts_at, ends_at, owner_user_id, lead_person_id, visible_in_bot)'
                 : resource === 'events'
                   ? '(organization_id, program_id, name, normalized_name, status, starts_at, ends_at, owner_user_id)'
                   : '(organization_id, name, normalized_name, status, starts_at, ends_at, owner_user_id)';
             const values =
               resource === 'projects'
-                ? '($1, $2, $3, $4, $5, $6, $7, $8, $9)'
+                ? '($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)'
                 : resource === 'events'
                   ? '($1, $2, $3, $4, $5, $6, $7, $8)'
                   : '($1, $2, $3, $4, $5, $6, $7)';
@@ -159,6 +178,8 @@ export async function registerCatalogRoutes(app: FastifyInstance): Promise<void>
                     startsAt,
                     endsAt,
                     request.authUser!.userId,
+                    leadPersonId,
+                    body.visibleInBot ?? false,
                   ]
                 : resource === 'events'
                   ? [
@@ -184,6 +205,14 @@ export async function registerCatalogRoutes(app: FastifyInstance): Promise<void>
               `INSERT INTO ${resource} ${columns} VALUES ${values} RETURNING id`,
               parameters,
             );
+            if (resource === 'projects' && leadPersonId) {
+              await client.query(
+                `INSERT INTO project_memberships (project_id, person_id, role, data_origin)
+                 VALUES ($1, $2, 'Руководитель проекта', 'LIVE')
+                 ON CONFLICT (project_id, person_id) WHERE archived_at IS NULL DO NOTHING`,
+                [result.rows[0]!.id, leadPersonId],
+              );
+            }
             if (resource === 'events' && participantIds.length > 0) {
               const insertedParticipations = await client.query(
                 `WITH requested(person_id) AS (
@@ -223,6 +252,9 @@ export async function registerCatalogRoutes(app: FastifyInstance): Promise<void>
                 startsAt: startsAt?.toISOString() ?? null,
                 endsAt: endsAt?.toISOString() ?? null,
                 programId: body.programId ?? null,
+                ...(resource === 'projects'
+                  ? { leadPersonId, visibleInBot: body.visibleInBot ?? false }
+                  : {}),
                 ...(resource === 'events'
                   ? {
                       participantIds,

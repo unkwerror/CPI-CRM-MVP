@@ -147,7 +147,7 @@ export default function MetricsPage() {
                 icon={StarIcon}
                 label="Средняя оценка"
                 value={report.artifacts.averageScore?.toFixed(1) ?? '—'}
-                hint={`${count(report.artifacts.reviewed)} оценено, ${count(report.artifacts.awaitingReview)} ждут`}
+                hint={`медиана ${report.artifacts.medianScore?.toFixed(1) ?? '—'} · ${count(report.artifacts.reviewed)} оценено`}
               />
             </CardContent>
           </Card>
@@ -184,7 +184,7 @@ export default function MetricsPage() {
             </CardContent>
           </Card>
 
-          <div className="grid gap-4 lg:grid-cols-2">
+          <div className="grid gap-4 lg:grid-cols-3">
             <Card>
               <CardHeader>
                 <CardTitle>Артефакты по типам</CardTitle>
@@ -201,6 +201,29 @@ export default function MetricsPage() {
                     {report.artifacts.byType.map((item) => (
                       <TableRow key={item.name}>
                         <TableCell>{item.name}</TableCell>
+                        <TableCell className="text-right tabular">{count(item.count)}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableWrapper>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle>Качество 1–10</CardTitle>
+              </CardHeader>
+              <TableWrapper>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Оценка</TableHead>
+                      <TableHead className="text-right">Артефактов</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {report.artifacts.scoreDistribution.map((item) => (
+                      <TableRow key={item.score}>
+                        <TableCell className="tabular">{item.score} / 10</TableCell>
                         <TableCell className="text-right tabular">{count(item.count)}</TableCell>
                       </TableRow>
                     ))}

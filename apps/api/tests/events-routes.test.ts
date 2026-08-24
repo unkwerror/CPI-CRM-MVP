@@ -134,9 +134,11 @@ describe('event routes', () => {
       expect(sql).toContain(
         'count(DISTINCT COALESCE(participant.merged_into_person_id, participant.id))',
       );
-      expect(sql).toContain('name ILIKE $2');
-      expect(sql).toContain('LIMIT $3 OFFSET $4');
-      expect(parameters).toEqual([ORGANIZATION_ID, '%Demo day%', 25, 0]);
+      expect(sql).toContain('similarity(event_registry.normalized_name, $3) >= 0.30');
+      expect(sql).toContain('matched_participation.event_id = event_registry.id');
+      expect(sql).toContain('matched_link.event_id = event_registry.id');
+      expect(sql).toContain('LIMIT $4 OFFSET $5');
+      expect(parameters).toEqual([ORGANIZATION_ID, 'Demo day', 'demo day', 25, 0]);
       return {
         rows: [
           {
@@ -309,6 +311,70 @@ describe('event routes', () => {
       });
 
       expect(response.statusCode).toBe(409);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('updates decision, attendance and result independently from the participant card', async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('FROM organization_settings os')) return { rows: [organizationRow] };
+      throw new Error(`Unexpected pool SQL: ${sql}`);
+    });
+    const clientQuery = vi.fn(async (sql: string, parameters?: unknown[]) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] };
+      if (sql.includes('SELECT starts_at FROM events')) {
+        return { rows: [{ starts_at: new Date('2026-05-15T03:00:00Z') }] };
+      }
+      if (sql.includes('COALESCE(merged_into_person_id, id) AS id')) {
+        return { rows: [{ id: PERSON_ID }] };
+      }
+      if (sql.includes('UPDATE event_participations')) {
+        expect(parameters).toEqual([
+          EVENT_ID,
+          PERSON_ID,
+          'ACCEPTED',
+          'ATTENDED',
+          new Date('2026-05-15T03:00:00Z'),
+          true,
+          'Выступил и занял 2 место',
+        ]);
+        return {
+          rows: [
+            {
+              id: '00000000-0000-4000-8000-000000000050',
+              decision: 'ACCEPTED',
+              attendance: 'ATTENDED',
+              result: 'Выступил и занял 2 место',
+            },
+          ],
+        };
+      }
+      if (sql.includes('INSERT INTO audit_log')) return { rows: [{ id: 'audit' }] };
+      throw new Error(`Unexpected client SQL: ${sql}`);
+    });
+    const connect = vi.fn(
+      async () => ({ query: clientQuery, release: vi.fn() }) as unknown as import('pg').PoolClient,
+    );
+    const app = await eventTestApp(query, [Roles.COMMUNITY_MANAGER], connect);
+
+    try {
+      const response = await app.inject({
+        method: 'PATCH',
+        url: `/events/${EVENT_ID}/participants/${PERSON_ID}`,
+        payload: {
+          decision: 'ACCEPTED',
+          attendance: 'ATTENDED',
+          result: '  Выступил и занял 2 место  ',
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        decision: 'ACCEPTED',
+        attendance: 'ATTENDED',
+        result: 'Выступил и занял 2 место',
+      });
     } finally {
       await app.close();
     }

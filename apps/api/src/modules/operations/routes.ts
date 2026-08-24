@@ -579,6 +579,254 @@ export async function registerOperationRoutes(app: FastifyInstance): Promise<voi
 
 async function registerDuplicateRoutes(app: FastifyInstance) {
   app.get(
+    '/people/:id/duplicate-suggestions',
+    {
+      preHandler: app.requirePermission(Permissions.DUPLICATES_RESOLVE),
+      schema: {
+        tags: ['Дубли'],
+        summary: 'Подходящие карточки для объединения с участником',
+        params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
+      },
+    },
+    async (request) => {
+      const personId = (request.params as { id: string }).id;
+      const result = await app.pool.query<{
+        id: string;
+        canonical_full_name: string;
+        primary_contact: string | null;
+        organization_name: string | null;
+        faculty: string | null;
+        profile_needs_review: boolean;
+        archived: boolean;
+        from_bot: boolean;
+        artifact_count: string;
+        event_count: string;
+        project_count: string;
+        created_at: Date | null;
+        open_candidate_id: string | null;
+        open_candidate_reasons: unknown[] | null;
+        confidence_basis_points: number | null;
+        exact_name: boolean;
+        prefix_name: boolean;
+        token_overlap: number;
+        exact_contact: boolean;
+      }>(
+        `WITH requested_person AS (
+           SELECT COALESCE(requested.merged_into_person_id, requested.id) AS id
+             FROM persons requested
+            WHERE requested.id = $1 AND requested.archived_at IS NULL
+         ), current_person AS (
+           SELECT person.id, person.organization_id, person.normalized_full_name
+             FROM requested_person requested
+             JOIN persons person ON person.id = requested.id
+            WHERE person.merged_into_person_id IS NULL AND person.archived_at IS NULL
+         )
+         SELECT candidate.id, candidate.canonical_full_name,
+                contact.primary_contact, affiliation.organization_name, affiliation.faculty,
+                candidate.profile_needs_review,
+                candidate.archived_at IS NOT NULL AS archived,
+                EXISTS (
+                  SELECT 1 FROM external_identities identity
+                   WHERE identity.person_id IN (
+                           SELECT member.id FROM persons member
+                            WHERE member.id = candidate.id
+                               OR member.merged_into_person_id = candidate.id
+                         )
+                     AND identity.source_namespace IN ('locker.user', 'locker.telegram')
+                     AND identity.archived_at IS NULL
+                ) AS from_bot,
+                COALESCE(artifact_stats.artifact_count, 0)::text AS artifact_count,
+                COALESCE(event_stats.event_count, 0)::text AS event_count,
+                COALESCE(project_stats.project_count, 0)::text AS project_count,
+                candidate.created_at,
+                open_candidate.id AS open_candidate_id,
+                open_candidate.reasons AS open_candidate_reasons,
+                open_candidate.confidence_basis_points,
+                candidate.normalized_full_name = current.normalized_full_name AS exact_name,
+                candidate.normalized_full_name LIKE current.normalized_full_name || ' %'
+                  OR current.normalized_full_name LIKE candidate.normalized_full_name || ' %'
+                  AS prefix_name,
+                name_match.token_overlap,
+                COALESCE(contact_match.matched, false) AS exact_contact
+           FROM current_person current
+           JOIN persons candidate
+             ON candidate.organization_id = current.organization_id
+            AND candidate.id <> current.id
+            AND candidate.merged_into_person_id IS NULL
+            AND candidate.archived_at IS NULL
+           CROSS JOIN LATERAL (
+             SELECT count(*)::integer AS token_overlap
+               FROM (
+                 SELECT DISTINCT token
+                   FROM unnest(regexp_split_to_array(current.normalized_full_name, '[[:space:]]+')) token
+                  WHERE char_length(token) >= 2
+                 INTERSECT
+                 SELECT DISTINCT token
+                   FROM unnest(regexp_split_to_array(candidate.normalized_full_name, '[[:space:]]+')) token
+                  WHERE char_length(token) >= 2
+               ) shared_tokens
+           ) name_match
+           LEFT JOIN LATERAL (
+             SELECT dc.id, dc.reasons, dc.confidence_basis_points
+               FROM duplicate_candidates dc
+              WHERE dc.status = 'OPEN'
+                AND dc.person_a_id = LEAST(current.id, candidate.id)
+                AND dc.person_b_id = GREATEST(current.id, candidate.id)
+              ORDER BY dc.confidence_basis_points DESC, dc.detected_at
+              LIMIT 1
+           ) open_candidate ON true
+           LEFT JOIN LATERAL (
+             SELECT true AS matched
+               FROM contact_points current_contact
+               JOIN contact_points candidate_contact
+                 ON candidate_contact.person_id IN (
+                      SELECT member.id FROM persons member
+                       WHERE member.id = candidate.id
+                          OR member.merged_into_person_id = candidate.id
+                    )
+                AND candidate_contact.archived_at IS NULL
+                AND candidate_contact.type = current_contact.type
+                AND (
+                  candidate_contact.normalized_value = current_contact.normalized_value
+                  OR (
+                    candidate_contact.messenger_stable_id IS NOT NULL
+                    AND candidate_contact.messenger_stable_id = current_contact.messenger_stable_id
+                  )
+                )
+              WHERE current_contact.person_id IN (
+                      SELECT member.id FROM persons member
+                       WHERE member.id = current.id OR member.merged_into_person_id = current.id
+                    )
+                AND current_contact.archived_at IS NULL
+                AND current_contact.type IN ('PHONE', 'EMAIL', 'TELEGRAM')
+              LIMIT 1
+           ) contact_match ON true
+           LEFT JOIN LATERAL (
+             SELECT cp.raw_value AS primary_contact
+               FROM contact_points cp
+              WHERE cp.person_id IN (
+                      SELECT member.id FROM persons member
+                       WHERE member.id = candidate.id
+                          OR member.merged_into_person_id = candidate.id
+                    )
+                AND cp.archived_at IS NULL
+              ORDER BY (cp.type = 'TELEGRAM' AND cp.messenger_stable_id IS NOT NULL) DESC,
+                       (cp.type = 'TELEGRAM') DESC, cp.is_primary DESC, cp.created_at
+              LIMIT 1
+           ) contact ON true
+           LEFT JOIN LATERAL (
+             SELECT organization.name AS organization_name, affiliation.faculty
+               FROM affiliations affiliation
+               JOIN organizations organization ON organization.id = affiliation.organization_id
+              WHERE affiliation.person_id IN (
+                      SELECT member.id FROM persons member
+                       WHERE member.id = candidate.id
+                          OR member.merged_into_person_id = candidate.id
+                    )
+                AND affiliation.archived_at IS NULL
+              ORDER BY affiliation.is_primary DESC, affiliation.created_at
+              LIMIT 1
+           ) affiliation ON true
+           LEFT JOIN LATERAL (
+             SELECT count(DISTINCT artifact.id) AS artifact_count
+               FROM artifact_version_contributors contributor
+               JOIN artifact_versions version ON version.id = contributor.artifact_version_id
+               JOIN artifacts artifact ON artifact.id = version.artifact_id
+              WHERE contributor.person_id IN (
+                      SELECT member.id FROM persons member
+                       WHERE member.id = candidate.id
+                          OR member.merged_into_person_id = candidate.id
+                    )
+                AND contributor.contribution_role = 'AUTHOR'
+                AND version.status = 'SUBMITTED'
+                AND artifact.status <> 'VOIDED' AND artifact.archived_at IS NULL
+           ) artifact_stats ON true
+           LEFT JOIN LATERAL (
+             SELECT count(DISTINCT participation.event_id) AS event_count
+               FROM event_participations participation
+              WHERE participation.person_id IN (
+                      SELECT member.id FROM persons member
+                       WHERE member.id = candidate.id
+                          OR member.merged_into_person_id = candidate.id
+                    )
+                AND participation.archived_at IS NULL
+           ) event_stats ON true
+           LEFT JOIN LATERAL (
+             SELECT count(DISTINCT membership.project_id) AS project_count
+               FROM project_memberships membership
+              WHERE membership.person_id IN (
+                      SELECT member.id FROM persons member
+                       WHERE member.id = candidate.id
+                          OR member.merged_into_person_id = candidate.id
+                    )
+                AND membership.archived_at IS NULL
+           ) project_stats ON true
+          WHERE (
+                  open_candidate.id IS NOT NULL
+                  OR COALESCE(contact_match.matched, false)
+                  OR candidate.normalized_full_name = current.normalized_full_name
+                  OR (
+                    cardinality(regexp_split_to_array(current.normalized_full_name, '[[:space:]]+')) >= 2
+                    AND cardinality(regexp_split_to_array(candidate.normalized_full_name, '[[:space:]]+')) >= 2
+                    AND (
+                      candidate.normalized_full_name LIKE current.normalized_full_name || ' %'
+                      OR current.normalized_full_name LIKE candidate.normalized_full_name || ' %'
+                      OR name_match.token_overlap >= 2
+                    )
+                  )
+                )
+            AND (
+                  open_candidate.id IS NOT NULL
+                  OR NOT EXISTS (
+                    SELECT 1 FROM not_duplicate_pairs pair
+                     WHERE pair.person_a_id = LEAST(current.id, candidate.id)
+                       AND pair.person_b_id = GREATEST(current.id, candidate.id)
+                  )
+                )
+          ORDER BY (open_candidate.id IS NOT NULL) DESC,
+                   COALESCE(contact_match.matched, false) DESC,
+                   (candidate.normalized_full_name = current.normalized_full_name) DESC,
+                   (candidate.normalized_full_name LIKE current.normalized_full_name || ' %'
+                     OR current.normalized_full_name LIKE candidate.normalized_full_name || ' %') DESC,
+                   name_match.token_overlap DESC,
+                   candidate.profile_needs_review,
+                   candidate.canonical_full_name
+          LIMIT 10`,
+        [personId],
+      );
+
+      return {
+        items: result.rows.map((row) => {
+          const reasons = Array.isArray(row.open_candidate_reasons)
+            ? row.open_candidate_reasons.map((reason) => duplicateReasonLabel(reason))
+            : [];
+          if (row.exact_contact) reasons.push('Совпал контакт');
+          if (row.exact_name) reasons.push('Полностью совпало ФИО');
+          else if (row.prefix_name || row.token_overlap >= 2) reasons.push('Совпали фамилия и имя');
+          return {
+            id: row.id,
+            canonicalFullName: row.canonical_full_name,
+            primaryContact: row.primary_contact,
+            organization: row.organization_name,
+            faculty: row.faculty,
+            fromBot: row.from_bot,
+            profileNeedsReview: row.profile_needs_review,
+            archived: row.archived,
+            artifactCount: Number(row.artifact_count),
+            eventCount: Number(row.event_count),
+            projectCount: Number(row.project_count),
+            createdAt: row.created_at?.toISOString() ?? null,
+            openCandidateId: row.open_candidate_id,
+            confidence:
+              row.confidence_basis_points === null ? null : row.confidence_basis_points / 10_000,
+            reasons: [...new Set(reasons)],
+          };
+        }),
+      };
+    },
+  );
+
+  app.get(
     '/duplicate-candidates',
     {
       preHandler: app.requirePermission(Permissions.DUPLICATES_RESOLVE),
@@ -890,9 +1138,18 @@ async function registerDuplicateRoutes(app: FastifyInstance) {
               ],
             );
           }
+          // Одна и та же пара может попасть в очередь по нескольким признакам
+          // (например, совпали и имя, и телефон). После слияния закрываем все
+          // открытые свидетельства этой пары, чтобы фантомный дубль не оставался
+          // на дашборде.
           await client.query(
-            `UPDATE duplicate_candidates SET status = 'MERGED', decided_at = now(), decided_by_user_id = $2, decision_reason = $3, updated_at = now() WHERE id = $1`,
-            [id, request.authUser!.userId, body.reason],
+            `UPDATE duplicate_candidates
+                SET status = 'MERGED', decided_at = now(), decided_by_user_id = $3,
+                    decision_reason = $4, updated_at = now()
+              WHERE status = 'OPEN'
+                AND person_a_id = LEAST($1::uuid, $2::uuid)
+                AND person_b_id = GREATEST($1::uuid, $2::uuid)`,
+            [body.masterPersonId, loser, request.authUser!.userId, body.reason],
           );
           await client.query(
             `UPDATE person_search_documents SET internal_ids = internal_ids || ' ' || $2, search_text = search_text || ' ' || $2, updated_at = now() WHERE person_id = $1`,

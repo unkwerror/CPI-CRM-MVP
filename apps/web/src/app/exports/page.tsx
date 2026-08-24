@@ -3,7 +3,6 @@
 import {
   ArchiveIcon,
   FileArchiveIcon,
-  FileJsonIcon,
   FileSpreadsheetIcon,
   ImageIcon,
   UsersIcon,
@@ -47,6 +46,10 @@ export default function ExportsPage() {
   }, [weeks]);
 
   const query = `weeks=${weeks}`;
+  const maxScoreCount = Math.max(
+    1,
+    ...(report?.artifacts.scoreDistribution.map((item) => item.count) ?? [0]),
+  );
 
   return (
     <PageStack>
@@ -127,6 +130,54 @@ export default function ExportsPage() {
             ))}
           </section>
 
+          <Card>
+            <CardHeader>
+              <CardTitle>Качество артефактов за период</CardTitle>
+            </CardHeader>
+            <CardContent className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_280px]">
+              <div>
+                <div
+                  className="flex h-36 items-end gap-2"
+                  aria-label="Распределение оценок от 1 до 10"
+                >
+                  {report.artifacts.scoreDistribution.map((item) => (
+                    <div
+                      className="flex h-full min-w-0 flex-1 flex-col items-center justify-end gap-1.5"
+                      key={item.score}
+                    >
+                      <span className="text-muted-foreground text-[11px] tabular">
+                        {item.count}
+                      </span>
+                      <div
+                        className="bg-primary w-full max-w-8 rounded-t-md"
+                        style={{ height: `${Math.max(4, (item.count / maxScoreCount) * 94)}px` }}
+                      />
+                      <span className="text-muted-foreground text-xs tabular">{item.score}</span>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-muted-foreground mt-2 text-xs">
+                  Субъективная оценка качества по шкале 1–10
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-[13px]">
+                {[
+                  ['Средняя', report.artifacts.averageScore?.toFixed(1) ?? '—'],
+                  ['Медиана', report.artifacts.medianScore?.toFixed(1) ?? '—'],
+                  ['Принято', report.artifacts.accepted],
+                  ['Не принято', report.artifacts.rejected],
+                  ['Оценено', report.artifacts.reviewed],
+                  ['Ждут оценки', report.artifacts.awaitingReview],
+                ].map(([label, value]) => (
+                  <div className="rounded-lg border p-3" key={String(label)}>
+                    <span className="text-muted-foreground block text-xs">{label}</span>
+                    <strong className="mt-1 block text-lg tabular">{value}</strong>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+
           <div className="grid items-start gap-4 lg:grid-cols-3">
             <Card className="lg:col-span-2">
               <CardHeader>
@@ -134,9 +185,9 @@ export default function ExportsPage() {
               </CardHeader>
               <CardContent className="space-y-4">
                 <p className="text-muted-foreground text-[13px] leading-relaxed">
-                  ZIP содержит изображение дашборда, JSON-сводку, один XLSX с отдельными листами по
-                  артефактам, новым участникам, задачам, мероприятиям и взаимодействиям, а также все
-                  доступные файлы артефактов из общего облачного хранилища.
+                  ZIP содержит изображение дашборда, один XLSX с отдельным листом качества и
+                  таблицами по артефактам, участникам, задачам, мероприятиям, взаимодействиям и
+                  проектам, а также доступные файлы из общего облачного хранилища.
                 </p>
                 <Button asChild size="lg">
                   <a href={`/api/exports/period/package.zip?${query}`}>
@@ -145,13 +196,13 @@ export default function ExportsPage() {
                 </Button>
                 <div className="flex flex-wrap gap-2">
                   <Button asChild variant="outline">
-                    <a href={`/api/exports/period/report.svg?${query}`}>
-                      <ImageIcon /> Картинка отчёта
+                    <a href={`/api/exports/period/report.xlsx?${query}`}>
+                      <FileSpreadsheetIcon /> XLSX-отчёт
                     </a>
                   </Button>
                   <Button asChild variant="outline">
-                    <a href={`/api/exports/period/summary.json?${query}`}>
-                      <FileJsonIcon /> JSON-сводка
+                    <a href={`/api/exports/period/report.svg?${query}`}>
+                      <ImageIcon /> Картинка отчёта
                     </a>
                   </Button>
                 </div>
@@ -164,8 +215,8 @@ export default function ExportsPage() {
               </CardHeader>
               <CardContent className="space-y-2">
                 <Button asChild className="w-full justify-start" variant="outline">
-                  <a href="/api/exports/participants.csv">
-                    <UsersIcon /> Все участники CSV
+                  <a href="/api/exports/participants.xlsx">
+                    <UsersIcon /> Все участники XLSX
                   </a>
                 </Button>
                 <Button asChild className="w-full justify-start" variant="outline">

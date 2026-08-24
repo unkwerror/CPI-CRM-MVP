@@ -27,8 +27,10 @@ export interface OperationalPeriodReport {
     accepted: number;
     rejected: number;
     averageScore: number | null;
+    medianScore: number | null;
     awaitingReview: number;
     archivedDuringPeriod: number;
+    scoreDistribution: { score: number; count: number }[];
     byType: { name: string; count: number }[];
     bySource: { source: 'BOT' | 'CRM'; count: number }[];
   };
@@ -83,17 +85,25 @@ export async function loadOperationalPeriodReport(
   bounds: PeriodBounds,
 ): Promise<OperationalPeriodReport> {
   const parameters = [organizationId, bounds.from, bounds.to];
-  const [people, artifacts, artifactTypes, artifactSources, events, tasks, interactions] =
-    await Promise.all([
-      pool.query<{
-        new_people: string;
-        new_from_bot: string;
-        total: string;
-        total_from_bot: string;
-        artifact_senders_ever: string;
-        profiles_need_review: string;
-      }>(
-        `WITH canonical AS (
+  const [
+    people,
+    artifacts,
+    artifactTypes,
+    artifactSources,
+    artifactScores,
+    events,
+    tasks,
+    interactions,
+  ] = await Promise.all([
+    pool.query<{
+      new_people: string;
+      new_from_bot: string;
+      total: string;
+      total_from_bot: string;
+      artifact_senders_ever: string;
+      profiles_need_review: string;
+    }>(
+      `WITH canonical AS (
            SELECT person.id, person.created_at, person.profile_needs_review,
                   EXISTS (
                     SELECT 1 FROM external_identities identity
@@ -128,23 +138,24 @@ export async function loadOperationalPeriodReport(
                 count(*) FILTER (WHERE has_artifacts)::text AS artifact_senders_ever,
                 count(*) FILTER (WHERE profile_needs_review)::text AS profiles_need_review
            FROM canonical`,
-        parameters,
-      ),
-      pool.query<{
-        submitted_versions: string;
-        unique_artifacts: string;
-        unique_authors: string;
-        files: string;
-        available_files: string;
-        bytes: string;
-        reviewed: string;
-        accepted: string;
-        rejected: string;
-        average_score: string | null;
-        awaiting_review: string;
-        archived_during_period: string;
-      }>(
-        `WITH period_versions AS MATERIALIZED (
+      parameters,
+    ),
+    pool.query<{
+      submitted_versions: string;
+      unique_artifacts: string;
+      unique_authors: string;
+      files: string;
+      available_files: string;
+      bytes: string;
+      reviewed: string;
+      accepted: string;
+      rejected: string;
+      average_score: string | null;
+      median_score: string | null;
+      awaiting_review: string;
+      archived_during_period: string;
+    }>(
+      `WITH period_versions AS MATERIALIZED (
            SELECT version.id, version.artifact_id
              FROM artifact_versions version
              JOIN artifacts artifact ON artifact.id = version.artifact_id
@@ -180,6 +191,8 @@ export async function loadOperationalPeriodReport(
                 (SELECT count(*) FROM reviews WHERE decision = 'ACCEPTED')::text AS accepted,
                 (SELECT count(*) FROM reviews WHERE decision = 'REJECTED')::text AS rejected,
                 (SELECT avg(score)::text FROM reviews WHERE score BETWEEN 1 AND 10) AS average_score,
+                (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY score)::text
+                   FROM reviews WHERE score BETWEEN 1 AND 10) AS median_score,
                 (SELECT count(*) FROM period_versions version
                   WHERE NOT EXISTS (
                     SELECT 1 FROM artifact_review_selections selection
@@ -188,10 +201,10 @@ export async function loadOperationalPeriodReport(
                 (SELECT count(*) FROM artifacts artifact
                   WHERE artifact.organization_id = $1 AND artifact.auto_archived_at >= $2
                     AND artifact.auto_archived_at < $3)::text AS archived_during_period`,
-        parameters,
-      ),
-      pool.query<{ name: string; count: string }>(
-        `SELECT type.name, count(*)::text AS count
+      parameters,
+    ),
+    pool.query<{ name: string; count: string }>(
+      `SELECT type.name, count(*)::text AS count
            FROM artifact_versions version
            JOIN artifacts artifact ON artifact.id = version.artifact_id
            JOIN artifact_types type ON type.id = artifact.type_id
@@ -200,10 +213,10 @@ export async function loadOperationalPeriodReport(
             AND version.submitted_at >= $2 AND version.submitted_at < $3
           GROUP BY type.id, type.name
           ORDER BY count(*) DESC, type.name`,
-        parameters,
-      ),
-      pool.query<{ source: 'BOT' | 'CRM'; count: string }>(
-        `SELECT CASE WHEN link.artifact_version_id IS NULL THEN 'CRM' ELSE 'BOT' END AS source,
+      parameters,
+    ),
+    pool.query<{ source: 'BOT' | 'CRM'; count: string }>(
+      `SELECT CASE WHEN link.artifact_version_id IS NULL THEN 'CRM' ELSE 'BOT' END AS source,
                 count(*)::text AS count
            FROM artifact_versions version
            JOIN artifacts artifact ON artifact.id = version.artifact_id
@@ -213,15 +226,31 @@ export async function loadOperationalPeriodReport(
             AND version.submitted_at >= $2 AND version.submitted_at < $3
           GROUP BY CASE WHEN link.artifact_version_id IS NULL THEN 'CRM' ELSE 'BOT' END
           ORDER BY source`,
-        parameters,
-      ),
-      pool.query<{
-        created: string;
-        participations: string;
-        unique_participants: string;
-        attended: string;
-      }>(
-        `SELECT
+      parameters,
+    ),
+    pool.query<{ score: number; count: string }>(
+      `SELECT review.score, count(*)::text AS count
+           FROM artifact_versions version
+           JOIN artifacts artifact ON artifact.id = version.artifact_id
+           JOIN artifact_review_selections selection
+             ON selection.artifact_version_id = version.id
+           JOIN artifact_reviews review ON review.id = selection.current_final_review_id
+          WHERE artifact.organization_id = $1 AND artifact.archived_at IS NULL
+            AND artifact.status <> 'VOIDED' AND version.status = 'SUBMITTED'
+            AND version.submitted_at >= $2 AND version.submitted_at < $3
+            AND review.voided_at IS NULL AND review.status = 'FINAL'
+            AND review.score BETWEEN 1 AND 10
+          GROUP BY review.score
+          ORDER BY review.score`,
+      parameters,
+    ),
+    pool.query<{
+      created: string;
+      participations: string;
+      unique_participants: string;
+      attended: string;
+    }>(
+      `SELECT
            (SELECT count(*) FROM events event
              WHERE event.organization_id = $1 AND event.archived_at IS NULL
                AND event.created_at >= $2 AND event.created_at < $3)::text AS created,
@@ -241,10 +270,10 @@ export async function loadOperationalPeriodReport(
                AND participation.attendance = 'ATTENDED'
                AND COALESCE(participation.attended_at, participation.updated_at) >= $2
                AND COALESCE(participation.attended_at, participation.updated_at) < $3)::text AS attended`,
-        parameters,
-      ),
-      pool.query<{ created: string; completed: string; overdue_now: string }>(
-        `SELECT count(*) FILTER (WHERE task.created_at >= $2 AND task.created_at < $3)::text AS created,
+      parameters,
+    ),
+    pool.query<{ created: string; completed: string; overdue_now: string }>(
+      `SELECT count(*) FILTER (WHERE task.created_at >= $2 AND task.created_at < $3)::text AS created,
                 count(*) FILTER (WHERE task.completed_at >= $2 AND task.completed_at < $3)::text AS completed,
                 count(*) FILTER (WHERE task.status NOT IN ('DONE', 'CANCELLED')
                                   AND task.due_at < now())::text AS overdue_now
@@ -253,10 +282,10 @@ export async function loadOperationalPeriodReport(
            LEFT JOIN projects project ON project.id = task.project_id
           WHERE task.archived_at IS NULL
             AND COALESCE(person.organization_id, project.organization_id) = $1`,
-        parameters,
-      ),
-      pool.query<{ recorded: string; follow_ups_due: string }>(
-        `SELECT count(*) FILTER (
+      parameters,
+    ),
+    pool.query<{ recorded: string; follow_ups_due: string }>(
+      `SELECT count(*) FILTER (
                   WHERE interaction.occurred_at >= $2 AND interaction.occurred_at < $3
                 )::text AS recorded,
                 count(*) FILTER (
@@ -267,9 +296,9 @@ export async function loadOperationalPeriodReport(
            JOIN persons canonical ON canonical.id = COALESCE(member.merged_into_person_id, member.id)
           WHERE canonical.organization_id = $1
             AND interaction.archived_at IS NULL AND canonical.archived_at IS NULL`,
-        parameters,
-      ),
-    ]);
+      parameters,
+    ),
+  ]);
 
   const peopleRow = people.rows[0]!;
   const artifactRow = artifacts.rows[0]!;
@@ -302,8 +331,16 @@ export async function loadOperationalPeriodReport(
       accepted: Number(artifactRow.accepted),
       rejected: Number(artifactRow.rejected),
       averageScore: artifactRow.average_score === null ? null : Number(artifactRow.average_score),
+      medianScore: artifactRow.median_score === null ? null : Number(artifactRow.median_score),
       awaitingReview: Number(artifactRow.awaiting_review),
       archivedDuringPeriod: Number(artifactRow.archived_during_period),
+      scoreDistribution: Array.from({ length: 10 }, (_, index) => {
+        const score = index + 1;
+        return {
+          score,
+          count: Number(artifactScores.rows.find((row) => row.score === score)?.count ?? 0),
+        };
+      }),
       byType: artifactTypes.rows.map((row) => ({ name: row.name, count: Number(row.count) })),
       bySource: artifactSources.rows.map((row) => ({
         source: row.source,
@@ -377,10 +414,21 @@ export function operationalReportSvg(report: OperationalPeriodReport): string {
     .slice(0, 6)
     .map((item, index) => {
       const y = 525 + index * 42;
-      const width = Math.round((item.count / maxType) * 610);
+      const width = Math.round((item.count / maxType) * 280);
       return `<text x="56" y="${y + 17}" class="bar-label">${escapeXml(item.name.slice(0, 34))}</text>
         <rect x="330" y="${y}" width="${Math.max(4, width)}" height="24" rx="6" fill="#2563eb"/>
         <text x="${350 + width}" y="${y + 17}" class="bar-value">${item.count}</text>`;
+    })
+    .join('');
+  const maxScore = Math.max(1, ...report.artifacts.scoreDistribution.map((item) => item.count));
+  const scoreBars = report.artifacts.scoreDistribution
+    .map((item, index) => {
+      const height = Math.round((item.count / maxScore) * 172);
+      const x = 704 + index * 43;
+      const y = 714 - height;
+      return `<rect x="${x}" y="${y}" width="27" height="${Math.max(3, height)}" rx="5" fill="#335c4a"/>
+        <text x="${x + 13.5}" y="738" text-anchor="middle" class="bar-label">${item.score}</text>
+        <text x="${x + 13.5}" y="${Math.max(530, y - 7)}" text-anchor="middle" class="bar-value">${item.count}</text>`;
     })
     .join('');
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -404,6 +452,9 @@ export function operationalReportSvg(report: OperationalPeriodReport): string {
   ${cardSvg}
   <text x="56" y="485" class="section">Артефакты по типам</text>
   ${bars || '<text x="56" y="540" class="sub">За период артефактов нет</text>'}
+  <text x="700" y="485" class="section">Качество артефактов · оценки 1–10</text>
+  <text x="700" y="513" class="sub">Средняя: ${report.artifacts.averageScore?.toFixed(1) ?? '—'} · медиана: ${report.artifacts.medianScore?.toFixed(1) ?? '—'} · ждут оценки: ${report.artifacts.awaitingReview}</text>
+  ${scoreBars}
   <text x="56" y="790" class="hint">Архивирование не удаляет файлы: старые материалы остаются доступны в CRM и выгрузках.</text>
 </svg>`;
 }

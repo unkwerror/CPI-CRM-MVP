@@ -7,6 +7,15 @@ export interface OperationalPeriodWorkbookInput {
     value: string | number;
     note?: string | null;
   }[];
+  readonly quality: {
+    reviewed: number;
+    awaitingReview: number;
+    accepted: number;
+    rejected: number;
+    averageScore?: number | null;
+    medianScore?: number | null;
+    scoreDistribution: readonly { score: number; count: number }[];
+  };
   readonly artifacts: readonly {
     versionId: string;
     artifactId: string;
@@ -260,6 +269,44 @@ function addArtifactsTable(
   styleSheet(fileSheet, [38, 38, 24, 42, 38, 34, 34, 44, 72]);
 }
 
+function addQualityTable(
+  workbook: ExcelJS.Workbook,
+  quality: OperationalPeriodWorkbookInput['quality'],
+): void {
+  const reviewed = Math.max(0, quality.reviewed);
+  const reviewTotal = reviewed + Math.max(0, quality.awaitingReview);
+  const metrics: readonly (readonly [string, string | number])[] = [
+    ['Средняя оценка', quality.averageScore?.toFixed(2) ?? '—'],
+    ['Медианная оценка', quality.medianScore?.toFixed(2) ?? '—'],
+    ['Оценено', quality.reviewed],
+    ['Ждут оценки', quality.awaitingReview],
+    [
+      'Покрытие оценкой',
+      reviewTotal ? `${((quality.reviewed / reviewTotal) * 100).toFixed(1)}%` : '—',
+    ],
+    ['Принято', quality.accepted],
+    ['Не принято', quality.rejected],
+  ];
+  const distribution = Array.from({ length: 10 }, (_, index) => {
+    const score = index + 1;
+    const count = quality.scoreDistribution.find((item) => item.score === score)?.count ?? 0;
+    return [
+      score,
+      count,
+      reviewed ? `${((count / reviewed) * 100).toFixed(1)}%` : '0.0%',
+      metrics[index]?.[0] ?? '',
+      metrics[index]?.[1] ?? '',
+    ] as const;
+  });
+  addTable(
+    workbook,
+    'Качество артефактов',
+    ['Оценка 1–10', 'Количество', 'Доля оценённых', 'Показатель', 'Значение'],
+    distribution,
+    [18, 16, 20, 28, 18],
+  );
+}
+
 /** Один XLSX вместо набора CSV: каждый набор данных остаётся на отдельном листе. */
 export async function createOperationalPeriodWorkbook(
   input: OperationalPeriodWorkbookInput,
@@ -279,6 +326,7 @@ export async function createOperationalPeriodWorkbook(
     ],
     [42, 24, 58],
   );
+  addQualityTable(workbook, input.quality);
   addArtifactsTable(workbook, input.artifacts);
   addTable(
     workbook,

@@ -1,6 +1,8 @@
 'use client';
 
 import {
+  ArchiveIcon,
+  BotIcon,
   CalendarDaysIcon,
   DownloadIcon,
   FileCheck2Icon,
@@ -12,6 +14,7 @@ import {
   UsersIcon,
 } from 'lucide-react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { toast } from 'sonner';
 
@@ -58,6 +61,7 @@ import type {
 
 export function ProjectPageClient({ id }: { id: string }) {
   const { can } = useCurrentUser();
+  const router = useRouter();
   const [project, setProject] = useState<ProjectDetail | null>(null);
   const [artifacts, setArtifacts] = useState<ArtifactSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -71,6 +75,8 @@ export function ProjectPageClient({ id }: { id: string }) {
   const [roleDraft, setRoleDraft] = useState('');
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
   const [resultDraft, setResultDraft] = useState('');
+  const [showArchive, setShowArchive] = useState(false);
+  const [archiving, setArchiving] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -137,6 +143,19 @@ export function ProjectPageClient({ id }: { id: string }) {
     }
   }
 
+  async function archiveProject() {
+    if (!project) return;
+    setArchiving(true);
+    try {
+      await api(`/projects/${project.id}`, { method: 'DELETE' });
+      toast.success('Проект перемещён в архив');
+      router.push('/projects');
+    } catch (caught) {
+      toast.error(apiErrorMessage(caught, 'Не удалось архивировать проект'));
+      setArchiving(false);
+    }
+  }
+
   if (error)
     return (
       <Card>
@@ -170,6 +189,11 @@ export function ProjectPageClient({ id }: { id: string }) {
             <Badge variant={project.status === 'ACTIVE' ? 'soft-success' : 'soft-muted'}>
               {PROJECT_STATUS_LABELS[project.status] ?? project.status}
             </Badge>
+            {project.visibleInBot && (
+              <Badge variant="soft-primary">
+                <BotIcon /> В Telegram-боте
+              </Badge>
+            )}
             <span className="inline-flex items-center gap-1">
               <UsersIcon className="size-3.5" />
               {project.members.length}
@@ -194,9 +218,16 @@ export function ProjectPageClient({ id }: { id: string }) {
               </Button>
             )}
             {canWrite && (
-              <Button onClick={() => setShowEdit(true)} variant="outline">
-                <PencilIcon /> Редактировать
-              </Button>
+              <>
+                <Button onClick={() => setShowEdit(true)} variant="outline">
+                  <PencilIcon /> Редактировать
+                </Button>
+                {project.status !== 'ARCHIVED' && (
+                  <Button onClick={() => setShowArchive(true)} variant="outline">
+                    <ArchiveIcon /> В архив
+                  </Button>
+                )}
+              </>
             )}
           </>
         }
@@ -232,6 +263,12 @@ export function ProjectPageClient({ id }: { id: string }) {
                   {project.endsAt ? ` — ${formatDate(project.endsAt, true)}` : ''}
                 </Fact>
                 <Fact label="Ответственный">{project.ownerName ?? 'Не назначен'}</Fact>
+                <Fact label="Руководитель проекта">
+                  {project.leadPersonName ?? 'Не назначен'}
+                </Fact>
+                <Fact label="Публикация в боте">
+                  {project.visibleInBot ? 'Опубликован' : 'Скрыт'}
+                </Fact>
                 <Fact label="Участники">{project.members.length}</Fact>
                 <Fact label="Артефакты">{artifacts.length}</Fact>
               </CardContent>
@@ -449,6 +486,32 @@ export function ProjectPageClient({ id }: { id: string }) {
             await load();
           }}
         />
+      )}
+      {showArchive && (
+        <Dialog open onOpenChange={(open) => !open && !archiving && setShowArchive(false)}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Архивировать проект?</DialogTitle>
+              <DialogDescription>
+                «{project.name}» исчезнет из рабочего списка и Telegram-бота. Участники,
+                артефакты, мероприятия и история сохранятся.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogBody>
+              <p className="text-muted-foreground text-[13px]">
+                Вернуть проект можно через фильтр «Архив» и смену статуса в карточке.
+              </p>
+            </DialogBody>
+            <DialogFooter>
+              <Button disabled={archiving} onClick={() => setShowArchive(false)} variant="outline">
+                Отмена
+              </Button>
+              <Button disabled={archiving} onClick={() => void archiveProject()}>
+                <ArchiveIcon /> {archiving ? 'Архивируем…' : 'Архивировать'}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       )}
       {showMember && (
         <ProjectMemberDialog

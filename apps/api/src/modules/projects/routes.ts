@@ -51,6 +51,8 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
       if (query.status) {
         values.push(query.status);
         filters.push(`project.status = $${values.length}`);
+      } else {
+        filters.push(`project.status <> 'ARCHIVED'`);
       }
       values.push(query.limit ?? 100);
       const limitParameter = values.length;
@@ -60,7 +62,9 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
       const result = await app.pool.query(
         `SELECT project.id, project.name, project.description, project.status,
                 project.starts_at, project.ends_at, project.version,
+                project.owner_user_id, project.lead_person_id, project.visible_in_bot,
                 owner.display_name AS owner_name,
+                lead.canonical_full_name AS lead_person_name,
                 (SELECT count(DISTINCT COALESCE(person.merged_into_person_id, person.id))
                    FROM project_memberships membership
                    JOIN persons person ON person.id = membership.person_id
@@ -77,6 +81,7 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
                 count(*) OVER()::text AS total_count
            FROM projects project
            LEFT JOIN app_users owner ON owner.id = project.owner_user_id
+           LEFT JOIN persons lead ON lead.id = project.lead_person_id
           WHERE ${filters.join(' AND ')}
           ORDER BY project.updated_at DESC, project.normalized_name, project.id
           LIMIT $${limitParameter} OFFSET $${offsetParameter}`,
@@ -105,13 +110,16 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
       const projectResult = await app.pool.query(
         `SELECT project.id, project.name, project.description, project.status,
                 project.starts_at, project.ends_at, project.version,
-                project.owner_user_id, owner.display_name AS owner_name,
+                project.owner_user_id, project.lead_person_id, project.visible_in_bot,
+                owner.display_name AS owner_name,
+                lead.canonical_full_name AS lead_person_name,
                 (SELECT count(*) FROM artifacts artifact
                   WHERE artifact.project_id = project.id
                     AND artifact.archived_at IS NULL
                     AND artifact.status <> 'VOIDED')::text AS artifact_count
            FROM projects project
            LEFT JOIN app_users owner ON owner.id = project.owner_user_id
+           LEFT JOIN persons lead ON lead.id = project.lead_person_id
           WHERE project.id = $1 AND project.organization_id = $2
             AND project.archived_at IS NULL`,
         [projectId, organization.id],
@@ -186,6 +194,9 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
         version: Number(project.version),
         ownerUserId: project.owner_user_id,
         ownerName: project.owner_name,
+        leadPersonId: project.lead_person_id,
+        leadPersonName: project.lead_person_name,
+        visibleInBot: project.visible_in_bot,
         memberCount: members.rows.length,
         artifactCount: Number(project.artifact_count),
         eventCount: events.rows.length,
@@ -243,6 +254,8 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
             ),
             endsAt: Type.Optional(Type.Union([Type.String({ format: 'date-time' }), Type.Null()])),
             ownerUserId: Type.Optional(Type.Union([Type.String({ format: 'uuid' }), Type.Null()])),
+            leadPersonId: Type.Optional(Type.Union([Type.String({ format: 'uuid' }), Type.Null()])),
+            visibleInBot: Type.Optional(Type.Boolean()),
           },
           { additionalProperties: false },
         ),
@@ -258,11 +271,14 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
         startsAt?: string | null;
         endsAt?: string | null;
         ownerUserId?: string | null;
+        leadPersonId?: string | null;
+        visibleInBot?: boolean;
       };
       const organization = await getOrganizationContext(app.pool);
       return transaction(app.pool, async (client) => {
         const current = await client.query(
-          `SELECT id, name, description, status, starts_at, ends_at, owner_user_id, version
+          `SELECT id, name, description, status, starts_at, ends_at, owner_user_id,
+                  lead_person_id, visible_in_bot, version
              FROM projects
             WHERE id = $1 AND organization_id = $2 AND archived_at IS NULL
             FOR UPDATE`,
@@ -286,14 +302,19 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
           throw new HttpProblem(400, 'Дата окончания должна быть позже начала');
         }
         if (body.ownerUserId) await assertActiveUser(client, body.ownerUserId);
+        const lead = body.leadPersonId
+          ? await canonicalPerson(client, body.leadPersonId, organization.id)
+          : null;
         const updated = await client.query(
           `UPDATE projects
               SET name = $3, normalized_name = $4, description = $5,
                   status = $6, starts_at = $7, ends_at = $8,
-                  owner_user_id = $9, updated_at = now(), version = version + 1
+                  owner_user_id = $9, lead_person_id = $10,
+                  visible_in_bot = CASE WHEN $6::text = 'ARCHIVED' THEN false ELSE $11 END,
+                  updated_at = now(), version = version + 1
             WHERE id = $1 AND organization_id = $2
             RETURNING id, name, description, status, starts_at, ends_at,
-                      owner_user_id, version`,
+                      owner_user_id, lead_person_id, visible_in_bot, version`,
           [
             projectId,
             organization.id,
@@ -304,9 +325,38 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
             startsAt,
             endsAt,
             body.ownerUserId === undefined ? project.owner_user_id : body.ownerUserId,
+            body.leadPersonId === undefined ? project.lead_person_id : lead?.id ?? null,
+            body.visibleInBot ?? project.visible_in_bot,
           ],
         );
         const row = updated.rows[0]!;
+        if (row.status === 'ARCHIVED') {
+          await cancelPendingProjectApplications(client, projectId);
+        }
+        if (row.lead_person_id) {
+          const restored = await client.query(
+            `UPDATE project_memberships
+                SET archived_at = NULL, role = 'Руководитель проекта', joined_at = now(),
+                    data_origin = 'LIVE', updated_at = now(), version = version + 1
+              WHERE id = (
+                SELECT id FROM project_memberships
+                 WHERE project_id = $1 AND person_id = $2 AND archived_at IS NOT NULL
+                 ORDER BY archived_at DESC LIMIT 1
+              )
+              RETURNING id`,
+            [projectId, row.lead_person_id],
+          );
+          if (!restored.rows[0]) {
+            await client.query(
+              `INSERT INTO project_memberships (project_id, person_id, role, data_origin)
+               VALUES ($1, $2, 'Руководитель проекта', 'LIVE')
+               ON CONFLICT (project_id, person_id) WHERE archived_at IS NULL
+               DO UPDATE SET role = 'Руководитель проекта', updated_at = now(),
+                             version = project_memberships.version + 1`,
+              [projectId, row.lead_person_id],
+            );
+          }
+        }
         await writeAudit(client, {
           actor: request.authUser!,
           requestId: request.id,
@@ -324,9 +374,57 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
           startsAt: row.starts_at?.toISOString() ?? null,
           endsAt: row.ends_at?.toISOString() ?? null,
           ownerUserId: row.owner_user_id,
+          leadPersonId: row.lead_person_id,
+          visibleInBot: row.visible_in_bot,
           version: Number(row.version),
         };
       });
+    },
+  );
+
+  app.delete(
+    '/projects/:id',
+    {
+      preHandler: app.requirePermission(Permissions.PEOPLE_WRITE),
+      schema: {
+        tags: ['Проекты'],
+        summary: 'Архивировать проект без удаления связанных данных',
+        params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
+      },
+    },
+    async (request, reply) => {
+      const projectId = (request.params as { id: string }).id;
+      const organization = await getOrganizationContext(app.pool);
+      await transaction(app.pool, async (client) => {
+        const current = await client.query(
+          `SELECT id, name, status, visible_in_bot, version
+             FROM projects
+            WHERE id = $1 AND organization_id = $2 AND archived_at IS NULL
+            FOR UPDATE`,
+          [projectId, organization.id],
+        );
+        if (!current.rows[0]) throw new HttpProblem(404, 'Проект не найден');
+        if (current.rows[0].status === 'ARCHIVED') return;
+        const archived = await client.query(
+          `UPDATE projects
+              SET status = 'ARCHIVED', visible_in_bot = false,
+                  updated_at = now(), version = version + 1
+            WHERE id = $1 AND organization_id = $2
+            RETURNING id, name, status, visible_in_bot, version`,
+          [projectId, organization.id],
+        );
+        await cancelPendingProjectApplications(client, projectId);
+        await writeAudit(client, {
+          actor: request.authUser!,
+          requestId: request.id,
+          action: 'project.archived',
+          entityType: 'project',
+          entityId: projectId,
+          before: current.rows[0],
+          after: archived.rows[0],
+        });
+      });
+      return reply.code(204).send();
     },
   );
 
@@ -473,8 +571,21 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
       const { id: projectId, personId } = request.params as { id: string; personId: string };
       const organization = await getOrganizationContext(app.pool);
       await transaction(app.pool, async (client) => {
-        await assertProject(client, projectId, organization.id);
+        const project = await client.query<{ lead_person_id: string | null }>(
+          `SELECT lead_person_id FROM projects
+            WHERE id = $1 AND organization_id = $2 AND archived_at IS NULL
+            FOR UPDATE`,
+          [projectId, organization.id],
+        );
+        if (!project.rows[0]) throw new HttpProblem(404, 'Проект не найден');
         const person = await canonicalPerson(client, personId, organization.id);
+        if (project.rows[0].lead_person_id === person.id) {
+          throw new HttpProblem(
+            409,
+            'Нельзя убрать руководителя проекта',
+            'Сначала назначьте другого руководителя в настройках проекта.',
+          );
+        }
         const archived = await client.query<{ id: string }>(
           `UPDATE project_memberships
               SET archived_at = now(), updated_at = now(), version = version + 1
@@ -513,6 +624,7 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
       const result = await app.pool.query(
         `SELECT participation.id AS participation_id, project.id, project.name,
                 project.description, project.status, project.starts_at, project.ends_at,
+                project.visible_in_bot,
                 participation.decision, participation.attendance, participation.result,
                 participation.registered_at, participation.version,
                 (SELECT count(*) FROM project_memberships membership
@@ -773,6 +885,10 @@ function mapProjectSummary(row: Record<string, unknown>) {
     endsAt: row.ends_at instanceof Date ? row.ends_at.toISOString() : null,
     version: Number(row.version),
     ownerName: row.owner_name,
+    ownerUserId: row.owner_user_id,
+    leadPersonId: row.lead_person_id,
+    leadPersonName: row.lead_person_name,
+    visibleInBot: Boolean(row.visible_in_bot),
     memberCount: Number(row.member_count),
     artifactCount: Number(row.artifact_count),
     eventCount: Number(row.event_count),
@@ -793,6 +909,7 @@ function mapEventProject(row: Record<string, unknown>) {
     result: row.result,
     registeredAt: row.registered_at instanceof Date ? row.registered_at.toISOString() : null,
     version: Number(row.version),
+    visibleInBot: Boolean(row.visible_in_bot),
     memberCount: Number(row.member_count),
     artifactCount: Number(row.artifact_count),
   };
@@ -840,6 +957,18 @@ async function assertActiveUser(client: PoolClient, userId: string) {
     [userId],
   );
   if (!result.rows[0]) throw new HttpProblem(400, 'Ответственный пользователь не найден');
+}
+
+async function cancelPendingProjectApplications(client: PoolClient, projectId: string) {
+  await client.query(
+    `UPDATE project_applications
+        SET status = 'CANCELLED', reviewed_at = now(),
+            review_comment = COALESCE(review_comment, 'Проект архивирован'),
+            updated_at = now(), version = version + 1
+      WHERE project_id = $1 AND application_type = 'JOIN'
+        AND status = 'PENDING' AND archived_at IS NULL`,
+    [projectId],
+  );
 }
 
 async function canonicalPerson(client: PoolClient, personId: string, organizationId: string) {

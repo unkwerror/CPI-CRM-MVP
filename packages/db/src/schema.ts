@@ -658,6 +658,8 @@ export const programs = pgTable(
     startsAt: timestamptz('starts_at'),
     endsAt: timestamptz('ends_at'),
     ownerUserId: uuid('owner_user_id').references(() => appUsers.id, { onDelete: 'set null' }),
+    leadPersonId: uuid('lead_person_id').references(() => persons.id, { onDelete: 'set null' }),
+    visibleInBot: boolean('visible_in_bot').notNull().default(false),
     ...editable(),
   },
   (table) => [
@@ -901,6 +903,64 @@ export const projectMemberships = pgTable(
     check(
       'project_memberships_role_check',
       sql`${table.role} = btrim(${table.role}) and char_length(${table.role}) between 1 and 500`,
+    ),
+  ],
+);
+
+export const projectApplications = pgTable(
+  'project_applications',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    organizationId: uuid('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    applicationType: text('application_type').notNull(),
+    applicantPersonId: uuid('applicant_person_id')
+      .notNull()
+      .references(() => persons.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id').references(() => projects.id, { onDelete: 'cascade' }),
+    proposedName: text('proposed_name'),
+    proposedDescription: text('proposed_description'),
+    requestedRole: text('requested_role').notNull().default('Участник'),
+    message: text('message'),
+    status: text('status').notNull().default('PENDING'),
+    reviewedByUserId: uuid('reviewed_by_user_id').references(() => appUsers.id, {
+      onDelete: 'set null',
+    }),
+    reviewedByPersonId: uuid('reviewed_by_person_id').references(() => persons.id, {
+      onDelete: 'set null',
+    }),
+    reviewedAt: timestamptz('reviewed_at'),
+    reviewComment: text('review_comment'),
+    createdProjectId: uuid('created_project_id').references(() => projects.id, {
+      onDelete: 'set null',
+    }),
+    ...editable(),
+  },
+  (table) => [
+    uniqueIndex('project_applications_pending_create_uidx')
+      .on(table.organizationId, table.applicantPersonId)
+      .where(sql`${table.applicationType} = 'CREATE' and ${table.status} = 'PENDING' and ${table.archivedAt} is null`),
+    uniqueIndex('project_applications_pending_join_uidx')
+      .on(table.projectId, table.applicantPersonId)
+      .where(sql`${table.applicationType} = 'JOIN' and ${table.status} = 'PENDING' and ${table.archivedAt} is null`),
+    index('project_applications_applicant_idx').on(table.applicantPersonId, table.status),
+    index('project_applications_project_idx').on(table.projectId, table.status),
+    check(
+      'project_applications_type_check',
+      sql`${table.applicationType} in ('CREATE', 'JOIN')`,
+    ),
+    check(
+      'project_applications_status_check',
+      sql`${table.status} in ('PENDING', 'APPROVED', 'REJECTED', 'CANCELLED')`,
+    ),
+    check(
+      'project_applications_payload_check',
+      sql`(${table.applicationType} = 'CREATE' and ${table.projectId} is null and ${table.proposedName} is not null and ${table.proposedName} = btrim(${table.proposedName}) and char_length(${table.proposedName}) between 1 and 500) or (${table.applicationType} = 'JOIN' and ${table.projectId} is not null and ${table.proposedName} is null)`,
+    ),
+    check(
+      'project_applications_text_check',
+      sql`(${table.requestedRole} = btrim(${table.requestedRole}) and char_length(${table.requestedRole}) between 1 and 500) and (${table.proposedDescription} is null or (${table.proposedDescription} = btrim(${table.proposedDescription}) and char_length(${table.proposedDescription}) between 1 and 10000)) and (${table.message} is null or (${table.message} = btrim(${table.message}) and char_length(${table.message}) between 1 and 5000)) and (${table.reviewComment} is null or (${table.reviewComment} = btrim(${table.reviewComment}) and char_length(${table.reviewComment}) between 1 and 5000))`,
     ),
   ],
 );

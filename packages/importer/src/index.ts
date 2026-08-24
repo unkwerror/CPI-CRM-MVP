@@ -12,6 +12,7 @@ export * from './legacy-artifacts.js';
 export * from './observations.js';
 export * from './operational-period-workbook.js';
 export * from './participant-hygiene.js';
+export * from './participants-export-workbook.js';
 export * from './postgres.js';
 export * from './project-workbook.js';
 export * from './report.js';

@@ -62,8 +62,13 @@ describe('operationalReportSvg', () => {
         accepted: 1,
         rejected: 1,
         averageScore: 7.5,
+        medianScore: 7.5,
         awaitingReview: 2,
         archivedDuringPeriod: 0,
+        scoreDistribution: Array.from({ length: 10 }, (_, index) => ({
+          score: index + 1,
+          count: index === 6 || index === 7 ? 1 : 0,
+        })),
         byType: [{ name: 'Pitch <script>alert(1)</script>', count: 4 }],
         bySource: [{ source: 'BOT', count: 4 }],
       },
@@ -75,6 +80,8 @@ describe('operationalReportSvg', () => {
     const svg = operationalReportSvg(report);
     expect(svg).toContain('<svg xmlns="http://www.w3.org/2000/svg"');
     expect(svg).toContain('Pitch &lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(svg).toContain('Качество артефактов · оценки 1–10');
+    expect(svg).toContain('медиана: 7.5');
     expect(svg).not.toContain('<script>');
   });
 });

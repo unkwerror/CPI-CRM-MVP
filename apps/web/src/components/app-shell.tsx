@@ -234,7 +234,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </aside>
 
         <div className="flex min-w-0 flex-1 flex-col lg:pl-60">
-          <header className="bg-background/85 supports-[backdrop-filter]:bg-background/70 sticky top-0 z-20 flex h-14 items-center gap-2 border-b px-3 backdrop-blur sm:px-5">
+          <header className="bg-background/85 supports-[backdrop-filter]:bg-background/70 sticky top-0 z-20 flex h-14 min-w-0 items-center gap-2 border-b px-3 backdrop-blur sm:px-5">
             <Button
               variant="ghost"
               size="icon-sm"
@@ -246,7 +246,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             </Button>
 
             <form
-              className="focus-within:border-ring focus-within:ring-ring/40 bg-card flex h-9 max-w-xl flex-1 items-center gap-2 rounded-md border px-3 transition-shadow focus-within:ring-[3px]"
+              className="focus-within:border-ring focus-within:ring-ring/40 bg-card flex h-9 min-w-0 max-w-xl flex-1 items-center gap-2 rounded-md border px-3 transition-shadow focus-within:ring-[3px]"
               onSubmit={submitSearch}
             >
               <SearchIcon className="text-muted-foreground size-4 shrink-0" aria-hidden="true" />

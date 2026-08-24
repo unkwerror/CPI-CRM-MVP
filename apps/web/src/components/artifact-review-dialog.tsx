@@ -1,11 +1,14 @@
 'use client';
 
 import {
+  CalendarDaysIcon,
   CheckCircle2Icon,
   DownloadIcon,
   ExternalLinkIcon,
   FileTextIcon,
+  FolderKanbanIcon,
   LoaderCircleIcon,
+  PencilIcon,
   XCircleIcon,
 } from 'lucide-react';
 import { type FormEvent, useEffect, useState } from 'react';
@@ -23,6 +26,14 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
+import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Slider } from '@/components/ui/slider';
 import { Textarea } from '@/components/ui/textarea';
 import { api, apiErrorMessage, formatDate } from '@/lib/api';
@@ -52,6 +63,18 @@ const SCORE_HINTS: Record<number, string> = {
   10: 'Эталонный результат',
 };
 
+const NO_LINK = 'NONE';
+
+interface ArtifactChoice {
+  id: string;
+  name: string;
+}
+
+interface ArtifactTypeChoice {
+  code: string;
+  name: string;
+}
+
 function scoreHint(score: number): string {
   const thresholds = [10, 9, 7, 5, 3, 1];
   const match = thresholds.find((threshold) => score >= threshold) ?? 1;
@@ -70,6 +93,16 @@ export function ArtifactReviewDialog({
   const [comment, setComment] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editingMetadata, setEditingMetadata] = useState(false);
+  const [loadingMetadata, setLoadingMetadata] = useState(false);
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [typeCode, setTypeCode] = useState('');
+  const [eventId, setEventId] = useState(NO_LINK);
+  const [projectId, setProjectId] = useState(NO_LINK);
+  const [artifactTypes, setArtifactTypes] = useState<ArtifactTypeChoice[]>([]);
+  const [events, setEvents] = useState<ArtifactChoice[]>([]);
+  const [projects, setProjects] = useState<ArtifactChoice[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -79,6 +112,11 @@ export function ArtifactReviewDialog({
       .then((result) => {
         if (!active) return;
         setDetail(result);
+        setTitle(result.title);
+        setDescription(result.description ?? '');
+        setTypeCode(result.typeCode);
+        setEventId(result.eventId ?? NO_LINK);
+        setProjectId(result.projectId ?? NO_LINK);
         const review = result.currentReview;
         if (review) {
           setDecision(review.decision === 'ACCEPTED' ? 'ACCEPTED' : 'REJECTED');
@@ -96,6 +134,89 @@ export function ArtifactReviewDialog({
       active = false;
     };
   }, [versionId]);
+
+  async function startMetadataEdit() {
+    if (!detail) return;
+    setEditingMetadata(true);
+    setLoadingMetadata(true);
+    setError(null);
+    try {
+      const [typeResult, eventResult, projectResult] = await Promise.all([
+        api<{ items: ArtifactTypeChoice[] }>('/artifact-types'),
+        api<{ items: ArtifactChoice[] }>('/events?limit=200'),
+        api<{ items: ArtifactChoice[] }>('/projects?limit=200'),
+      ]);
+      setArtifactTypes(typeResult.items);
+      setEvents(withCurrentChoice(eventResult.items, detail.eventId, detail.eventName));
+      setProjects(withCurrentChoice(projectResult.items, detail.projectId, detail.projectName));
+    } catch (caught) {
+      setEditingMetadata(false);
+      setError(apiErrorMessage(caught, 'Не удалось загрузить мероприятия и проекты'));
+    } finally {
+      setLoadingMetadata(false);
+    }
+  }
+
+  function cancelMetadataEdit() {
+    if (!detail) return;
+    setEditingMetadata(false);
+    setTitle(detail.title);
+    setDescription(detail.description ?? '');
+    setTypeCode(detail.typeCode);
+    setEventId(detail.eventId ?? NO_LINK);
+    setProjectId(detail.projectId ?? NO_LINK);
+    setError(null);
+  }
+
+  async function saveMetadata(event: FormEvent) {
+    event.preventDefault();
+    if (!detail || !title.trim() || !typeCode) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await api<{
+        title: string;
+        description?: string | null;
+        typeCode: string;
+        typeName: string;
+        eventId?: string | null;
+        eventName?: string | null;
+        projectId?: string | null;
+        projectName?: string | null;
+      }>(`/artifacts/${detail.artifactId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          title: title.trim(),
+          typeCode,
+          description: description.trim() || null,
+          eventId: eventId === NO_LINK ? null : eventId,
+          projectId: projectId === NO_LINK ? null : projectId,
+        }),
+      });
+      setDetail((current) =>
+        current
+          ? {
+              ...current,
+              title: updated.title,
+              description: updated.description ?? null,
+              typeCode: updated.typeCode,
+              typeName: updated.typeName,
+              eventId: updated.eventId ?? null,
+              eventName: updated.eventName ?? null,
+              projectId: updated.projectId ?? null,
+              projectName: updated.projectName ?? null,
+            }
+          : current,
+      );
+      setEditingMetadata(false);
+      toast.success('Данные артефакта обновлены');
+      await onReviewed();
+    } catch (caught) {
+      setError(apiErrorMessage(caught, 'Не удалось обновить артефакт'));
+    } finally {
+      setSaving(false);
+    }
+  }
 
   async function submitReview(event: FormEvent) {
     event.preventDefault();
@@ -165,6 +286,121 @@ export function ArtifactReviewDialog({
                   .map((item) => item.name)
                   .join(', ') || '—'}
               </p>
+
+              {editingMetadata ? (
+                <form
+                  id="artifact-metadata-form"
+                  onSubmit={saveMetadata}
+                  className="space-y-4 rounded-lg border p-4"
+                >
+                  <div className="space-y-1.5">
+                    <Label htmlFor="artifact-edit-title">Название</Label>
+                    <Input
+                      id="artifact-edit-title"
+                      maxLength={500}
+                      required
+                      value={title}
+                      onChange={(event) => setTitle(event.target.value)}
+                    />
+                  </div>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="space-y-1.5">
+                      <Label>Тип</Label>
+                      <Select
+                        disabled={loadingMetadata}
+                        value={typeCode}
+                        onValueChange={setTypeCode}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="Выберите тип" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {artifactTypes.map((item) => (
+                            <SelectItem key={item.code} value={item.code}>
+                              {item.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Мероприятие</Label>
+                      <Select disabled={loadingMetadata} value={eventId} onValueChange={setEventId}>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={NO_LINK}>Без мероприятия</SelectItem>
+                          {events.map((item) => (
+                            <SelectItem key={item.id} value={item.id}>
+                              {item.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5 sm:col-span-2">
+                      <Label>Проект</Label>
+                      <Select
+                        disabled={loadingMetadata}
+                        value={projectId}
+                        onValueChange={setProjectId}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={NO_LINK}>Без проекта</SelectItem>
+                          {projects.map((item) => (
+                            <SelectItem key={item.id} value={item.id}>
+                              {item.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="artifact-edit-description">Описание</Label>
+                    <Textarea
+                      id="artifact-edit-description"
+                      maxLength={10000}
+                      rows={3}
+                      value={description}
+                      onChange={(event) => setDescription(event.target.value)}
+                      placeholder="Кратко опишите результат"
+                    />
+                  </div>
+                  {loadingMetadata && (
+                    <p className="text-muted-foreground flex items-center gap-2 text-xs">
+                      <LoaderCircleIcon className="size-3.5 animate-spin" /> Загружаем справочники…
+                    </p>
+                  )}
+                </form>
+              ) : (
+                <section className="bg-muted/35 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border p-3 text-[13px]">
+                  <span className="text-muted-foreground flex items-center gap-1.5">
+                    <CalendarDaysIcon className="size-3.5" />
+                    {detail.eventName ?? 'Без мероприятия'}
+                  </span>
+                  <span className="text-muted-foreground flex items-center gap-1.5">
+                    <FolderKanbanIcon className="size-3.5" />
+                    {detail.projectName ?? 'Без проекта'}
+                  </span>
+                  {detail.description && <p className="basis-full">{detail.description}</p>}
+                  {detail.canEdit && (
+                    <Button
+                      className="ml-auto"
+                      onClick={startMetadataEdit}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      <PencilIcon /> Изменить данные
+                    </Button>
+                  )}
+                </section>
+              )}
 
               {detail.textContent && (
                 <section className="space-y-1.5">
@@ -245,7 +481,7 @@ export function ArtifactReviewDialog({
 
               {error && <p className="text-destructive text-[13px]">{error}</p>}
 
-              {canReview && (
+              {canReview && !editingMetadata && (
                 <form id="artifact-review-form" onSubmit={submitReview} className="space-y-5">
                   <fieldset className="space-y-2">
                     <Label asChild>
@@ -318,10 +554,30 @@ export function ArtifactReviewDialog({
         </DialogBody>
 
         <DialogFooter>
-          <Button variant="outline" type="button" onClick={onClose}>
-            {canReview ? 'Отмена' : 'Закрыть'}
-          </Button>
-          {canReview && (
+          {editingMetadata ? (
+            <>
+              <Button
+                variant="outline"
+                type="button"
+                onClick={cancelMetadataEdit}
+                disabled={saving}
+              >
+                Отмена
+              </Button>
+              <Button
+                form="artifact-metadata-form"
+                type="submit"
+                disabled={saving || loadingMetadata || !title.trim() || !typeCode}
+              >
+                {saving ? 'Сохраняем…' : 'Сохранить данные'}
+              </Button>
+            </>
+          ) : (
+            <Button variant="outline" type="button" onClick={onClose}>
+              {canReview ? 'Отмена' : 'Закрыть'}
+            </Button>
+          )}
+          {canReview && !editingMetadata && (
             <Button form="artifact-review-form" type="submit" disabled={saving}>
               {saving
                 ? 'Сохраняем…'
@@ -334,4 +590,13 @@ export function ArtifactReviewDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+function withCurrentChoice(
+  choices: ArtifactChoice[],
+  currentId?: string | null,
+  currentName?: string | null,
+): ArtifactChoice[] {
+  if (!currentId || !currentName || choices.some((item) => item.id === currentId)) return choices;
+  return [{ id: currentId, name: currentName }, ...choices];
 }

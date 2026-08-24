@@ -8,6 +8,18 @@ describe('operational period workbook', () => {
     const bytes = await createOperationalPeriodWorkbook({
       period: { from: '2026-08-01', to: '2026-08-24' },
       summary: [],
+      quality: {
+        reviewed: 2,
+        awaitingReview: 1,
+        accepted: 1,
+        rejected: 1,
+        averageScore: 7.5,
+        medianScore: 7.5,
+        scoreDistribution: [
+          { score: 7, count: 1 },
+          { score: 8, count: 1 },
+        ],
+      },
       artifacts: [
         {
           versionId: 'version-1',
@@ -60,5 +72,10 @@ describe('operational period workbook', () => {
       'HYPERLINK("../artifacts/Иванов/расчёты.xlsx","расчёты.xlsx")',
     );
     expect(files.getCell('I3').text).toBe('artifacts/Иванов/расчёты.xlsx');
+
+    const quality = workbook.getWorksheet('Качество артефактов')!;
+    expect(quality.getCell('A8').value).toBe(7);
+    expect(quality.getCell('B8').value).toBe(1);
+    expect(quality.getCell('E2').text).toBe('7.50');
   });
 });

@@ -130,7 +130,7 @@ function ParticipantsContent() {
     const value = searchParams.get(key);
     if (value) exportParams.set(key, value);
   }
-  const exportHref = `/api/exports/participants.csv${exportParams.size ? `?${exportParams}` : ''}`;
+  const exportHref = `/api/exports/participants.xlsx${exportParams.size ? `?${exportParams}` : ''}`;
   const returnTo = `/participants${searchParams.size ? `?${searchParams.toString()}` : ''}`;
 
   return (

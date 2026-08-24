@@ -133,7 +133,11 @@ export interface ProjectSummary {
   startsAt?: string | null;
   endsAt?: string | null;
   version: number;
+  ownerUserId?: string | null;
   ownerName?: string | null;
+  leadPersonId?: string | null;
+  leadPersonName?: string | null;
+  visibleInBot: boolean;
   memberCount: number;
   artifactCount: number;
   eventCount: number;
@@ -164,10 +168,30 @@ export interface ProjectEventSummary {
 }
 
 export interface ProjectDetail extends ProjectSummary {
-  ownerUserId?: string | null;
   members: ProjectMemberSummary[];
   events: ProjectEventSummary[];
   tasks: TaskSummary[];
+}
+
+export interface ProjectApplicationSummary {
+  id: string;
+  type: 'CREATE' | 'JOIN';
+  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED';
+  applicantPersonId: string;
+  applicantName: string;
+  projectId?: string | null;
+  projectName?: string | null;
+  proposedName?: string | null;
+  proposedDescription?: string | null;
+  requestedRole: string;
+  message?: string | null;
+  reviewComment?: string | null;
+  reviewedAt?: string | null;
+  reviewedByName?: string | null;
+  createdProjectId?: string | null;
+  createdProjectName?: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface EventProjectSummary extends ProjectSummary {
@@ -343,13 +367,20 @@ export interface ArtifactVersionDetail {
   id: string;
   artifactId: string;
   title: string;
+  description?: string | null;
+  typeCode: string;
   typeName: string;
+  eventId?: string | null;
+  eventName?: string | null;
+  projectId?: string | null;
+  projectName?: string | null;
   versionNumber: number;
   status: string;
   contentType: 'FILE' | 'EXTERNAL_URL' | 'TEXT' | 'MIXED';
   textContent?: string | null;
   submittedAt?: string | null;
   canReview: boolean;
+  canEdit: boolean;
   contributors: {
     id: string;
     name: string;
@@ -648,8 +679,10 @@ export interface OperationalPeriodReport {
     accepted: number;
     rejected: number;
     averageScore: number | null;
+    medianScore: number | null;
     awaitingReview: number;
     archivedDuringPeriod: number;
+    scoreDistribution: { score: number; count: number }[];
     byType: { name: string; count: number }[];
     bySource: { source: 'BOT' | 'CRM'; count: number }[];
   };
@@ -762,4 +795,23 @@ export interface DuplicateCandidate {
   reasons: string[];
   left: PersonSummary;
   right: PersonSummary;
+}
+
+/** Карточка, которую оператор сравнивает с участником перед ручным слиянием. */
+export interface PersonDuplicateSuggestion {
+  id: string;
+  canonicalFullName: string;
+  primaryContact: string | null;
+  organization: string | null;
+  faculty: string | null;
+  fromBot: boolean;
+  profileNeedsReview: boolean;
+  archived: boolean;
+  artifactCount: number;
+  eventCount: number;
+  projectCount: number;
+  createdAt: string | null;
+  openCandidateId: string | null;
+  confidence: number | null;
+  reasons: string[];
 }

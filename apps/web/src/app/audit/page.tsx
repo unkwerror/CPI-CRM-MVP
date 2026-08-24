@@ -32,6 +32,7 @@ const ACTION_LABELS: Record<string, string> = {
   'person.updated': 'Участник изменён',
   'contact.created': 'Контакт добавлен',
   'artifact.created': 'Артефакт создан',
+  'artifact.updated': 'Данные артефакта изменены',
   'artifact.version_created': 'Версия создана',
   'artifact.version_submitted': 'Версия отправлена',
   'artifact.reviewed': 'Оценка сохранена',

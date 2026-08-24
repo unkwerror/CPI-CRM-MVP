@@ -7,6 +7,7 @@ import {
   FileIcon,
   FilePlus2Icon,
   FolderKanbanIcon,
+  GitMergeIcon,
   MailIcon,
   MapPinIcon,
   MessageCircleIcon,
@@ -40,6 +41,10 @@ import { EditPersonDialog } from '@/components/edit-person-dialog';
 import { EmptyState } from '@/components/empty-state';
 import { PageHeader, PageStack } from '@/components/page-header';
 import { PersonContactDialog } from '@/components/person-contact-dialog';
+import {
+  PersonDuplicateMergeDialog,
+  PersonDuplicateSuggestionBanner,
+} from '@/components/person-duplicate-merge-dialog';
 import { PersonInteractionDialog } from '@/components/person-interaction-dialog';
 import { PersonInteractionsTab } from '@/components/person-interactions-tab';
 import { PersonEventLinkDialog } from '@/components/person-event-link-dialog';
@@ -51,6 +56,13 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
@@ -66,7 +78,12 @@ import {
   TASK_STATUS_VARIANTS,
   scoreVariant,
 } from '@/lib/status-labels';
-import type { ArtifactSummary, PersonDetail } from '@/lib/types';
+import type {
+  ArtifactSummary,
+  EventParticipationSummary,
+  PersonDetail,
+  PersonDuplicateSuggestion,
+} from '@/lib/types';
 
 type BadgeVariant = ComponentProps<typeof Badge>['variant'];
 type Tab = 'overview' | 'interactions' | 'events' | 'projects' | 'artifacts';
@@ -92,6 +109,9 @@ export function PersonPageClient({ id, returnTo }: { id: string; returnTo: strin
   const [showProjectLink, setShowProjectLink] = useState(false);
   const [showTask, setShowTask] = useState(false);
   const [showRemoval, setShowRemoval] = useState(false);
+  const [showDuplicateMerge, setShowDuplicateMerge] = useState(false);
+  const [mergeCandidateId, setMergeCandidateId] = useState<string | null>(null);
+  const [duplicateSuggestions, setDuplicateSuggestions] = useState<PersonDuplicateSuggestion[]>([]);
   const [timelineRefreshKey, setTimelineRefreshKey] = useState(0);
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -104,6 +124,7 @@ export function PersonPageClient({ id, returnTo }: { id: string; returnTo: strin
   const canEditContacts = can('contacts.write');
   const canManageTasks = can('tasks.manage');
   const canAddArtifact = can('artifacts.write');
+  const canMergeDuplicates = can('duplicates.resolve');
 
   const reload = useCallback(async () => {
     try {
@@ -116,6 +137,27 @@ export function PersonPageClient({ id, returnTo }: { id: string; returnTo: strin
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  const reloadDuplicateSuggestions = useCallback(async () => {
+    if (!canMergeDuplicates) {
+      setDuplicateSuggestions([]);
+      return;
+    }
+    try {
+      const result = await api<{ items: PersonDuplicateSuggestion[] }>(
+        `/people/${id}/duplicate-suggestions`,
+      );
+      setDuplicateSuggestions(result.items);
+    } catch {
+      // Карточка остаётся доступной даже при временной ошибке подсказок:
+      // оператор всё равно может найти дубль вручную кнопкой в шапке.
+      setDuplicateSuggestions([]);
+    }
+  }, [canMergeDuplicates, id]);
+
+  useEffect(() => {
+    void reloadDuplicateSuggestions();
+  }, [reloadDuplicateSuggestions]);
 
   async function saveNotes() {
     if (!person || notesDraft === null) return;
@@ -205,6 +247,17 @@ export function PersonPageClient({ id, returnTo }: { id: string; returnTo: strin
                 <FolderKanbanIcon /> В проект
               </Button>
             )}
+            {canMergeDuplicates && (
+              <Button
+                onClick={() => {
+                  setMergeCandidateId(duplicateSuggestions[0]?.id ?? null);
+                  setShowDuplicateMerge(true);
+                }}
+                variant="outline"
+              >
+                <GitMergeIcon /> Объединить дубль
+              </Button>
+            )}
             {canAddArtifact && (
               <Button
                 onClick={() => {
@@ -227,6 +280,16 @@ export function PersonPageClient({ id, returnTo }: { id: string; returnTo: strin
           </>
         }
       />
+
+      {canMergeDuplicates && (
+        <PersonDuplicateSuggestionBanner
+          suggestions={duplicateSuggestions}
+          onOpen={(candidateId) => {
+            setMergeCandidateId(candidateId);
+            setShowDuplicateMerge(true);
+          }}
+        />
+      )}
 
       {canEditPerson && (
         <PersonRemovalDialog
@@ -613,6 +676,26 @@ export function PersonPageClient({ id, returnTo }: { id: string; returnTo: strin
           personId={person.id}
         />
       )}
+      {showDuplicateMerge && (
+        <PersonDuplicateMergeDialog
+          current={person}
+          suggestions={duplicateSuggestions}
+          initialCandidateId={mergeCandidateId}
+          onOpenChange={(open) => {
+            setShowDuplicateMerge(open);
+            if (!open) setMergeCandidateId(null);
+          }}
+          onMerged={async (masterPersonId) => {
+            if (masterPersonId !== person.id) {
+              router.replace(
+                `/participants/${masterPersonId}?returnTo=${encodeURIComponent(returnTo)}`,
+              );
+              return;
+            }
+            await Promise.all([reload(), reloadDuplicateSuggestions()]);
+          }}
+        />
+      )}
       <TaskDialog
         onOpenChange={setShowTask}
         onSaved={() => void reload()}
@@ -757,24 +840,39 @@ function EventsTab({
   onAddArtifact: (eventId: string) => void;
   onChanged: () => void | Promise<void>;
 }) {
-  const [editingResultId, setEditingResultId] = useState<string | null>(null);
+  const [editingParticipationId, setEditingParticipationId] = useState<string | null>(null);
+  const [decisionDraft, setDecisionDraft] =
+    useState<EventParticipationSummary['decision']>('UNKNOWN');
+  const [attendanceDraft, setAttendanceDraft] =
+    useState<EventParticipationSummary['attendance']>('UNKNOWN');
   const [resultDraft, setResultDraft] = useState('');
-  const [savingResult, setSavingResult] = useState(false);
+  const [savingParticipation, setSavingParticipation] = useState(false);
 
-  async function saveResult(eventId: string) {
-    setSavingResult(true);
+  function editParticipation(participation: EventParticipationSummary) {
+    setEditingParticipationId(participation.id);
+    setDecisionDraft(participation.decision);
+    setAttendanceDraft(participation.attendance);
+    setResultDraft(participation.result ?? '');
+  }
+
+  async function saveParticipation(eventId: string) {
+    setSavingParticipation(true);
     try {
       await api(`/events/${eventId}/participants/${person.id}`, {
         method: 'PATCH',
-        body: JSON.stringify({ result: resultDraft.trim() || null }),
+        body: JSON.stringify({
+          decision: decisionDraft,
+          attendance: attendanceDraft,
+          result: resultDraft.trim() || null,
+        }),
       });
-      toast.success('Результат участия сохранён');
-      setEditingResultId(null);
+      toast.success('Участие в мероприятии сохранено');
+      setEditingParticipationId(null);
       await onChanged();
     } catch (caught) {
-      toast.error(apiErrorMessage(caught, 'Не удалось сохранить результат'));
+      toast.error(apiErrorMessage(caught, 'Не удалось сохранить участие'));
     } finally {
-      setSavingResult(false);
+      setSavingParticipation(false);
     }
   }
 
@@ -839,15 +937,57 @@ function EventsTab({
                 )}
                 <div className="grid gap-3 sm:grid-cols-3">
                   <Fact label="Решение">
-                    <strong className="block text-[13px] font-medium">
-                      {PARTICIPATION_DECISION_LABELS[participation.decision] ??
-                        participation.decision}
-                    </strong>
+                    {editingParticipationId === participation.id ? (
+                      <Select
+                        disabled={savingParticipation}
+                        onValueChange={(value) =>
+                          setDecisionDraft(value as EventParticipationSummary['decision'])
+                        }
+                        value={decisionDraft}
+                      >
+                        <SelectTrigger aria-label="Решение по участию" className="mt-1">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {Object.entries(PARTICIPATION_DECISION_LABELS).map(([value, label]) => (
+                            <SelectItem key={value} value={value}>
+                              {label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    ) : (
+                      <strong className="block text-[13px] font-medium">
+                        {PARTICIPATION_DECISION_LABELS[participation.decision] ??
+                          participation.decision}
+                      </strong>
+                    )}
                   </Fact>
                   <Fact label="Участие">
-                    <strong className="block text-[13px] font-medium">
-                      {ATTENDANCE_LABELS[participation.attendance] ?? participation.attendance}
-                    </strong>
+                    {editingParticipationId === participation.id ? (
+                      <Select
+                        disabled={savingParticipation}
+                        onValueChange={(value) =>
+                          setAttendanceDraft(value as EventParticipationSummary['attendance'])
+                        }
+                        value={attendanceDraft}
+                      >
+                        <SelectTrigger aria-label="Посещение мероприятия" className="mt-1">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {Object.entries(ATTENDANCE_LABELS).map(([value, label]) => (
+                            <SelectItem key={value} value={value}>
+                              {label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    ) : (
+                      <strong className="block text-[13px] font-medium">
+                        {ATTENDANCE_LABELS[participation.attendance] ?? participation.attendance}
+                      </strong>
+                    )}
                   </Fact>
                   <Fact label="Источник данных">
                     <strong className="block text-[13px] font-medium">
@@ -859,12 +999,9 @@ function EventsTab({
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-[13px] font-medium">Результат участия</p>
-                    {canLink && editingResultId !== participation.id && (
+                    {canLink && editingParticipationId !== participation.id && (
                       <Button
-                        onClick={() => {
-                          setEditingResultId(participation.id);
-                          setResultDraft(participation.result ?? '');
-                        }}
+                        onClick={() => editParticipation(participation)}
                         size="xs"
                         variant="ghost"
                       >
@@ -872,9 +1009,10 @@ function EventsTab({
                       </Button>
                     )}
                   </div>
-                  {editingResultId === participation.id ? (
+                  {editingParticipationId === participation.id ? (
                     <div className="space-y-2">
                       <Textarea
+                        disabled={savingParticipation}
                         onChange={(event) => setResultDraft(event.target.value)}
                         placeholder="Например: выступил, занял 2 место; заявка одобрена"
                         rows={3}
@@ -882,15 +1020,15 @@ function EventsTab({
                       />
                       <div className="flex gap-2">
                         <Button
-                          disabled={savingResult}
-                          onClick={() => void saveResult(event.id)}
+                          disabled={savingParticipation}
+                          onClick={() => void saveParticipation(event.id)}
                           size="sm"
                         >
-                          Сохранить
+                          {savingParticipation ? 'Сохраняем…' : 'Сохранить'}
                         </Button>
                         <Button
-                          disabled={savingResult}
-                          onClick={() => setEditingResultId(null)}
+                          disabled={savingParticipation}
+                          onClick={() => setEditingParticipationId(null)}
                           size="sm"
                           variant="outline"
                         >

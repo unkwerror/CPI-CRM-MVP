@@ -3,7 +3,9 @@
 import { type FormEvent, useState } from 'react';
 import { toast } from 'sonner';
 
+import { PersonPicker, type PersonOption } from '@/components/person-picker';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import {
   Dialog,
   DialogBody,
@@ -57,6 +59,12 @@ export function ProjectDialog({
   const [status, setStatus] = useState(project?.status ?? 'ACTIVE');
   const [startsAt, setStartsAt] = useState(localDateTime(project?.startsAt));
   const [endsAt, setEndsAt] = useState(localDateTime(project?.endsAt));
+  const [lead, setLead] = useState<PersonOption | null>(
+    project?.leadPersonId && project.leadPersonName
+      ? { id: project.leadPersonId, canonicalFullName: project.leadPersonName }
+      : null,
+  );
+  const [visibleInBot, setVisibleInBot] = useState(project?.visibleInBot ?? false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -88,6 +96,8 @@ export function ProjectDialog({
             ? { startsAt: null }
             : {}),
         ...(endsAt ? { endsAt: new Date(endsAt).toISOString() } : project ? { endsAt: null } : {}),
+        ...(lead ? { leadPersonId: lead.id } : project ? { leadPersonId: null } : {}),
+        visibleInBot,
       };
       const saved = await api<{ id: string }>(project ? `/projects/${project.id}` : '/projects', {
         method: project ? 'PATCH' : 'POST',
@@ -172,6 +182,26 @@ export function ProjectDialog({
                 />
               </div>
             </div>
+            <div className="space-y-1.5">
+              <Label>Руководитель из числа участников</Label>
+              <PersonPicker onChange={setLead} value={lead} />
+              <p className="text-muted-foreground text-xs">
+                Руководитель сможет принимать заявки на вступление из Telegram-бота.
+              </p>
+            </div>
+            <label className="bg-muted/35 flex cursor-pointer items-start gap-3 rounded-lg border p-3">
+              <Checkbox
+                checked={visibleInBot}
+                className="mt-0.5"
+                onCheckedChange={(checked) => setVisibleInBot(checked === true)}
+              />
+              <span>
+                <strong className="block text-[13px] font-medium">Показывать в Telegram-боте</strong>
+                <span className="text-muted-foreground block text-xs">
+                  Проект появится в каталоге и станет доступен для заявок на участие.
+                </span>
+              </span>
+            </label>
             {error && (
               <p aria-live="polite" className="text-destructive text-[13px]">
                 {error}
