@@ -541,6 +541,11 @@ export const contactPoints = pgTable(
       .where(
         sql`${table.type} = 'TELEGRAM' and ${table.messengerStableId} is not null and ${table.archivedAt} is null`,
       ),
+    uniqueIndex('contact_points_max_stable_id_uidx')
+      .on(table.messengerStableId)
+      .where(
+        sql`${table.type} = 'MAX' and ${table.messengerStableId} is not null and ${table.archivedAt} is null`,
+      ),
     check(
       'contact_points_period_check',
       sql`${table.validTo} is null or ${table.validFrom} is null or ${table.validTo} > ${table.validFrom}`,
@@ -548,6 +553,10 @@ export const contactPoints = pgTable(
     check(
       'contact_points_telegram_stable_id_check',
       sql`${table.type} <> 'TELEGRAM' or ${table.messengerStableId} is null or ${table.messengerStableId} ~ '^[0-9]+$'`,
+    ),
+    check(
+      'contact_points_max_stable_id_check',
+      sql`${table.type} <> 'MAX' or ${table.messengerStableId} is null or ${table.messengerStableId} ~ '^[0-9]+$'`,
     ),
   ],
 );
@@ -940,16 +949,17 @@ export const projectApplications = pgTable(
   (table) => [
     uniqueIndex('project_applications_pending_create_uidx')
       .on(table.organizationId, table.applicantPersonId)
-      .where(sql`${table.applicationType} = 'CREATE' and ${table.status} = 'PENDING' and ${table.archivedAt} is null`),
+      .where(
+        sql`${table.applicationType} = 'CREATE' and ${table.status} = 'PENDING' and ${table.archivedAt} is null`,
+      ),
     uniqueIndex('project_applications_pending_join_uidx')
       .on(table.projectId, table.applicantPersonId)
-      .where(sql`${table.applicationType} = 'JOIN' and ${table.status} = 'PENDING' and ${table.archivedAt} is null`),
+      .where(
+        sql`${table.applicationType} = 'JOIN' and ${table.status} = 'PENDING' and ${table.archivedAt} is null`,
+      ),
     index('project_applications_applicant_idx').on(table.applicantPersonId, table.status),
     index('project_applications_project_idx').on(table.projectId, table.status),
-    check(
-      'project_applications_type_check',
-      sql`${table.applicationType} in ('CREATE', 'JOIN')`,
-    ),
+    check('project_applications_type_check', sql`${table.applicationType} in ('CREATE', 'JOIN')`),
     check(
       'project_applications_status_check',
       sql`${table.status} in ('PENDING', 'APPROVED', 'REJECTED', 'CANCELLED')`,
@@ -1957,6 +1967,7 @@ export const lockerSubmissionLinks = pgTable(
     lockerSubmissionId: uuid('locker_submission_id').primaryKey(),
     lockerUserId: uuid('locker_user_id').notNull(),
     telegramUserId: text('telegram_user_id').notNull(),
+    messengerProvider: text('messenger_provider').notNull().default('TELEGRAM'),
     personId: uuid('person_id')
       .notNull()
       .references(() => persons.id, { onDelete: 'restrict' }),
@@ -1978,6 +1989,10 @@ export const lockerSubmissionLinks = pgTable(
     uniqueIndex('locker_submission_links_version_uidx').on(table.artifactVersionId),
     index('locker_submission_links_person_idx').on(table.personId, table.createdAt),
     check('locker_submission_links_telegram_check', sql`${table.telegramUserId} ~ '^[0-9]+$'`),
+    check(
+      'locker_submission_links_messenger_provider_check',
+      sql`${table.messengerProvider} IN ('TELEGRAM', 'MAX')`,
+    ),
     check('locker_submission_links_hash_check', sql`${table.payloadHash} ~ '^[0-9a-f]{64}$'`),
   ],
 );
@@ -2202,6 +2217,7 @@ export const lockerPendingSubmissions = pgTable(
     lockerSubmissionId: uuid('locker_submission_id').notNull(),
     lockerUserId: uuid('locker_user_id').notNull(),
     telegramUserId: text('telegram_user_id').notNull(),
+    messengerProvider: text('messenger_provider').notNull().default('TELEGRAM'),
     telegramUsername: text('telegram_username'),
     reportedFullName: text('reported_full_name').notNull(),
     reportedPhone: text('reported_phone'),
@@ -2233,6 +2249,10 @@ export const lockerPendingSubmissions = pgTable(
       .on(table.telegramUserId)
       .where(sql`${table.status} = 'PENDING'`),
     check('locker_pending_submissions_telegram_check', sql`${table.telegramUserId} ~ '^[0-9]+$'`),
+    check(
+      'locker_pending_submissions_messenger_provider_check',
+      sql`${table.messengerProvider} IN ('TELEGRAM', 'MAX')`,
+    ),
     check('locker_pending_submissions_hash_check', sql`${table.payloadHash} ~ '^[0-9a-f]{64}$'`),
     check(
       'locker_pending_submissions_reason_check',

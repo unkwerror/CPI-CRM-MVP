@@ -1,0 +1,2 @@
+CREATE UNIQUE INDEX "contact_points_max_stable_id_uidx" ON "contact_points" USING btree ("messenger_stable_id") WHERE "contact_points"."type" = 'MAX' and "contact_points"."messenger_stable_id" is not null and "contact_points"."archived_at" is null;--> statement-breakpoint
+ALTER TABLE "contact_points" ADD CONSTRAINT "contact_points_max_stable_id_check" CHECK ("contact_points"."type" <> 'MAX' or "contact_points"."messenger_stable_id" is null or "contact_points"."messenger_stable_id" ~ '^[0-9]+$');

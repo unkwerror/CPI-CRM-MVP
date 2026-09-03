@@ -134,6 +134,20 @@
       "when": 1787586734262,
       "tag": "0018_little_inhumans",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1787641497868,
+      "tag": "0019_late_sprite",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1787644386905,
+      "tag": "0020_talented_khan",
+      "breakpoints": true
     }
   ]
 }

@@ -1,0 +1,4 @@
+ALTER TABLE "locker_pending_submissions" ADD COLUMN "messenger_provider" text DEFAULT 'TELEGRAM' NOT NULL;--> statement-breakpoint
+ALTER TABLE "locker_submission_links" ADD COLUMN "messenger_provider" text DEFAULT 'TELEGRAM' NOT NULL;--> statement-breakpoint
+ALTER TABLE "locker_pending_submissions" ADD CONSTRAINT "locker_pending_submissions_messenger_provider_check" CHECK ("locker_pending_submissions"."messenger_provider" IN ('TELEGRAM', 'MAX'));--> statement-breakpoint
+ALTER TABLE "locker_submission_links" ADD CONSTRAINT "locker_submission_links_messenger_provider_check" CHECK ("locker_submission_links"."messenger_provider" IN ('TELEGRAM', 'MAX'));

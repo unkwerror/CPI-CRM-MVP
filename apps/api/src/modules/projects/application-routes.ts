@@ -18,10 +18,19 @@ const PROJECT_STATUSES = ['IDEA', 'ACTIVE', 'PAUSED', 'COMPLETED', 'ARCHIVED'] a
 const LockerIdentity = Type.Object(
   {
     lockerUserId: Type.String({ format: 'uuid' }),
-    telegramUserId: Type.String({ pattern: '^[0-9]+$', maxLength: 32 }),
+    telegramUserId: Type.Optional(Type.String({ pattern: '^[0-9]+$', maxLength: 32 })),
+    messengerProvider: Type.Optional(Type.Union([Type.Literal('telegram'), Type.Literal('max')])),
+    messengerUserId: Type.Optional(Type.String({ pattern: '^[0-9]+$', maxLength: 32 })),
   },
   { additionalProperties: false },
 );
+
+type LockerProjectIdentity = {
+  lockerUserId: string;
+  telegramUserId?: string;
+  messengerProvider?: 'telegram' | 'max';
+  messengerUserId?: string;
+};
 
 const LOCKER_ACTOR: AuthUser = {
   sub: 'locker-integration',
@@ -149,14 +158,9 @@ export async function registerProjectApplicationRoutes(app: FastifyInstance): Pr
       },
     },
     async (request) => {
-      const identity = request.query as { lockerUserId: string; telegramUserId: string };
+      const identity = request.query as LockerProjectIdentity;
       const organization = await getOrganizationContext(app.pool);
-      const personId = await resolveIntegrationPerson(
-        app.pool,
-        organization.id,
-        identity.lockerUserId,
-        identity.telegramUserId,
-      );
+      const personId = await resolveIntegrationPerson(app.pool, organization.id, identity);
 
       const [catalog, mine, applications, incoming] = await Promise.all([
         app.pool.query(
@@ -243,8 +247,7 @@ export async function registerProjectApplicationRoutes(app: FastifyInstance): Pr
         summary: 'Подать заявку на создание проекта или участие',
         body: Type.Object(
           {
-            lockerUserId: Type.String({ format: 'uuid' }),
-            telegramUserId: Type.String({ pattern: '^[0-9]+$', maxLength: 32 }),
+            ...LockerIdentity.properties,
             type: Type.Union(APPLICATION_TYPES.map((type) => Type.Literal(type))),
             projectId: Type.Optional(Type.String({ format: 'uuid' })),
             proposedName: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
@@ -257,9 +260,7 @@ export async function registerProjectApplicationRoutes(app: FastifyInstance): Pr
       },
     },
     async (request, reply) => {
-      const body = request.body as {
-        lockerUserId: string;
-        telegramUserId: string;
+      const body = request.body as LockerProjectIdentity & {
         type: (typeof APPLICATION_TYPES)[number];
         projectId?: string;
         proposedName?: string;
@@ -269,12 +270,7 @@ export async function registerProjectApplicationRoutes(app: FastifyInstance): Pr
       };
       const organization = await getOrganizationContext(app.pool);
       const created = await transaction(app.pool, async (client) => {
-        const personId = await resolveIntegrationPerson(
-          client,
-          organization.id,
-          body.lockerUserId,
-          body.telegramUserId,
-        );
+        const personId = await resolveIntegrationPerson(client, organization.id, body);
         if (body.type === 'CREATE' && !body.proposedName?.trim()) {
           throw new HttpProblem(400, 'Укажите название проекта');
         }
@@ -348,8 +344,7 @@ export async function registerProjectApplicationRoutes(app: FastifyInstance): Pr
         params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
         body: Type.Object(
           {
-            lockerUserId: Type.String({ format: 'uuid' }),
-            telegramUserId: Type.String({ pattern: '^[0-9]+$', maxLength: 32 }),
+            ...LockerIdentity.properties,
             decision: Type.Union(REVIEW_DECISIONS.map((decision) => Type.Literal(decision))),
             comment: Type.Optional(Type.String({ maxLength: 5_000 })),
           },
@@ -359,20 +354,13 @@ export async function registerProjectApplicationRoutes(app: FastifyInstance): Pr
     },
     async (request) => {
       const applicationId = (request.params as { id: string }).id;
-      const body = request.body as {
-        lockerUserId: string;
-        telegramUserId: string;
+      const body = request.body as LockerProjectIdentity & {
         decision: ReviewDecision;
         comment?: string;
       };
       const organization = await getOrganizationContext(app.pool);
       return transaction(app.pool, async (client) => {
-        const reviewerPersonId = await resolveIntegrationPerson(
-          client,
-          organization.id,
-          body.lockerUserId,
-          body.telegramUserId,
-        );
+        const reviewerPersonId = await resolveIntegrationPerson(client, organization.id, body);
         return reviewApplication(client, {
           organizationId: organization.id,
           applicationId,
@@ -395,10 +383,11 @@ export async function registerProjectApplicationRoutes(app: FastifyInstance): Pr
         params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
         body: Type.Object(
           {
-            lockerUserId: Type.String({ format: 'uuid' }),
-            telegramUserId: Type.String({ pattern: '^[0-9]+$', maxLength: 32 }),
+            ...LockerIdentity.properties,
             inviteeLockerUserId: Type.String({ format: 'uuid' }),
-            inviteeTelegramUserId: Type.String({ pattern: '^[0-9]+$', maxLength: 32 }),
+            inviteeTelegramUserId: Type.Optional(
+              Type.String({ pattern: '^[0-9]+$', maxLength: 32 }),
+            ),
             role: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
           },
           { additionalProperties: false },
@@ -407,27 +396,18 @@ export async function registerProjectApplicationRoutes(app: FastifyInstance): Pr
     },
     async (request, reply) => {
       const projectId = (request.params as { id: string }).id;
-      const body = request.body as {
-        lockerUserId: string;
-        telegramUserId: string;
+      const body = request.body as LockerProjectIdentity & {
         inviteeLockerUserId: string;
-        inviteeTelegramUserId: string;
+        inviteeTelegramUserId?: string;
         role?: string;
       };
       const organization = await getOrganizationContext(app.pool);
       const invited = await transaction(app.pool, async (client) => {
-        const inviterPersonId = await resolveIntegrationPerson(
-          client,
-          organization.id,
-          body.lockerUserId,
-          body.telegramUserId,
-        );
-        const inviteePersonId = await resolveIntegrationPerson(
-          client,
-          organization.id,
-          body.inviteeLockerUserId,
-          body.inviteeTelegramUserId,
-        );
+        const inviterPersonId = await resolveIntegrationPerson(client, organization.id, body);
+        const inviteePersonId = await resolveIntegrationPerson(client, organization.id, {
+          lockerUserId: body.inviteeLockerUserId,
+          ...(body.inviteeTelegramUserId ? { telegramUserId: body.inviteeTelegramUserId } : {}),
+        });
         if (inviterPersonId === inviteePersonId) {
           throw new HttpProblem(409, 'Вы уже состоите в этом проекте');
         }
@@ -734,7 +714,9 @@ export async function registerProjectApplicationRoutes(app: FastifyInstance): Pr
         body: Type.Object(
           {
             inviteeLockerUserId: Type.String({ format: 'uuid' }),
-            inviteeTelegramUserId: Type.String({ pattern: '^[0-9]+$', maxLength: 32 }),
+            inviteeTelegramUserId: Type.Optional(
+              Type.String({ pattern: '^[0-9]+$', maxLength: 32 }),
+            ),
             role: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
           },
           { additionalProperties: false },
@@ -745,18 +727,16 @@ export async function registerProjectApplicationRoutes(app: FastifyInstance): Pr
       const projectId = (request.params as { id: string }).id;
       const body = request.body as {
         inviteeLockerUserId: string;
-        inviteeTelegramUserId: string;
+        inviteeTelegramUserId?: string;
         role?: string;
       };
       const organization = await getOrganizationContext(app.pool);
       const membership = await transaction(app.pool, async (client) => {
         await assertLockerProject(client, projectId, organization.id, true);
-        const personId = await resolveIntegrationPerson(
-          client,
-          organization.id,
-          body.inviteeLockerUserId,
-          body.inviteeTelegramUserId,
-        );
+        const personId = await resolveIntegrationPerson(client, organization.id, {
+          lockerUserId: body.inviteeLockerUserId,
+          ...(body.inviteeTelegramUserId ? { telegramUserId: body.inviteeTelegramUserId } : {}),
+        });
         const result = await upsertLockerProjectMember(
           client,
           projectId,
@@ -972,9 +952,11 @@ function projectContextSelect(): string {
 async function resolveIntegrationPerson(
   client: Pick<PoolClient, 'query'>,
   organizationId: string,
-  lockerUserId: string,
-  telegramUserId: string,
+  identity: LockerProjectIdentity,
 ): Promise<string> {
+  const provider = identity.messengerProvider ?? 'telegram';
+  const messengerUserId = identity.messengerUserId ?? identity.telegramUserId;
+  const namespace = provider === 'max' ? 'locker.max' : 'locker.telegram';
   const result = await client.query<{ person_id: string }>(
     `SELECT DISTINCT COALESCE(person.merged_into_person_id, person.id) AS person_id
        FROM external_identities identity
@@ -983,8 +965,8 @@ async function resolveIntegrationPerson(
         AND identity.archived_at IS NULL
         AND person.archived_at IS NULL
         AND ((identity.source_namespace = 'locker.user' AND identity.external_id = $2)
-          OR (identity.source_namespace = 'locker.telegram' AND identity.external_id = $3))`,
-    [organizationId, lockerUserId, telegramUserId],
+          OR ($3::text IS NOT NULL AND identity.source_namespace = $4 AND identity.external_id = $3))`,
+    [organizationId, identity.lockerUserId, messengerUserId ?? null, namespace],
   );
   const personIds = [...new Set(result.rows.map((row) => row.person_id))];
   if (personIds.length === 0) {

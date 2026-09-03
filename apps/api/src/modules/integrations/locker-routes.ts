@@ -54,8 +54,25 @@ const nullableText = (maximum: number) =>
 const LockerUser = Type.Object(
   {
     lockerUserId: Type.String({ format: 'uuid' }),
-    telegramUserId: Type.String({ pattern: '^[0-9]+$', maxLength: 32 }),
+    messengerProvider: Type.Optional(Type.Union([Type.Literal('telegram'), Type.Literal('max')])),
+    messengerUserId: Type.Optional(Type.String({ pattern: '^[0-9]+$', maxLength: 32 })),
+    telegramUserId: Type.Optional(Type.String({ pattern: '^[0-9]+$', maxLength: 32 })),
+    maxUserId: Type.Optional(Type.String({ pattern: '^[0-9]+$', maxLength: 32 })),
     telegramUsername: nullableText(64),
+    maxUsername: nullableText(64),
+    messengerIdentities: Type.Optional(
+      Type.Array(
+        Type.Object(
+          {
+            provider: Type.Union([Type.Literal('telegram'), Type.Literal('max')]),
+            externalUserId: Type.String({ pattern: '^[0-9]+$', maxLength: 32 }),
+            username: nullableText(64),
+          },
+          { additionalProperties: false },
+        ),
+        { maxItems: 2 },
+      ),
+    ),
     fullName: Type.String({ minLength: 1, maxLength: 500 }),
     phone: nullableText(100),
     organization: nullableText(500),
@@ -143,8 +160,17 @@ const SyncBody = Type.Object(
 
 type LockerUserInput = {
   lockerUserId: string;
-  telegramUserId: string;
+  messengerProvider?: 'telegram' | 'max';
+  messengerUserId?: string;
+  telegramUserId?: string;
+  maxUserId?: string;
   telegramUsername?: string | null;
+  maxUsername?: string | null;
+  messengerIdentities?: Array<{
+    provider: 'telegram' | 'max';
+    externalUserId: string;
+    username?: string | null;
+  }>;
   fullName: string;
   phone?: string | null;
   organization?: string | null;
@@ -192,6 +218,68 @@ export type LockerSyncInput = {
 
 type LockerPersonResolution = 'EXTERNAL_ID' | 'CONTACT' | 'CREATED' | 'RESTORED';
 
+type LockerMessenger = {
+  provider: 'telegram' | 'max';
+  externalUserId: string;
+  username: string | null;
+  contactType: 'TELEGRAM' | 'MAX';
+  namespace: 'locker.telegram' | 'locker.max';
+  label: 'Telegram' | 'MAX';
+};
+
+function lockerMessengers(user: LockerUserInput): LockerMessenger[] {
+  const input = [
+    ...(user.messengerIdentities ?? []),
+    ...(user.telegramUserId
+      ? [
+          {
+            provider: 'telegram' as const,
+            externalUserId: user.telegramUserId,
+            username: user.telegramUsername,
+          },
+        ]
+      : []),
+    ...(user.maxUserId
+      ? [{ provider: 'max' as const, externalUserId: user.maxUserId, username: user.maxUsername }]
+      : []),
+    ...(user.messengerProvider && user.messengerUserId
+      ? [
+          {
+            provider: user.messengerProvider,
+            externalUserId: user.messengerUserId,
+            username:
+              user.messengerProvider === 'telegram' ? user.telegramUsername : user.maxUsername,
+          },
+        ]
+      : []),
+  ];
+  const unique = new Map<string, LockerMessenger>();
+  for (const identity of input) {
+    if (!/^\d{1,32}$/u.test(identity.externalUserId)) continue;
+    unique.set(`${identity.provider}:${identity.externalUserId}`, {
+      provider: identity.provider,
+      externalUserId: identity.externalUserId,
+      username: identity.username?.trim() || null,
+      contactType: identity.provider === 'telegram' ? 'TELEGRAM' : 'MAX',
+      namespace: identity.provider === 'telegram' ? 'locker.telegram' : 'locker.max',
+      label: identity.provider === 'telegram' ? 'Telegram' : 'MAX',
+    });
+  }
+  return [...unique.values()];
+}
+
+function primaryLockerMessenger(user: LockerUserInput): LockerMessenger {
+  const identities = lockerMessengers(user);
+  const preferred = user.messengerProvider
+    ? identities.find((identity) => identity.provider === user.messengerProvider)
+    : undefined;
+  const identity = preferred ?? identities[0];
+  if (!identity) {
+    throw new HttpProblem(422, 'Не передан идентификатор Telegram или MAX');
+  }
+  return identity;
+}
+
 export async function registerLockerIntegrationRoutes(app: FastifyInstance): Promise<void> {
   const authorize = requireLockerIntegration(app.config.locker.integrationToken);
 
@@ -207,7 +295,7 @@ export async function registerLockerIntegrationRoutes(app: FastifyInstance): Pro
       const organization = await getOrganizationContext(app.pool);
       try {
         return await transaction(app.pool, async (client) => {
-          await lockLockerUser(client, user.telegramUserId);
+          await lockLockerUser(client, user);
           return resolveLockerPerson(client, organization, user, request.id);
         });
       } catch (error) {
@@ -257,7 +345,7 @@ export async function registerLockerIntegrationRoutes(app: FastifyInstance): Pro
       const organization = await getOrganizationContext(app.pool);
       try {
         return await transaction(app.pool, async (client) => {
-          await lockLockerUser(client, body.user.telegramUserId);
+          await lockLockerUser(client, body.user);
           const person = await resolveLockerPerson(client, organization, body.user, request.id);
           const eventId = await resolveLockerEvent(client, organization, body.event, request.id);
           const inserted = await client.query<{ id: string }>(
@@ -429,6 +517,7 @@ export async function ingestLockerSubmission(
   const existing = await client.query<{
     locker_user_id: string;
     telegram_user_id: string;
+    messenger_provider: 'TELEGRAM' | 'MAX';
     locker_event_id: string;
     person_id: string;
     event_id: string;
@@ -436,7 +525,7 @@ export async function ingestLockerSubmission(
     artifact_version_id: string;
     payload_hash: string;
   }>(
-    `SELECT locker_user_id, telegram_user_id, locker_event_id,
+    `SELECT locker_user_id, telegram_user_id, messenger_provider, locker_event_id,
             person_id, event_id, artifact_id, artifact_version_id, payload_hash
        FROM locker_submission_links
       WHERE locker_submission_id = $1`,
@@ -460,7 +549,7 @@ export async function ingestLockerSubmission(
       );
       await client.query(
         `UPDATE artifacts
-            SET description = 'Вопрос участника из Telegram-бота', updated_at = now()
+            SET description = 'Вопрос участника из бота', updated_at = now()
           WHERE id = $1`,
         [existingLink.artifact_id],
       );
@@ -491,7 +580,7 @@ export async function ingestLockerSubmission(
     return { ...mapped, ...(taskId ? { taskId } : {}), replayed: true };
   }
 
-  await lockLockerUser(client, body.user.telegramUserId);
+  await lockLockerUser(client, body.user);
   const person = await resolveLockerPerson(client, organization, body.user, requestId);
   const eventId = await resolveLockerEvent(client, organization, body.event, requestId);
   await client.query(
@@ -548,13 +637,14 @@ async function parkLockerSubmission(
   review: LockerReviewRequired,
   requestId: string,
 ): Promise<{ status: 'PENDING_REVIEW'; pendingId: string; reasonCode: LockerReviewReason }> {
+  const messenger = primaryLockerMessenger(body.user);
   const parked = await client.query<{ id: string }>(
     `INSERT INTO locker_pending_submissions
-       (organization_id, locker_submission_id, locker_user_id, telegram_user_id,
+       (organization_id, locker_submission_id, locker_user_id, telegram_user_id, messenger_provider,
         telegram_username, reported_full_name, reported_phone, reported_organization,
         locker_event_id, event_title, submitted_at, payload, payload_hash,
         reason_code, reason_detail)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15, $16)
      ON CONFLICT (locker_submission_id) DO UPDATE
        SET payload = EXCLUDED.payload,
            payload_hash = EXCLUDED.payload_hash,
@@ -574,8 +664,9 @@ async function parkLockerSubmission(
       organization.id,
       body.submission.lockerSubmissionId,
       body.user.lockerUserId,
-      body.user.telegramUserId,
-      body.user.telegramUsername ? cleanText(body.user.telegramUsername, 64) : null,
+      messenger.externalUserId,
+      messenger.provider.toUpperCase(),
+      messenger.username ? cleanText(messenger.username, 64) : null,
       cleanText(body.user.fullName, 500),
       body.user.phone ? cleanText(body.user.phone, 100) : null,
       body.user.organization ? cleanText(body.user.organization, 500) : null,
@@ -597,7 +688,8 @@ async function parkLockerSubmission(
     entityId: pendingId,
     after: {
       lockerSubmissionId: body.submission.lockerSubmissionId,
-      telegramUserId: body.user.telegramUserId,
+      messengerProvider: messenger.provider,
+      messengerUserId: messenger.externalUserId,
       reasonCode: review.reasonCode,
       reasonDetail: review.detail,
     },
@@ -611,8 +703,13 @@ async function assertNotDeletedIdentity(
   user: LockerUserInput,
 ): Promise<void> {
   const hashes = [
-    hashIdentityKey('TELEGRAM_ID', user.telegramUserId),
     hashIdentityKey('LOCKER_USER', user.lockerUserId),
+    ...lockerMessengers(user).map((identity) =>
+      hashIdentityKey(
+        identity.provider === 'telegram' ? 'TELEGRAM_ID' : 'MAX_ID',
+        identity.externalUserId,
+      ),
+    ),
   ];
   const tombstone = await client.query<{ deleted_at: Date }>(
     `SELECT deleted_at FROM person_deletion_tombstones
@@ -628,9 +725,10 @@ async function assertNotDeletedIdentity(
   }
 }
 
-async function lockLockerUser(client: PoolClient, telegramUserId: string): Promise<void> {
+async function lockLockerUser(client: PoolClient, user: LockerUserInput): Promise<void> {
+  const messenger = primaryLockerMessenger(user);
   await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('locker-user:' || $1, 0))`, [
-    telegramUserId,
+    `${messenger.provider}:${messenger.externalUserId}`,
   ]);
 }
 
@@ -640,6 +738,7 @@ export async function resolveLockerPerson(
   user: LockerUserInput,
   requestId: string,
 ): Promise<{ personId: string; resolution: LockerPersonResolution }> {
+  const messenger = primaryLockerMessenger(user);
   const linked = await client.query<{ person_id: string }>(
     `SELECT DISTINCT COALESCE(person.merged_into_person_id, person.id) AS person_id
        FROM external_identities identity
@@ -648,8 +747,8 @@ export async function resolveLockerPerson(
         AND identity.archived_at IS NULL
         AND person.archived_at IS NULL
         AND ((identity.source_namespace = 'locker.user' AND identity.external_id = $2)
-          OR (identity.source_namespace = 'locker.telegram' AND identity.external_id = $3))`,
-    [organization.id, user.lockerUserId, user.telegramUserId],
+          OR (identity.source_namespace = $3 AND identity.external_id = $4))`,
+    [organization.id, user.lockerUserId, messenger.namespace, messenger.externalUserId],
   );
   const hinted = user.crmPersonId
     ? await client.query<{ person_id: string }>(
@@ -680,22 +779,22 @@ export async function resolveLockerPerson(
   let resolution: LockerPersonResolution = 'EXTERNAL_ID';
 
   if (!personId) {
-    const telegramMatch = await client.query<{ person_id: string }>(
+    const messengerMatch = await client.query<{ person_id: string }>(
       `SELECT DISTINCT COALESCE(person.merged_into_person_id, person.id) AS person_id
          FROM contact_points contact
          JOIN persons person ON person.id = contact.person_id
         WHERE person.organization_id = $1
           AND person.archived_at IS NULL
           AND contact.archived_at IS NULL
-          AND contact.type = 'TELEGRAM'
+          AND contact.type = '${messenger.contactType}'
           AND contact.messenger_stable_id = $2`,
-      [organization.id, user.telegramUserId],
+      [organization.id, messenger.externalUserId],
     );
-    const ids = [...new Set(telegramMatch.rows.map((row) => row.person_id))];
+    const ids = [...new Set(messengerMatch.rows.map((row) => row.person_id))];
     if (ids.length > 1)
       throw new LockerReviewRequired(
         'PERSON_AMBIGUOUS',
-        'Telegram ID указан у нескольких участников CRM',
+        `${messenger.label} ID указан у нескольких участников CRM`,
       );
     personId = ids[0];
   }
@@ -777,7 +876,7 @@ export async function resolveLockerPerson(
                CASE WHEN $8::boolean THEN 'UNKNOWN_LEGACY'::activation_state
                     ELSE 'NOT_ACTIVATED'::activation_state END,
                'UNKNOWN', $7, $8,
-               CASE WHEN $8::boolean THEN 'Нужно уточнить полное ФИО из Telegram-бота'
+               CASE WHEN $8::boolean THEN 'Нужно уточнить полное ФИО из бота'
                     ELSE NULL END)
        RETURNING id`,
       [
@@ -813,7 +912,8 @@ export async function resolveLockerPerson(
       entityId: personId,
       after: {
         lockerUserId: user.lockerUserId,
-        telegramUserId: user.telegramUserId,
+        messengerProvider: messenger.provider,
+        messengerUserId: messenger.externalUserId,
         profileNeedsReview: fio === null,
       },
     });
@@ -821,31 +921,31 @@ export async function resolveLockerPerson(
     resolution = 'CONTACT';
   }
 
-  const conflictingTelegramIdentity = await client.query<{ telegram_user_id: string }>(
+  const conflictingMessengerIdentity = await client.query<{ telegram_user_id: string }>(
     `WITH cluster AS (
        SELECT id FROM persons WHERE id = $1 OR merged_into_person_id = $1
      ), identities AS (
        SELECT contact.messenger_stable_id AS telegram_user_id
          FROM contact_points contact
         WHERE contact.person_id IN (SELECT id FROM cluster)
-          AND contact.type = 'TELEGRAM' AND contact.archived_at IS NULL
+          AND contact.type = $3 AND contact.archived_at IS NULL
           AND contact.messenger_stable_id IS NOT NULL
        UNION
        SELECT identity.external_id
          FROM external_identities identity
         WHERE identity.person_id IN (SELECT id FROM cluster)
-          AND identity.source_namespace = 'locker.telegram'
+          AND identity.source_namespace = $4
           AND identity.archived_at IS NULL
      )
      SELECT telegram_user_id FROM identities
       WHERE telegram_user_id <> $2
       ORDER BY telegram_user_id LIMIT 1`,
-    [personId, user.telegramUserId],
+    [personId, messenger.externalUserId, messenger.contactType, messenger.namespace],
   );
-  if (!hasLockerIdentityLink && conflictingTelegramIdentity.rows[0]) {
+  if (!hasLockerIdentityLink && conflictingMessengerIdentity.rows[0]) {
     throw new LockerReviewRequired(
       'IDENTITY_CONFLICT',
-      'Участник CRM уже связан с другим Telegram ID',
+      `Участник CRM уже связан с другим ${messenger.label} ID`,
     );
   }
 
@@ -862,7 +962,8 @@ export async function resolveLockerPerson(
     entityId: personId,
     after: {
       lockerUserId: user.lockerUserId,
-      telegramUserId: user.telegramUserId,
+      messengerProvider: messenger.provider,
+      messengerUserId: messenger.externalUserId,
       resolution,
     },
   });
@@ -881,6 +982,7 @@ async function restoreArchivedLockerPerson(
   fio: ReturnType<typeof parseRussianFullName>,
   requestId: string,
 ): Promise<string | null> {
+  const messenger = primaryLockerMessenger(user);
   const archived = await client.query<{ id: string; canonical_full_name: string }>(
     `SELECT DISTINCT person.id, person.canonical_full_name
        FROM persons person
@@ -893,17 +995,23 @@ async function restoreArchivedLockerPerson(
              WHERE identity.person_id = person.id
                AND identity.organization_id = $1
                AND ((identity.source_namespace = 'locker.user' AND identity.external_id = $2)
-                 OR (identity.source_namespace = 'locker.telegram' AND identity.external_id = $3))
+                 OR (identity.source_namespace = $3 AND identity.external_id = $4))
           )
           OR EXISTS (
             SELECT 1 FROM contact_points contact
              WHERE contact.person_id = person.id
-               AND contact.type = 'TELEGRAM'
-               AND contact.messenger_stable_id = $3
+               AND contact.type = $5
+               AND contact.messenger_stable_id = $4
           )
         )
       ORDER BY person.id`,
-    [organization.id, user.lockerUserId, user.telegramUserId],
+    [
+      organization.id,
+      user.lockerUserId,
+      messenger.namespace,
+      messenger.externalUserId,
+      messenger.contactType,
+    ],
   );
   if (archived.rows.length === 0) return null;
   if (archived.rows.length > 1) {
@@ -929,7 +1037,7 @@ async function restoreArchivedLockerPerson(
                                     ELSE activation_state END,
             profile_needs_review = $7,
             profile_review_reason = CASE WHEN $7::boolean
-              THEN 'Нужно уточнить полное ФИО из Telegram-бота' ELSE NULL END,
+              THEN 'Нужно уточнить полное ФИО из бота' ELSE NULL END,
             updated_at = now(), version = version + 1
       WHERE id = $1`,
     [
@@ -955,13 +1063,18 @@ async function restoreArchivedLockerPerson(
     );
   }
   await client.query(
+    `UPDATE person_aliases
+        SET is_preferred = false, updated_at = now(), version = version + 1
+      WHERE person_id = $1 AND is_preferred AND archived_at IS NULL`,
+    [personId],
+  );
+  await client.query(
     `INSERT INTO person_aliases
        (person_id, raw_value, normalized_value, alias_type, data_origin, is_preferred)
-     SELECT $1, $2, $3, 'SOURCE_VARIANT', 'LIVE', true
-      WHERE NOT EXISTS (
-        SELECT 1 FROM person_aliases
-         WHERE person_id = $1 AND normalized_value = $3 AND archived_at IS NULL
-      )`,
+     VALUES ($1, $2, $3, 'SOURCE_VARIANT', 'LIVE', true)
+     ON CONFLICT (person_id, normalized_value, alias_type) WHERE archived_at IS NULL
+     DO UPDATE SET raw_value = EXCLUDED.raw_value, is_preferred = true,
+                   updated_at = now(), version = person_aliases.version + 1`,
     [personId, displayName, normalizedDisplayName],
   );
   await writeAudit(client, {
@@ -974,7 +1087,8 @@ async function restoreArchivedLockerPerson(
     after: {
       canonicalFullName: displayName,
       lockerUserId: user.lockerUserId,
-      telegramUserId: user.telegramUserId,
+      messengerProvider: messenger.provider,
+      messengerUserId: messenger.externalUserId,
       profileNeedsReview: fio === null,
     },
   });
@@ -984,8 +1098,9 @@ async function restoreArchivedLockerPerson(
 function lockerDisplayName(user: LockerUserInput): string {
   const supplied = cleanText(user.fullName, 500);
   if (supplied) return supplied;
-  if (user.telegramUsername?.trim()) return `@${cleanText(user.telegramUsername, 64)}`;
-  return `Telegram ID ${user.telegramUserId}`;
+  const messenger = primaryLockerMessenger(user);
+  if (messenger.username) return `@${cleanText(messenger.username, 64)}`;
+  return `${messenger.label} ID ${messenger.externalUserId}`;
 }
 
 /** Обновляет только временные карточки: подтверждённое оператором ФИО не перетирается ботом. */
@@ -1019,7 +1134,7 @@ async function refreshLockerProfile(
                                     THEN 'NOT_ACTIVATED'::activation_state ELSE activation_state END,
             profile_needs_review = $7,
             profile_review_reason = CASE WHEN $7::boolean
-              THEN 'Нужно уточнить полное ФИО из Telegram-бота' ELSE NULL END,
+              THEN 'Нужно уточнить полное ФИО из бота' ELSE NULL END,
             updated_at = now(), version = version + 1
       WHERE id = $1`,
     [
@@ -1033,13 +1148,18 @@ async function refreshLockerProfile(
     ],
   );
   await client.query(
+    `UPDATE person_aliases
+        SET is_preferred = false, updated_at = now(), version = version + 1
+      WHERE person_id = $1 AND is_preferred AND archived_at IS NULL`,
+    [personId],
+  );
+  await client.query(
     `INSERT INTO person_aliases
        (person_id, raw_value, normalized_value, alias_type, data_origin, is_preferred)
-     SELECT $1, $2, $3, 'SOURCE_VARIANT', 'LIVE', true
-      WHERE NOT EXISTS (
-        SELECT 1 FROM person_aliases
-         WHERE person_id = $1 AND normalized_value = $3 AND archived_at IS NULL
-      )`,
+     VALUES ($1, $2, $3, 'SOURCE_VARIANT', 'LIVE', true)
+     ON CONFLICT (person_id, normalized_value, alias_type) WHERE archived_at IS NULL
+     DO UPDATE SET raw_value = EXCLUDED.raw_value, is_preferred = true,
+                   updated_at = now(), version = person_aliases.version + 1`,
     [personId, displayName, normalizedDisplayName],
   );
   if (row.canonical_full_name !== displayName || fio) {
@@ -1064,10 +1184,14 @@ async function upsertLockerIdentities(
   personId: string,
   user: LockerUserInput,
 ): Promise<void> {
-  for (const [namespace, externalId] of [
-    ['locker.user', user.lockerUserId],
-    ['locker.telegram', user.telegramUserId],
-  ] as const) {
+  const identities = [
+    { namespace: 'locker.user', externalId: user.lockerUserId },
+    ...lockerMessengers(user).map((identity) => ({
+      namespace: identity.namespace,
+      externalId: identity.externalUserId,
+    })),
+  ];
+  for (const { namespace, externalId } of identities) {
     await client.query(
       `INSERT INTO external_identities
          (organization_id, source_namespace, external_id, person_id)
@@ -1086,63 +1210,73 @@ async function upsertLockerContacts(
   user: LockerUserInput,
   normalizedPhone: string | null,
 ): Promise<void> {
-  const username = user.telegramUsername ? normalizeTelegramUsername(user.telegramUsername) : null;
-  const telegramRaw = username ? `@${username}` : `Telegram ID ${user.telegramUserId}`;
-  const telegramNormalized = username ?? `id:${user.telegramUserId}`;
-  await client.query(
-    `UPDATE contact_points
-        SET is_primary = false, updated_at = now()
-      WHERE person_id IN (
-              SELECT id FROM persons WHERE id = $1 OR merged_into_person_id = $1
-            )
-        AND type = 'TELEGRAM' AND archived_at IS NULL
-        AND messenger_stable_id IS DISTINCT FROM $2`,
-    [personId, user.telegramUserId],
-  );
-  const telegram = await client.query<{ id: string }>(
-    `SELECT id FROM contact_points
-      WHERE person_id IN (
-              SELECT id FROM persons WHERE id = $1 OR merged_into_person_id = $1
-            )
-        AND type = 'TELEGRAM'
-        AND (
-          messenger_stable_id = $2
-          OR (messenger_stable_id IS NULL AND normalized_value = $3)
-        )
-        AND archived_at IS NULL
-      ORDER BY (messenger_stable_id = $2) DESC NULLS LAST, is_verified DESC,
-               is_primary DESC, created_at, id
-      LIMIT 1`,
-    [personId, user.telegramUserId, telegramNormalized],
-  );
-  if (telegram.rows[0]) {
+  for (const messenger of lockerMessengers(user)) {
+    const username = messenger.username ? normalizeTelegramUsername(messenger.username) : null;
+    const messengerRaw = username
+      ? `@${username}`
+      : `${messenger.label} ID ${messenger.externalUserId}`;
+    const messengerNormalized = username ?? `id:${messenger.externalUserId}`;
     await client.query(
       `UPDATE contact_points
-          SET archived_at = now(), is_primary = false,
-              updated_at = now(), version = version + 1
+          SET is_primary = false, updated_at = now()
         WHERE person_id IN (
                 SELECT id FROM persons WHERE id = $1 OR merged_into_person_id = $1
               )
-          AND type = 'TELEGRAM' AND normalized_value = $2
-          AND messenger_stable_id IS NULL AND archived_at IS NULL AND id <> $3`,
-      [personId, telegramNormalized, telegram.rows[0].id],
+          AND type = $2 AND archived_at IS NULL
+          AND messenger_stable_id IS DISTINCT FROM $3`,
+      [personId, messenger.contactType, messenger.externalUserId],
     );
-    await client.query(
-      `UPDATE contact_points
-          SET raw_value = $2, normalized_value = $3, messenger_stable_id = $4,
-              is_primary = true, is_verified = true,
-              updated_at = now(), version = version + 1
-        WHERE id = $1`,
-      [telegram.rows[0].id, telegramRaw, telegramNormalized, user.telegramUserId],
+    const existing = await client.query<{ id: string }>(
+      `SELECT id FROM contact_points
+        WHERE person_id IN (
+                SELECT id FROM persons WHERE id = $1 OR merged_into_person_id = $1
+              )
+          AND type = $3
+          AND (
+            messenger_stable_id = $2
+            OR (messenger_stable_id IS NULL AND normalized_value = $4)
+          )
+          AND archived_at IS NULL
+        ORDER BY (messenger_stable_id = $2) DESC NULLS LAST, is_verified DESC,
+                 is_primary DESC, created_at, id
+        LIMIT 1`,
+      [personId, messenger.externalUserId, messenger.contactType, messengerNormalized],
     );
-  } else {
-    await client.query(
-      `INSERT INTO contact_points
-         (person_id, type, raw_value, normalized_value, messenger_stable_id,
-          is_primary, is_verified, data_origin)
-       VALUES ($1, 'TELEGRAM', $2, $3, $4, true, true, 'LIVE')`,
-      [personId, telegramRaw, telegramNormalized, user.telegramUserId],
-    );
+    if (existing.rows[0]) {
+      await client.query(
+        `UPDATE contact_points
+            SET archived_at = now(), is_primary = false,
+                updated_at = now(), version = version + 1
+          WHERE person_id IN (
+                  SELECT id FROM persons WHERE id = $1 OR merged_into_person_id = $1
+                )
+            AND type = $2 AND normalized_value = $3
+            AND messenger_stable_id IS NULL AND archived_at IS NULL AND id <> $4`,
+        [personId, messenger.contactType, messengerNormalized, existing.rows[0].id],
+      );
+      await client.query(
+        `UPDATE contact_points
+            SET raw_value = $2, normalized_value = $3, messenger_stable_id = $4,
+                is_primary = true, is_verified = true,
+                updated_at = now(), version = version + 1
+          WHERE id = $1`,
+        [existing.rows[0].id, messengerRaw, messengerNormalized, messenger.externalUserId],
+      );
+    } else {
+      await client.query(
+        `INSERT INTO contact_points
+           (person_id, type, raw_value, normalized_value, messenger_stable_id,
+            is_primary, is_verified, data_origin)
+         VALUES ($1, $2, $3, $4, $5, true, true, 'LIVE')`,
+        [
+          personId,
+          messenger.contactType,
+          messengerRaw,
+          messengerNormalized,
+          messenger.externalUserId,
+        ],
+      );
+    }
   }
   if (normalizedPhone && user.phone) {
     await client.query(
@@ -1477,7 +1611,7 @@ async function ensureLockerEventRequestTask(
   const taskDescription = [
     `Мероприятие: ${body.event.title}`,
     question ? `Вопрос участника:\n${question}` : null,
-    `Источник: Telegram-бот`,
+    `Источник: бот`,
     `ID обращения: ${lockerEventRequestId}`,
   ]
     .filter((part): part is string => Boolean(part))
@@ -1523,15 +1657,18 @@ async function existingLockerArtifactMatchesBody(
   existing: {
     locker_user_id: string;
     telegram_user_id: string;
+    messenger_provider: 'TELEGRAM' | 'MAX';
     locker_event_id: string;
     artifact_id: string;
     artifact_version_id: string;
   },
   body: LockerSyncInput,
 ): Promise<boolean> {
+  const messenger = primaryLockerMessenger(body.user);
   if (
     existing.locker_user_id !== body.user.lockerUserId ||
-    existing.telegram_user_id !== body.user.telegramUserId ||
+    existing.telegram_user_id !== messenger.externalUserId ||
+    existing.messenger_provider !== messenger.provider.toUpperCase() ||
     existing.locker_event_id !== body.event.lockerEventId
   ) {
     return false;
@@ -1600,7 +1737,7 @@ async function createLockerArtifact(
       type.rows[0].id,
       title,
       body.submission.sourceKind === 'event_request'
-        ? 'Вопрос участника из Telegram-бота'
+        ? 'Вопрос участника из бота'
         : 'Получено из Locker',
       eventId,
       LOCKER_ACTOR.userId,
@@ -1686,13 +1823,14 @@ async function createLockerArtifact(
   );
   await client.query(
     `INSERT INTO locker_submission_links
-       (locker_submission_id, locker_user_id, telegram_user_id, person_id,
+       (locker_submission_id, locker_user_id, telegram_user_id, messenger_provider, person_id,
         locker_event_id, event_id, artifact_id, artifact_version_id, payload_hash)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
     [
       body.submission.lockerSubmissionId,
       body.user.lockerUserId,
-      body.user.telegramUserId,
+      primaryLockerMessenger(body.user).externalUserId,
+      primaryLockerMessenger(body.user).provider.toUpperCase(),
       personId,
       body.event.lockerEventId,
       eventId,
@@ -1785,10 +1923,12 @@ export function hashPayload(value: unknown): string {
 }
 
 export function hashLockerSubmissionPayload(body: LockerSyncInput): string {
+  const messenger = primaryLockerMessenger(body.user);
   return hashPayload({
     schemaVersion: body.schemaVersion,
     lockerUserId: body.user.lockerUserId,
-    telegramUserId: body.user.telegramUserId,
+    telegramUserId: messenger.externalUserId,
+    ...(messenger.provider === 'max' ? { messengerProvider: 'max' } : {}),
     lockerEventId: body.event.lockerEventId,
     submission: body.submission,
   });

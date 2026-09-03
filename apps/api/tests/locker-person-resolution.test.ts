@@ -106,15 +106,59 @@ describe('resolving a Locker participant', () => {
     await expect(
       resolveLockerPerson({ query } as unknown as PoolClient, organization, baseUser, 'req-merge'),
     ).resolves.toEqual({ personId: canonicalPersonId, resolution: 'EXTERNAL_ID' });
-    expect(query.mock.calls.some(([sql]) => String(sql).includes('WHERE telegram_user_id <> $2'))).toBe(
-      true,
-    );
+    expect(
+      query.mock.calls.some(([sql]) => String(sql).includes('WHERE telegram_user_id <> $2')),
+    ).toBe(true);
     const telegramContactLookup = query.mock.calls.find(([sql]) =>
       String(sql).includes('SELECT id FROM contact_points'),
     );
     expect(String(telegramContactLookup?.[0])).toContain(
       '(messenger_stable_id = $2) DESC NULLS LAST',
     );
+  });
+
+  it('resolves and stores a MAX identity in the same participant registry', async () => {
+    const personId = '77777777-7777-4777-8777-777777777777';
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("contact.type = 'MAX'") && sql.includes('messenger_stable_id = $2')) {
+        return { rows: [{ person_id: personId }] };
+      }
+      if (sql.includes('INSERT INTO audit_log')) return { rows: [{ id: 'audit' }] };
+      return { rows: [] };
+    });
+
+    await expect(
+      resolveLockerPerson(
+        { query } as unknown as PoolClient,
+        organization,
+        {
+          ...baseUser,
+          telegramUserId: undefined,
+          telegramUsername: undefined,
+          messengerProvider: 'max',
+          messengerUserId: '99887766',
+          maxUserId: '99887766',
+          maxUsername: 'pavel-max',
+        },
+        'req-max',
+      ),
+    ).resolves.toEqual({ personId, resolution: 'CONTACT' });
+    expect(
+      query.mock.calls.some(
+        ([sql, parameters]) =>
+          String(sql).includes('INSERT INTO external_identities') &&
+          Array.isArray(parameters) &&
+          parameters.includes('locker.max'),
+      ),
+    ).toBe(true);
+    expect(
+      query.mock.calls.some(
+        ([sql, parameters]) =>
+          String(sql).includes('INSERT INTO contact_points') &&
+          Array.isArray(parameters) &&
+          parameters.includes('MAX'),
+      ),
+    ).toBe(true);
   });
 
   it('brings back a card hidden by the full-name hygiene instead of duplicating it', async () => {
